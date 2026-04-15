@@ -76,7 +76,12 @@ class SMCStrategyAdapter:
         if start is None or end is None:
             return {}
 
-        htf_data = self._query_htf_data(start, end)
+        # HTF lookback: D1/H4 need ~100+ bars for swing detection.
+        # 6 months before test window start provides sufficient context.
+        from smc.backtest.walk_forward import _add_months
+
+        htf_lookback_start = _add_months(start, -6)
+        htf_data = self._query_htf_data(htf_lookback_start, end)
         m15_bars = bars
 
         # Run Aggregator once per M15 bar with close as current_price
