@@ -575,6 +575,129 @@ def cmd_lake_info() -> None:
 
 
 # ---------------------------------------------------------------------------
+# smc live
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="live")
+def cmd_live(
+    mode: str = typer.Option(
+        "demo",
+        "--mode",
+        help="Trading mode: demo or live.",
+    ),
+    instrument: str = typer.Option(
+        "XAUUSD",
+        "--instrument",
+        help="Instrument to trade.",
+    ),
+) -> None:
+    """Run the SMC strategy in live/demo mode.
+
+    Polls MT5 every M15 bar close, runs the strategy pipeline,
+    executes trades via the risk/execution layer, and monitors health.
+
+    Use --mode=demo for paper trading (default), --mode=live for real orders.
+    """
+    import asyncio
+
+    from smc.config import SMCConfig
+
+    cfg = SMCConfig()
+
+    # Override env based on mode argument
+    if mode == "live" and not cfg.is_live():
+        err_console.print(
+            "[red]Mode 'live' requested but SMC_ENV is not 'live'. "
+            "Set SMC_ENV=live to enable real trading.[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    if mode not in ("demo", "live"):
+        err_console.print(f"[red]Invalid mode '{mode}'. Use 'demo' or 'live'.[/red]")
+        raise typer.Exit(code=1)
+
+    console.print(
+        Panel(
+            f"Mode       : [cyan]{mode}[/cyan]\n"
+            f"Instrument : [cyan]{instrument}[/cyan]\n"
+            f"MT5 Mock   : [cyan]{cfg.mt5_mock}[/cyan]\n"
+            f"Env        : [cyan]{cfg.env}[/cyan]",
+            title="[bold]SMC Live Trading[/bold]",
+        )
+    )
+
+    try:
+        from pathlib import Path
+
+        from smc.data.adapters.mt5_mock import MT5MockAdapter, MockMT5Terminal, is_mock_mode
+        from smc.monitor.live_loop import LiveLoop
+        from smc.smc_core.detector import SMCDetector
+        from smc.strategy.aggregator import MultiTimeframeAggregator
+
+        # Build broker port
+        if cfg.mt5_mock or is_mock_mode():
+            console.print("[yellow]Running in mock mode (SimBrokerPort)[/yellow]")
+            mock_terminal = MockMT5Terminal(fixtures_dir=cfg.data_dir)
+            mock_terminal.initialize()
+
+            class _MockBrokerPort:
+                """Minimal broker port wrapping MockMT5Terminal."""
+
+                def __init__(self, terminal: MockMT5Terminal) -> None:
+                    self._terminal = terminal
+
+                def get_account_info(self) -> dict:
+                    return {"balance": 10_000.0, "equity": 10_000.0, "margin_level": None}
+
+                def get_positions(self, symbol: str) -> list:
+                    return [
+                        {"ticket": p.ticket, "symbol": p.symbol}
+                        for p in self._terminal.positions_get(symbol)
+                    ]
+
+                def get_current_price(self, symbol: str) -> float | None:
+                    tick = self._terminal.symbol_info_tick(symbol)
+                    return tick.last if tick else None
+
+            broker = _MockBrokerPort(mock_terminal)
+            data_fetcher = MT5MockAdapter(fixtures_dir=cfg.data_dir, instrument=instrument)
+        else:
+            # Real MT5 — import conditionally
+            err_console.print(
+                "[red]Real MT5 broker not yet wired. "
+                "Set SMC_MT5_MOCK=1 for paper trading.[/red]"
+            )
+            raise typer.Exit(code=1)
+
+        # Build strategy
+        detector = SMCDetector(swing_length=cfg.swing_length)
+        aggregator = MultiTimeframeAggregator(
+            detector=detector,
+            ai_regime_enabled=cfg.ai_regime_enabled,
+        )
+
+        # Build live loop
+        live_loop = LiveLoop(
+            config=cfg,
+            broker=broker,
+            data_fetcher=data_fetcher,
+            strategy=aggregator,
+            instrument=instrument,
+            journal_dir=Path("./logs/journal"),
+        )
+
+        console.print("[bold green]Starting live loop... Press Ctrl+C to stop.[/bold green]")
+        asyncio.run(live_loop.run())
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Shutdown requested by user.[/yellow]")
+    except Exception as exc:  # noqa: BLE001
+        err_console.print(f"[red]Live loop failed: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+
+# ---------------------------------------------------------------------------
 # smc health
 # ---------------------------------------------------------------------------
 
