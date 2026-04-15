@@ -23,9 +23,9 @@ __all__ = ["score_confluence"]
 
 _W_HTF_ALIGNMENT = 0.25
 _W_ZONE_QUALITY = 0.25
-_W_ENTRY_TRIGGER = 0.20
+_W_ENTRY_TRIGGER = 0.25  # Sprint 4: raised from 0.20 (low variance, needs more influence)
 _W_RR_RATIO = 0.15
-_W_LIQUIDITY = 0.15
+_W_LIQUIDITY = 0.10      # Sprint 4: lowered from 0.15 (redundant with RR, r=0.534)
 
 # Minimum tradeable score — lowered from 0.6 to 0.45 to increase
 # trade frequency while still filtering low-quality setups.
@@ -144,13 +144,10 @@ def _score_liquidity_context(
         tp2_distance = abs(entry.take_profit_2 - entry.entry_price)
         tp1_distance = abs(entry.take_profit_1 - entry.entry_price)
         if tp1_distance > 0 and tp2_distance / tp1_distance >= 1.3:
-            score += 0.3
+            score += 0.6
 
-    # Zone type bonus
-    if zone.zone_type == "ob_fvg_overlap":
-        score += 0.3
-    elif zone.zone_type == "ob":
-        score += 0.15
+    # Sprint 4: Removed zone_type bonus — already captured by _score_zone_quality
+    # (decorrelation: zone_type in both scorers caused r=0.346 correlation)
 
     return min(1.0, score)
 

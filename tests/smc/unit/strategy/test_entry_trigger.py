@@ -291,3 +291,57 @@ class TestCheckEntryShortDirection:
             1.2,
         )
         assert grade_c == "C"
+
+
+class TestATRAdaptiveSL:
+    """Sprint 4: Tests for ATR-adaptive stop-loss buffer."""
+
+    def test_compute_sl_buffer_uses_atr(self) -> None:
+        """Buffer should be ATR * 0.75 when above the floor."""
+        from smc.strategy.entry_trigger import _compute_sl_buffer
+
+        # H1 ATR = 500 points → buffer = 500 * 0.75 = 375
+        assert _compute_sl_buffer(500.0) == pytest.approx(375.0)
+
+    def test_compute_sl_buffer_respects_floor(self) -> None:
+        """Buffer should not go below 200 points floor."""
+        from smc.strategy.entry_trigger import _compute_sl_buffer
+
+        # H1 ATR = 100 points → 100 * 0.75 = 75, but floor is 200
+        assert _compute_sl_buffer(100.0) == pytest.approx(200.0)
+
+    def test_compute_sl_buffer_zero_atr_uses_floor(self) -> None:
+        """Zero ATR (insufficient data) should fall back to floor."""
+        from smc.strategy.entry_trigger import _compute_sl_buffer
+
+        assert _compute_sl_buffer(0.0) == pytest.approx(200.0)
+
+    def test_adaptive_sl_wider_than_old_fixed(
+        self,
+        m15_choch_in_zone_snapshot: SMCSnapshot,
+        bullish_ob_zone: TradeZone,
+    ) -> None:
+        """With typical H1 ATR (~471 pts), SL should be wider than old fixed 150."""
+        result = check_entry(
+            m15_choch_in_zone_snapshot, bullish_ob_zone, 2350.00, h1_atr=471.0,
+        )
+        assert result is not None
+        # buffer = max(471 * 0.75, 200) = 353.25 points > old 150
+        # SL distance in points should be > 200 (the floor)
+        assert result.risk_points > 200.0
+
+    def test_h1_atr_default_zero_uses_floor(
+        self,
+        m15_choch_in_zone_snapshot: SMCSnapshot,
+        bullish_ob_zone: TradeZone,
+    ) -> None:
+        """Default h1_atr=0 should use the 200-point floor."""
+        result_default = check_entry(
+            m15_choch_in_zone_snapshot, bullish_ob_zone, 2350.00,
+        )
+        result_explicit = check_entry(
+            m15_choch_in_zone_snapshot, bullish_ob_zone, 2350.00, h1_atr=0.0,
+        )
+        assert result_default is not None
+        assert result_explicit is not None
+        assert result_default.stop_loss == result_explicit.stop_loss

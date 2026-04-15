@@ -36,23 +36,23 @@ class TestClassifyRegime:
         assert classify_regime(df) == "transitional"
 
     def test_high_volatility_returns_trending(self) -> None:
-        """Large bar ranges (ATR% > 1.2) should classify as trending."""
+        """Large bar ranges (ATR% >= 1.4) should classify as trending."""
         # bar_range=30 on price ~2000 gives ATR% ~1.5
         df = _make_d1_df(num_bars=20, base_price=2000.0, bar_range=30.0)
         result = classify_regime(df)
         assert result == "trending"
 
     def test_low_volatility_returns_ranging(self) -> None:
-        """Small bar ranges (ATR% < 0.8) should classify as ranging."""
+        """Small bar ranges (ATR% < 1.0) should classify as ranging."""
         # bar_range=5 on price ~2000 gives ATR% ~0.25
         df = _make_d1_df(num_bars=20, base_price=2000.0, bar_range=5.0)
         result = classify_regime(df)
         assert result == "ranging"
 
     def test_medium_volatility_returns_transitional(self) -> None:
-        """Medium bar ranges should classify as transitional."""
-        # bar_range=18 on price ~2000 gives ATR% ~0.9
-        df = _make_d1_df(num_bars=20, base_price=2000.0, bar_range=18.0)
+        """Medium bar ranges (1.0 <= ATR% < 1.4) should classify as transitional."""
+        # bar_range=24 on price ~2000 gives ATR% ~1.2 (in new transitional band)
+        df = _make_d1_df(num_bars=20, base_price=2000.0, bar_range=24.0)
         result = classify_regime(df)
         assert result == "transitional"
 

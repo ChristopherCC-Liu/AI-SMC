@@ -26,9 +26,10 @@ __all__ = ["check_entry"]
 # Constants
 # ---------------------------------------------------------------------------
 
-# Buffer beyond zone boundary for stop-loss placement (in points)
-# 150 points = $1.50 — proportional to XAUUSD ATR (1500-4000 pts)
-_SL_BUFFER_POINTS = 150.0
+# Sprint 4: ATR-adaptive SL buffer replaces fixed 150 points.
+# buffer = max(h1_atr_points * _SL_ATR_MULTIPLIER, _SL_MIN_BUFFER)
+_SL_ATR_MULTIPLIER = 0.75
+_SL_MIN_BUFFER = 200.0  # points floor ($2.00)
 _TP1_RR_RATIO = 2.5
 _TP2_RR_RATIO = 4.0  # Fallback if no liquidity level found
 
@@ -140,9 +141,17 @@ def _find_bos_in_zone(
     return False
 
 
-def _compute_sl(zone: TradeZone) -> float:
-    """Compute stop-loss price beyond zone boundary + buffer."""
-    buffer = _SL_BUFFER_POINTS * XAUUSD_POINT_SIZE
+def _compute_sl_buffer(h1_atr: float) -> float:
+    """Compute adaptive SL buffer from H1 ATR(14) in points.
+
+    Returns the buffer in points: max(atr * multiplier, floor).
+    """
+    return max(h1_atr * _SL_ATR_MULTIPLIER, _SL_MIN_BUFFER)
+
+
+def _compute_sl(zone: TradeZone, h1_atr: float) -> float:
+    """Compute stop-loss price beyond zone boundary + ATR-adaptive buffer."""
+    buffer = _compute_sl_buffer(h1_atr) * XAUUSD_POINT_SIZE
     if zone.direction == "long":
         return zone.zone_low - buffer
     return zone.zone_high + buffer
@@ -225,6 +234,7 @@ def check_entry(
     m15_snapshot: SMCSnapshot,
     zone: TradeZone,
     current_price: float,
+    h1_atr: float = 0.0,
 ) -> EntrySignal | None:
     """Check for a valid M15 entry trigger inside an H1 trade zone.
 
@@ -236,6 +246,9 @@ def check_entry(
         An H1 trade zone from ``scan_zones``.
     current_price:
         The current market price.
+    h1_atr:
+        H1 ATR(14) in points for adaptive SL buffer computation.
+        When 0.0 (default), the minimum buffer floor is used.
 
     Returns
     -------
@@ -266,7 +279,7 @@ def check_entry(
 
     # Compute entry parameters
     entry_price = current_price
-    stop_loss = _compute_sl(zone)
+    stop_loss = _compute_sl(zone, h1_atr)
     risk_points = abs(entry_price - stop_loss) / XAUUSD_POINT_SIZE
 
     if risk_points == 0:

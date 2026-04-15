@@ -165,6 +165,9 @@ class MultiTimeframeAggregator:
         if m15_snap is None:
             return ()
 
+        # Sprint 4: Compute H1 ATR(14) for adaptive SL buffer
+        h1_atr = self._compute_h1_atr(data.get(Timeframe.H1))
+
         # Determine the effective confluence threshold based on bias tier
         min_confluence = effective_threshold(bias.rationale)
 
@@ -179,7 +182,7 @@ class MultiTimeframeAggregator:
                 if now < cooldown_until:
                     continue
 
-            entry = check_entry(m15_snap, zone, current_price)
+            entry = check_entry(m15_snap, zone, current_price, h1_atr=h1_atr)
             if entry is None:
                 continue
 
@@ -202,6 +205,36 @@ class MultiTimeframeAggregator:
         # Step 6: Sort by confluence score descending
         sorted_setups = sorted(setups, key=lambda s: s.confluence_score, reverse=True)
         return tuple(sorted_setups)
+
+    @staticmethod
+    def _compute_h1_atr(h1_df: pl.DataFrame | None) -> float:
+        """Compute H1 ATR(14) in points from an H1 OHLCV DataFrame.
+
+        Returns 0.0 if insufficient data, which causes the entry trigger
+        to fall back to the minimum SL buffer floor.
+        """
+        atr_period = 14
+        if h1_df is None or len(h1_df) < atr_period + 1:
+            return 0.0
+
+        high = h1_df["high"].to_list()
+        low = h1_df["low"].to_list()
+        close = h1_df["close"].to_list()
+
+        tr_values: list[float] = []
+        for i in range(1, len(high)):
+            hl = high[i] - low[i]
+            hc = abs(high[i] - close[i - 1])
+            lc = abs(low[i] - close[i - 1])
+            tr_values.append(max(hl, hc, lc))
+
+        if len(tr_values) < atr_period:
+            return 0.0
+
+        atr_price = sum(tr_values[-atr_period:]) / atr_period
+        # Convert from price units to points (1 point = $0.01)
+        from smc.smc_core.constants import XAUUSD_POINT_SIZE
+        return atr_price / XAUUSD_POINT_SIZE
 
     def _detect_all(
         self,

@@ -24,8 +24,8 @@ __all__ = ["classify_regime", "MarketRegime"]
 # ---------------------------------------------------------------------------
 
 _ATR_PERIOD = 14
-_TRENDING_THRESHOLD = 1.2  # ATR% >= 1.2 → trending
-_RANGING_THRESHOLD = 0.8   # ATR% < 0.8 → ranging
+_TRENDING_THRESHOLD = 1.4  # ATR% >= 1.4 → trending (Sprint 4: raised from 1.2)
+_RANGING_THRESHOLD = 1.0   # ATR% < 1.0 → ranging (Sprint 4: raised from 0.8)
 
 MarketRegime = Literal["trending", "transitional", "ranging"]
 

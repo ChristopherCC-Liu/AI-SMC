@@ -166,14 +166,29 @@ class SMCConfig(BaseSettings):
     # Regime Filter (Sprint 3)
     # ------------------------------------------------------------------
     regime_atr_trending_pct: float = Field(
-        default=1.2,
+        default=1.4,
         ge=0.1,
         description="D1 ATR(14) as % of price above which market is 'trending'.",
     )
     regime_atr_ranging_pct: float = Field(
-        default=0.8,
+        default=1.0,
         ge=0.1,
         description="D1 ATR(14) as % of price below which market is 'ranging'.",
+    )
+
+    # ------------------------------------------------------------------
+    # ATR-Adaptive Stop-Loss (Sprint 4)
+    # ------------------------------------------------------------------
+    sl_atr_multiplier: float = Field(
+        default=0.75,
+        ge=0.1,
+        le=3.0,
+        description="Multiplier applied to H1 ATR(14) for adaptive SL buffer.",
+    )
+    sl_min_buffer_points: float = Field(
+        default=200.0,
+        ge=50.0,
+        description="Minimum SL buffer in points, floor for the ATR-adaptive computation.",
     )
     zone_cooldown_hours: int = Field(
         default=24,

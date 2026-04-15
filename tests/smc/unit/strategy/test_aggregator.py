@@ -145,3 +145,29 @@ class TestMultiTimeframeAggregator:
         after = datetime.now(tz=timezone.utc)
         for setup in result:
             assert before <= setup.generated_at <= after
+
+
+class TestComputeH1ATR:
+    """Sprint 4: Tests for H1 ATR(14) computation used by adaptive SL."""
+
+    def test_none_returns_zero(self) -> None:
+        agg = MultiTimeframeAggregator(detector=SMCDetector())
+        assert agg._compute_h1_atr(None) == 0.0
+
+    def test_insufficient_data_returns_zero(self) -> None:
+        agg = MultiTimeframeAggregator(detector=SMCDetector())
+        df = pl.DataFrame({"high": [2350.0] * 5, "low": [2340.0] * 5, "close": [2345.0] * 5})
+        assert agg._compute_h1_atr(df) == 0.0
+
+    def test_known_atr_value(self) -> None:
+        """20 bars with constant range=10 ($10) should give ATR = 1000 points."""
+        agg = MultiTimeframeAggregator(detector=SMCDetector())
+        rows = []
+        price = 2000.0
+        for _ in range(20):
+            rows.append({"high": price + 5.0, "low": price - 5.0, "close": price})
+        df = pl.DataFrame(rows)
+        atr = agg._compute_h1_atr(df)
+        # bar range = 10.0 ($10) = 1000 points. True Range = max(H-L, |H-prevC|, |L-prevC|)
+        # With constant close at midpoint: TR = H-L = 10.0, ATR = 10.0/$0.01 = 1000 pts
+        assert atr == pytest.approx(1000.0, rel=0.01)
