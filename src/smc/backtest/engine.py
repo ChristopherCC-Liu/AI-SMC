@@ -132,6 +132,8 @@ class BarBacktestEngine:
         setups_by_bar: dict[datetime, tuple[TradeSetupLike, ...]],
         bars: pl.DataFrame,
         on_sl_hit: Callable[[float, float, str, datetime], None] | None = None,
+        on_trade_open: Callable[[float, float, str], None] | None = None,
+        on_trade_close: Callable[[float, float, str], None] | None = None,
     ) -> BacktestResult:
         """Run the backtest over a chronological sequence of M15 bars.
 
@@ -207,6 +209,9 @@ class BarBacktestEngine:
                             trigger_type=pos.trigger_type,
                         )
                     )
+                    # Sprint 5: Notify zone anti-clustering on trade close
+                    if on_trade_close is not None and pos.zone_high > 0.0:
+                        on_trade_close(pos.zone_high, pos.zone_low, pos.direction)
                     # Notify zone cooldown on SL hit
                     if (
                         exit_result.reason == "sl"
@@ -260,6 +265,10 @@ class BarBacktestEngine:
                         zone_low=z_low,
                     )
                 )
+
+                # Sprint 5: Notify zone anti-clustering on trade open
+                if on_trade_open is not None and z_high > 0.0:
+                    on_trade_open(z_high, z_low, sig.direction)
 
             # --- Step 4: Update equity curve ---
             # Mark-to-market: include unrealised P&L of open positions

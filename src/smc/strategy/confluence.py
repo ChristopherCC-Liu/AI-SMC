@@ -37,18 +37,35 @@ TRADEABLE_THRESHOLD = 0.45
 TIER2_CONFLUENCE_FLOOR = 0.55
 TIER3_CONFLUENCE_FLOOR = 0.55
 
+# Sprint 5: Transitional regime confluence floor — raised from implicit 0.45
+# to 0.60 to filter low-quality setups in ambiguous volatility conditions.
+# v5 data: transitional had 34 trades at 32.4% WR, -$202.
+TRANSITIONAL_CONFLUENCE_FLOOR = 0.60
 
-def effective_threshold(bias_rationale: str) -> float:
-    """Return the effective confluence threshold based on bias tier.
+
+def effective_threshold(
+    bias_rationale: str,
+    regime: str = "trending",
+) -> float:
+    """Return the effective confluence threshold based on bias tier and regime.
 
     The bias rationale string from ``compute_htf_bias`` starts with
-    "Tier N:" which encodes the tier level.
+    "Tier N:" which encodes the tier level.  In transitional regime,
+    the floor is raised to ``TRANSITIONAL_CONFLUENCE_FLOOR`` (Sprint 5).
     """
+    # Start with tier-based floor
     if bias_rationale.startswith("Tier 2:"):
-        return TIER2_CONFLUENCE_FLOOR
-    if bias_rationale.startswith("Tier 3:"):
-        return TIER3_CONFLUENCE_FLOOR
-    return TRADEABLE_THRESHOLD
+        floor = TIER2_CONFLUENCE_FLOOR
+    elif bias_rationale.startswith("Tier 3:"):
+        floor = TIER3_CONFLUENCE_FLOOR
+    else:
+        floor = TRADEABLE_THRESHOLD
+
+    # Sprint 5: Apply transitional regime floor (takes the stricter of the two)
+    if regime == "transitional":
+        floor = max(floor, TRANSITIONAL_CONFLUENCE_FLOOR)
+
+    return floor
 
 
 # ---------------------------------------------------------------------------

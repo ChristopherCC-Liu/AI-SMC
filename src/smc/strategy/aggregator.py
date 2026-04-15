@@ -37,6 +37,10 @@ __all__ = ["MultiTimeframeAggregator"]
 class MultiTimeframeAggregator:
     """Orchestrates the full multi-timeframe SMC strategy pipeline.
 
+    .. versionchanged:: Sprint 5
+       Added zone anti-clustering via ``_active_zones`` set.
+       Max 1 entry per zone at a time (``_MAX_ENTRIES_PER_ZONE = 1``).
+
     Parameters
     ----------
     detector:
@@ -55,6 +59,10 @@ class MultiTimeframeAggregator:
     >>> setups = agg.generate_setups(data={...}, current_price=2350.0)
     """
 
+    # Sprint 5: Anti-clustering — max concurrent entries per unique zone.
+    # Sentinel constant for v6 runner verification.
+    _MAX_ENTRIES_PER_ZONE = 1
+
     # Default per-TF swing_length values — D1 fastest (5), H4 medium (7),
     # H1/M15 standard (10).  Faster HTF swing detection catches trend
     # changes sooner without adding noise on lower timeframes.
@@ -72,9 +80,13 @@ class MultiTimeframeAggregator:
         self,
         detector: SMCDetector,
         swing_length: int = 10,
+        *,
+        enable_ob_test_trigger: bool = False,
     ) -> None:
         self._detector = detector
+        self._enable_ob_test_trigger = enable_ob_test_trigger
         self._zone_cooldowns: dict[tuple[float, float, str], datetime] = {}
+        self._active_zones: set[tuple[float, float, str]] = set()
         # If the detector was not created with a swing_length_map,
         # inject the default one so all aggregator pipelines benefit.
         if not detector.swing_length_map:
@@ -109,6 +121,34 @@ class MultiTimeframeAggregator:
     def clear_cooldowns(self) -> None:
         """Clear all zone cooldowns. Called between walk-forward windows."""
         self._zone_cooldowns.clear()
+
+    def mark_zone_active(
+        self,
+        zone_high: float,
+        zone_low: float,
+        direction: str,
+    ) -> None:
+        """Record that a trade is now active from this zone.
+
+        Prevents additional entries in the same zone while one is open
+        (Sprint 5 anti-clustering fix).
+        """
+        key = (round(zone_high, 2), round(zone_low, 2), direction)
+        self._active_zones.add(key)
+
+    def clear_zone_active(
+        self,
+        zone_high: float,
+        zone_low: float,
+        direction: str,
+    ) -> None:
+        """Mark a zone's trade as resolved (SL or TP hit)."""
+        key = (round(zone_high, 2), round(zone_low, 2), direction)
+        self._active_zones.discard(key)
+
+    def clear_active_zones(self) -> None:
+        """Clear all active zone tracking. Called between walk-forward windows."""
+        self._active_zones.clear()
 
     def generate_setups(
         self,
@@ -168,21 +208,39 @@ class MultiTimeframeAggregator:
         # Sprint 4: Compute H1 ATR(14) for adaptive SL buffer
         h1_atr = self._compute_h1_atr(data.get(Timeframe.H1))
 
-        # Determine the effective confluence threshold based on bias tier
-        min_confluence = effective_threshold(bias.rationale)
+        # Determine the effective confluence threshold based on bias tier + regime
+        min_confluence = effective_threshold(bias.rationale, regime)
 
         now = datetime.now(tz=timezone.utc)
         setups: list[TradeSetup] = []
 
+        # Sprint 5: Intra-call zone dedup — prevents generating multiple
+        # setups for the same zone within one generate_setups() call.
+        # This is the primary anti-clustering mechanism during backtesting
+        # where _active_zones cannot be driven by engine callbacks.
+        zones_used_this_call: set[tuple[float, float, str]] = set()
+
         for zone in zones:
-            # Zone cooldown: skip zones that recently produced a loss
             zone_key = (round(zone.zone_high, 2), round(zone.zone_low, 2), zone.direction)
+
+            # Zone cooldown: skip zones that recently produced a loss
             if zone_key in self._zone_cooldowns:
                 cooldown_until = self._zone_cooldowns[zone_key]
                 if now < cooldown_until:
                     continue
 
-            entry = check_entry(m15_snap, zone, current_price, h1_atr=h1_atr)
+            # Sprint 5: Zone anti-clustering — skip if zone already has
+            # an active trade (callback-driven) or already produced a
+            # setup in this call (intra-call dedup)
+            if zone_key in self._active_zones:
+                continue
+            if zone_key in zones_used_this_call:
+                continue
+
+            entry = check_entry(
+                m15_snap, zone, current_price, h1_atr=h1_atr,
+                enable_ob_test=self._enable_ob_test_trigger,
+            )
             if entry is None:
                 continue
 
@@ -201,6 +259,7 @@ class MultiTimeframeAggregator:
                     generated_at=now,
                 )
             )
+            zones_used_this_call.add(zone_key)
 
         # Step 6: Sort by confluence score descending
         sorted_setups = sorted(setups, key=lambda s: s.confluence_score, reverse=True)

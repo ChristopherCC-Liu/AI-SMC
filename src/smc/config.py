@@ -190,6 +190,10 @@ class SMCConfig(BaseSettings):
         ge=50.0,
         description="Minimum SL buffer in points, floor for the ATR-adaptive computation.",
     )
+    enable_ob_test_trigger: bool = Field(
+        default=False,
+        description="Enable the ob_test_rejection entry trigger. Disabled in Sprint 5 due to 18.2% WR.",
+    )
     zone_cooldown_hours: int = Field(
         default=24,
         ge=0,

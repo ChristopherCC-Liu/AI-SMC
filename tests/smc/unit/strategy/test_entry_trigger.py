@@ -220,8 +220,8 @@ class TestCheckEntryShortDirection:
         # and there's no CHoCH or OB rejection either
         assert result is None
 
-    def test_ob_rejection_trigger(self) -> None:
-        """Test the OB test + rejection trigger path."""
+    def test_ob_rejection_trigger_disabled_by_default(self) -> None:
+        """Sprint 5: ob_test_rejection is disabled by default (18.2% WR)."""
         from tests.smc.unit.strategy.conftest import _make_snapshot, _ts
 
         from smc.data.schemas import Timeframe
@@ -242,12 +242,37 @@ class TestCheckEntryShortDirection:
                 SwingPoint(ts=_ts(4), price=2350.00, swing_type="low", strength=5),
             ),
         )
+        # Default: ob_test disabled → no trigger
         result = check_entry(m15_snap, zone, 2351.00)
+        assert result is None
+
+    def test_ob_rejection_trigger_when_enabled(self) -> None:
+        """ob_test_rejection fires when explicitly enabled."""
+        from tests.smc.unit.strategy.conftest import _make_snapshot, _ts
+
+        from smc.data.schemas import Timeframe
+        from smc.smc_core.types import SwingPoint
+
+        zone = TradeZone(
+            zone_high=2352.00, zone_low=2348.00, zone_type="ob",
+            direction="long", timeframe=Timeframe.H1, confidence=0.8,
+        )
+        m15_snap = _make_snapshot(
+            timeframe=Timeframe.M15,
+            trend="bullish",
+            swing_points=(
+                SwingPoint(ts=_ts(1), price=2355.00, swing_type="high", strength=5),
+                SwingPoint(ts=_ts(2), price=2349.00, swing_type="low", strength=5),
+                SwingPoint(ts=_ts(3), price=2356.00, swing_type="high", strength=5),
+                SwingPoint(ts=_ts(4), price=2350.00, swing_type="low", strength=5),
+            ),
+        )
+        result = check_entry(m15_snap, zone, 2351.00, enable_ob_test=True)
         assert result is not None
         assert result.trigger_type == "ob_test_rejection"
 
-    def test_bearish_ob_rejection_trigger(self) -> None:
-        """Test bearish OB rejection: swing high inside zone + price below."""
+    def test_bearish_ob_rejection_disabled_by_default(self) -> None:
+        """Sprint 5: bearish ob_test_rejection also disabled by default."""
         from tests.smc.unit.strategy.conftest import _make_snapshot, _ts
 
         from smc.data.schemas import Timeframe
@@ -268,6 +293,30 @@ class TestCheckEntryShortDirection:
             ),
         )
         result = check_entry(m15_snap, zone, 2377.00)
+        assert result is None
+
+    def test_bearish_ob_rejection_when_enabled(self) -> None:
+        """Bearish OB rejection fires when explicitly enabled."""
+        from tests.smc.unit.strategy.conftest import _make_snapshot, _ts
+
+        from smc.data.schemas import Timeframe
+        from smc.smc_core.types import SwingPoint
+
+        zone = TradeZone(
+            zone_high=2380.00, zone_low=2376.00, zone_type="ob",
+            direction="short", timeframe=Timeframe.H1, confidence=0.8,
+        )
+        m15_snap = _make_snapshot(
+            timeframe=Timeframe.M15,
+            trend="bearish",
+            swing_points=(
+                SwingPoint(ts=_ts(1), price=2374.00, swing_type="low", strength=5),
+                SwingPoint(ts=_ts(2), price=2379.00, swing_type="high", strength=5),
+                SwingPoint(ts=_ts(3), price=2373.00, swing_type="low", strength=5),
+                SwingPoint(ts=_ts(4), price=2378.00, swing_type="high", strength=5),
+            ),
+        )
+        result = check_entry(m15_snap, zone, 2377.00, enable_ob_test=True)
         assert result is not None
         assert result.trigger_type == "ob_test_rejection"
         assert result.direction == "short"

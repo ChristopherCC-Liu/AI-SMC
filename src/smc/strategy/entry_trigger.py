@@ -26,6 +26,10 @@ __all__ = ["check_entry"]
 # Constants
 # ---------------------------------------------------------------------------
 
+# Sprint 5: ob_test_rejection disabled by default (18.2% WR in v5 data).
+# Gated behind enable_ob_test kwarg in check_entry(). Sentinel for v6 runner.
+_OB_TEST_REJECTION_DISABLED = True
+
 # Sprint 4: ATR-adaptive SL buffer replaces fixed 150 points.
 # buffer = max(h1_atr_points * _SL_ATR_MULTIPLIER, _SL_MIN_BUFFER)
 _SL_ATR_MULTIPLIER = 0.75
@@ -235,6 +239,8 @@ def check_entry(
     zone: TradeZone,
     current_price: float,
     h1_atr: float = 0.0,
+    *,
+    enable_ob_test: bool = False,
 ) -> EntrySignal | None:
     """Check for a valid M15 entry trigger inside an H1 trade zone.
 
@@ -269,7 +275,8 @@ def check_entry(
         trigger_type = "choch_in_zone"
     elif _find_fvg_fill_in_zone(m15_snapshot, zone):
         trigger_type = "fvg_fill_in_zone"
-    elif _find_ob_rejection(m15_snapshot, zone, current_price):
+    elif enable_ob_test and _find_ob_rejection(m15_snapshot, zone, current_price):
+        # Sprint 5: ob_test_rejection disabled by default (18.2% WR in v5)
         trigger_type = "ob_test_rejection"
     elif _find_bos_in_zone(m15_snapshot, zone):
         trigger_type = "bos_in_zone"

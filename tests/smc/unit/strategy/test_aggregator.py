@@ -147,6 +147,52 @@ class TestMultiTimeframeAggregator:
             assert before <= setup.generated_at <= after
 
 
+class TestZoneAntiClustering:
+    """Sprint 5: Tests for zone anti-clustering — max 1 active trade per zone."""
+
+    def test_mark_zone_active(self) -> None:
+        agg = MultiTimeframeAggregator(detector=SMCDetector())
+        agg.mark_zone_active(2352.00, 2348.00, "long")
+        assert (2352.00, 2348.00, "long") in agg._active_zones
+
+    def test_clear_zone_active(self) -> None:
+        agg = MultiTimeframeAggregator(detector=SMCDetector())
+        agg.mark_zone_active(2352.00, 2348.00, "long")
+        agg.clear_zone_active(2352.00, 2348.00, "long")
+        assert (2352.00, 2348.00, "long") not in agg._active_zones
+
+    def test_clear_zone_active_nonexistent_is_safe(self) -> None:
+        """Clearing a zone that was never active should not raise."""
+        agg = MultiTimeframeAggregator(detector=SMCDetector())
+        agg.clear_zone_active(2352.00, 2348.00, "long")  # no error
+
+    def test_clear_all_active_zones(self) -> None:
+        agg = MultiTimeframeAggregator(detector=SMCDetector())
+        agg.mark_zone_active(2352.00, 2348.00, "long")
+        agg.mark_zone_active(2380.00, 2376.00, "short")
+        agg.clear_active_zones()
+        assert len(agg._active_zones) == 0
+
+    def test_ob_test_trigger_disabled_by_default(self) -> None:
+        """Aggregator constructed with default should have ob_test disabled."""
+        agg = MultiTimeframeAggregator(detector=SMCDetector())
+        assert agg._enable_ob_test_trigger is False
+
+    def test_ob_test_trigger_can_be_enabled(self) -> None:
+        agg = MultiTimeframeAggregator(
+            detector=SMCDetector(), enable_ob_test_trigger=True,
+        )
+        assert agg._enable_ob_test_trigger is True
+
+    def test_intra_call_zone_dedup_in_source(self) -> None:
+        """Verify generate_setups() contains intra-call zone dedup logic."""
+        import inspect
+        src = inspect.getsource(MultiTimeframeAggregator.generate_setups)
+        assert "zones_used_this_call" in src
+        # Must appear 3 times: declaration, check, and add
+        assert src.count("zones_used_this_call") >= 3
+
+
 class TestComputeH1ATR:
     """Sprint 4: Tests for H1 ATR(14) computation used by adaptive SL."""
 

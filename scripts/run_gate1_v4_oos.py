@@ -124,16 +124,19 @@ def main() -> None:
             window_start = _add_months(window_start, step_months)
             continue
 
-        # Clear cooldowns between windows
+        # Clear cooldowns and active zones between windows
         aggregator.clear_cooldowns()
+        aggregator.clear_active_zones()
 
         strategy.train(train_bars)
         setups = strategy.generate_setups(test_bars)
 
-        # Run with zone cooldown callback
+        # Run with zone cooldown + anti-clustering callbacks
         result = engine.run(
             setups, test_bars,
             on_sl_hit=aggregator.record_zone_loss,
+            on_trade_open=aggregator.mark_zone_active,
+            on_trade_close=aggregator.clear_zone_active,
         )
         results.append(result)
 

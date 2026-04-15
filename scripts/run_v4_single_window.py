@@ -84,17 +84,20 @@ def run_single_window(window_num: int) -> dict:
     if len(test_bars) == 0:
         return {"window": window_num, "error": "no test data"}
 
-    # Clear cooldowns at window start
+    # Clear cooldowns and active zones at window start
     aggregator.clear_cooldowns()
+    aggregator.clear_active_zones()
 
     t0 = time.time()
     setups = strategy.generate_setups(test_bars)
 
-    # Run with zone cooldown callback
+    # Run with zone cooldown + anti-clustering callbacks
     result = engine.run(
         setups,
         test_bars,
         on_sl_hit=aggregator.record_zone_loss,
+        on_trade_open=aggregator.mark_zone_active,
+        on_trade_close=aggregator.clear_zone_active,
     )
     elapsed = time.time() - t0
 

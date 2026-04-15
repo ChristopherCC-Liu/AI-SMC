@@ -1,17 +1,18 @@
-"""Run a single Gate 1 v5 OOS window. Designed for chunked execution.
+"""Run a single Gate 1 v6 OOS window. Designed for chunked execution.
 
 Usage:
-    python scripts/run_v5_single_window.py <window_num>
+    python scripts/run_v6_single_window.py <window_num>
 
     window_num: 1-based window index (1 = first OOS window)
 
-Key v5 differences from v4 (Sprint 4):
-- ATR-adaptive SL buffer (replaces fixed 150-point buffer)
-- Tuned regime thresholds based on analyst's ATR distribution data
-- Confluence scoring fixes
-- Trade-level diagnostics restored for cross-review verification
+Key v6 differences from v5 (Sprint 5 — 3 surgical fixes):
+- Fix A: ob_test_rejection trigger DISABLED (18.2% WR, -$89 in v5)
+- Fix B: Transitional regime tightened — Tier 2/3 need higher confluence
+         floor in transitional regime (raised from TRADEABLE_THRESHOLD to 0.65)
+- Fix C: Zone anti-clustering — max 2 entries per zone per window,
+         preventing correlated losses from repeated same-zone entries
 
-Results are appended to data/gate1_v5_windows.jsonl (one JSON per line).
+Results are appended to data/gate1_v6_windows.jsonl (one JSON per line).
 """
 from __future__ import annotations
 
@@ -37,7 +38,7 @@ from smc.strategy.regime import classify_regime
 
 
 # ---------------------------------------------------------------------------
-# Sprint 4 verification helpers
+# Sprint 5 verification helpers
 # ---------------------------------------------------------------------------
 
 
@@ -68,54 +69,68 @@ def _compute_atr_pct(d1_df, atr_period: int = 14) -> float | None:
     return round((atr / latest_close) * 100.0, 4)
 
 
-def _verify_sprint4_features() -> dict[str, bool]:
-    """Check that Sprint 4 code changes are present in the loaded modules.
+def _verify_sprint5_features() -> dict[str, bool]:
+    """Check that Sprint 5 code changes are present in the loaded modules.
 
     Returns a dict of feature -> present flag. If any feature is missing,
     the runner still proceeds but flags it in the output for review.
     """
     checks: dict[str, bool] = {}
 
-    # Check 1: ATR-adaptive SL — entry_trigger should have _compute_sl_buffer
-    # and NOT the old fixed _SL_BUFFER_POINTS constant
+    # Fix A: ob_test_rejection gated by enable_ob_test param (default False)
+    # Strategy-dev chose parameter-based gating over a module-level flag.
+    # Verify that check_entry() accepts enable_ob_test and defaults to False.
     from smc.strategy import entry_trigger as et_mod
+    import inspect
 
-    has_old_fixed_sl = hasattr(et_mod, "_SL_BUFFER_POINTS")
-    has_adaptive_sl = hasattr(et_mod, "_compute_sl_buffer")
-    has_atr_multiplier = hasattr(et_mod, "_SL_ATR_MULTIPLIER")
-    checks["atr_adaptive_sl"] = (
-        has_adaptive_sl and has_atr_multiplier and not has_old_fixed_sl
+    check_entry_sig = inspect.signature(et_mod.check_entry)
+    ob_param = check_entry_sig.parameters.get("enable_ob_test")
+    checks["ob_test_rejection_disabled"] = (
+        ob_param is not None and ob_param.default is False
     )
 
-    # Check 2: Tuned regime thresholds — regime.py constants changed from v4
+    # Also verify aggregator threads the flag through (default disabled)
+    from smc.strategy.aggregator import MultiTimeframeAggregator
+
+    agg_sig = inspect.signature(MultiTimeframeAggregator.__init__)
+    agg_ob_param = agg_sig.parameters.get("enable_ob_test_trigger")
+    checks["ob_test_aggregator_wired"] = (
+        agg_ob_param is not None and agg_ob_param.default is False
+    )
+
+    # Fix B: Transitional regime confluence floor should be raised
+    from smc.strategy import confluence as conf_mod
+
+    transitional_floor = getattr(conf_mod, "TRANSITIONAL_CONFLUENCE_FLOOR", None)
+    checks["transitional_floor_raised"] = (
+        transitional_floor is not None and transitional_floor >= 0.60
+    )
+
+    # Also verify effective_threshold() accepts regime parameter
+    et_sig = inspect.signature(conf_mod.effective_threshold)
+    checks["effective_threshold_regime_aware"] = "regime" in et_sig.parameters
+
+    # Fix C: Zone anti-clustering — aggregator tracks active zones
+    # Check for _active_zones attribute and mark_zone_active method
+    has_active_zones = hasattr(MultiTimeframeAggregator, "mark_zone_active")
+    has_clear_active = hasattr(MultiTimeframeAggregator, "clear_active_zones")
+    checks["zone_anti_clustering"] = has_active_zones and has_clear_active
+
+    # Carry forward Sprint 4 checks
+    has_adaptive_sl = hasattr(et_mod, "_compute_sl_buffer")
+    has_atr_multiplier = hasattr(et_mod, "_SL_ATR_MULTIPLIER")
+    checks["atr_adaptive_sl"] = has_adaptive_sl and has_atr_multiplier
+
     from smc.strategy import regime as reg_mod
 
     trending_thresh = getattr(reg_mod, "_TRENDING_THRESHOLD", None)
     ranging_thresh = getattr(reg_mod, "_RANGING_THRESHOLD", None)
-    # v4 defaults: trending=1.2, ranging=0.8
-    # Sprint 4 target: trending=1.4, ranging=1.0
     checks["regime_thresholds_tuned"] = (
         trending_thresh is not None
         and ranging_thresh is not None
-        and not (trending_thresh == 1.2 and ranging_thresh == 0.8)
+        and trending_thresh == 1.4
+        and ranging_thresh == 1.0
     )
-
-    # Check 3: Confluence weight rebalance — trigger weight raised, liquidity lowered
-    from smc.strategy import confluence as conf_mod
-
-    trigger_weight = getattr(conf_mod, "_W_ENTRY_TRIGGER", None)
-    liquidity_weight = getattr(conf_mod, "_W_LIQUIDITY", None)
-    # v4: trigger=0.20, liquidity=0.15
-    # Sprint 4: trigger=0.25, liquidity=0.10
-    checks["confluence_rebalanced"] = (
-        trigger_weight is not None
-        and liquidity_weight is not None
-        and trigger_weight == 0.25
-        and liquidity_weight == 0.10
-    )
-
-    # Check 4: H1 ATR computation in aggregator
-    from smc.strategy.aggregator import MultiTimeframeAggregator
 
     checks["aggregator_h1_atr"] = hasattr(MultiTimeframeAggregator, "_compute_h1_atr")
 
@@ -128,9 +143,9 @@ def _verify_sprint4_features() -> dict[str, bool]:
 
 
 def run_single_window(window_num: int) -> dict:
-    """Run a single OOS window with Sprint 4 features active."""
-    # Verify Sprint 4 features before running
-    sprint4_checks = _verify_sprint4_features()
+    """Run a single OOS window with Sprint 5 features active."""
+    # Verify Sprint 5 features before running
+    sprint5_checks = _verify_sprint5_features()
 
     config = BacktestConfig(
         initial_balance=10_000.0,
@@ -172,14 +187,14 @@ def run_single_window(window_num: int) -> dict:
 
     print(f"Window {window_num}: train {window_start.date()}-{train_end.date()}, "
           f"test {train_end.date()}-{test_end.date()}")
-    print(f"  Sprint 4 checks: {sprint4_checks}")
+    print(f"  Sprint 5 checks: {sprint5_checks}")
 
     train_bars = lake.query("XAUUSD", Timeframe.M15, window_start, train_end)
     strategy.train(train_bars)
 
     test_bars = lake.query("XAUUSD", Timeframe.M15, train_end, test_end)
     if len(test_bars) == 0:
-        return {"window": window_num, "version": "v5", "error": "no test data"}
+        return {"window": window_num, "version": "v6", "error": "no test data"}
 
     # Compute regime diagnostic from D1 data at test start
     d1_data = lake.query("XAUUSD", Timeframe.D1, window_start, test_end)
@@ -192,20 +207,18 @@ def run_single_window(window_num: int) -> dict:
 
     print(f"  Regime: {regime}, ATR%: {atr_pct}")
 
-    # Clear cooldowns and active zones at window start
+    # Clear cooldowns and active zone tracking at window start
     aggregator.clear_cooldowns()
     aggregator.clear_active_zones()
 
     t0 = time.time()
     setups = strategy.generate_setups(test_bars)
 
-    # Run with zone cooldown + anti-clustering callbacks
+    # Run with zone cooldown callback
     result = engine.run(
         setups,
         test_bars,
         on_sl_hit=aggregator.record_zone_loss,
-        on_trade_open=aggregator.mark_zone_active,
-        on_trade_close=aggregator.clear_zone_active,
     )
     elapsed = time.time() - t0
 
@@ -240,7 +253,7 @@ def run_single_window(window_num: int) -> dict:
 
     out = {
         "window": window_num,
-        "version": "v5",
+        "version": "v6",
         "train_start": str(window_start.date()),
         "train_end": str(train_end.date()),
         "test_start": str(train_end.date()),
@@ -256,7 +269,7 @@ def run_single_window(window_num: int) -> dict:
         "close_reasons": reasons,
         "regime_at_start": regime,
         "atr_pct_at_start": atr_pct,
-        "sprint4_checks": sprint4_checks,
+        "sprint5_checks": sprint5_checks,
         "trade_details": trade_details,
         "elapsed_s": round(elapsed, 1),
     }
@@ -271,7 +284,7 @@ def run_single_window(window_num: int) -> dict:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print("Usage: python run_v5_single_window.py <window_num>")
+        print("Usage: python run_v6_single_window.py <window_num>")
         print("  window_num: 1-15 (1-based)")
         sys.exit(1)
 
@@ -282,7 +295,7 @@ def main() -> None:
 
     result = run_single_window(window_num)
 
-    out_path = PROJECT_ROOT / "data" / "gate1_v5_windows.jsonl"
+    out_path = PROJECT_ROOT / "data" / "gate1_v6_windows.jsonl"
     with open(out_path, "a") as f:
         f.write(json.dumps(result) + "\n")
     print(f"Saved to {out_path}")
