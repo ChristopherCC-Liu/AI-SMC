@@ -199,6 +199,21 @@ class SMCConfig(BaseSettings):
         ge=0,
         description="Hours to lock out a zone after it produces a losing trade.",
     )
+    ai_regime_enabled: bool = Field(
+        default=False,
+        description="Enable AI-powered regime classification. When False, uses Sprint 5 ATR fallback.",
+    )
+    ai_regime_min_confidence: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Minimum AI confidence to use AI regime. Below this, ATR fallback activates.",
+    )
+    ath_reference_price: float = Field(
+        default=3500.0,
+        ge=100.0,
+        description="All-time high reference for XAUUSD. Updated manually when ATH changes.",
+    )
     tier2_confluence_floor: float = Field(
         default=0.55,
         ge=0.0,

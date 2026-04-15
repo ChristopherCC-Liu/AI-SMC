@@ -43,29 +43,22 @@ TIER3_CONFLUENCE_FLOOR = 0.55
 TRANSITIONAL_CONFLUENCE_FLOOR = 0.60
 
 
-def effective_threshold(
-    bias_rationale: str,
-    regime: str = "trending",
-) -> float:
-    """Return the effective confluence threshold based on bias tier and regime.
+def effective_threshold(bias_rationale: str) -> float:
+    """Return the tier-based confluence threshold.
 
     The bias rationale string from ``compute_htf_bias`` starts with
-    "Tier N:" which encodes the tier level.  In transitional regime,
-    the floor is raised to ``TRANSITIONAL_CONFLUENCE_FLOOR`` (Sprint 5).
+    "Tier N:" which encodes the tier level.
+
+    .. versionchanged:: Sprint 6
+       Removed ``regime`` parameter.  Regime-based confluence floor is
+       now provided by ``RegimeParams.confluence_floor`` from the AI
+       regime classifier.  The aggregator takes ``max(tier_floor, regime_floor)``.
     """
-    # Start with tier-based floor
     if bias_rationale.startswith("Tier 2:"):
-        floor = TIER2_CONFLUENCE_FLOOR
-    elif bias_rationale.startswith("Tier 3:"):
-        floor = TIER3_CONFLUENCE_FLOOR
-    else:
-        floor = TRADEABLE_THRESHOLD
-
-    # Sprint 5: Apply transitional regime floor (takes the stricter of the two)
-    if regime == "transitional":
-        floor = max(floor, TRANSITIONAL_CONFLUENCE_FLOOR)
-
-    return floor
+        return TIER2_CONFLUENCE_FLOOR
+    if bias_rationale.startswith("Tier 3:"):
+        return TIER3_CONFLUENCE_FLOOR
+    return TRADEABLE_THRESHOLD
 
 
 # ---------------------------------------------------------------------------

@@ -145,17 +145,24 @@ def _find_bos_in_zone(
     return False
 
 
-def _compute_sl_buffer(h1_atr: float) -> float:
+def _compute_sl_buffer(
+    h1_atr: float,
+    sl_atr_multiplier: float = _SL_ATR_MULTIPLIER,
+) -> float:
     """Compute adaptive SL buffer from H1 ATR(14) in points.
 
     Returns the buffer in points: max(atr * multiplier, floor).
     """
-    return max(h1_atr * _SL_ATR_MULTIPLIER, _SL_MIN_BUFFER)
+    return max(h1_atr * sl_atr_multiplier, _SL_MIN_BUFFER)
 
 
-def _compute_sl(zone: TradeZone, h1_atr: float) -> float:
+def _compute_sl(
+    zone: TradeZone,
+    h1_atr: float,
+    sl_atr_multiplier: float = _SL_ATR_MULTIPLIER,
+) -> float:
     """Compute stop-loss price beyond zone boundary + ATR-adaptive buffer."""
-    buffer = _compute_sl_buffer(h1_atr) * XAUUSD_POINT_SIZE
+    buffer = _compute_sl_buffer(h1_atr, sl_atr_multiplier) * XAUUSD_POINT_SIZE
     if zone.direction == "long":
         return zone.zone_low - buffer
     return zone.zone_high + buffer
@@ -241,6 +248,8 @@ def check_entry(
     h1_atr: float = 0.0,
     *,
     enable_ob_test: bool = False,
+    sl_atr_multiplier: float = _SL_ATR_MULTIPLIER,
+    tp1_rr: float = _TP1_RR_RATIO,
 ) -> EntrySignal | None:
     """Check for a valid M15 entry trigger inside an H1 trade zone.
 
@@ -284,16 +293,16 @@ def check_entry(
     if trigger_type is None:
         return None
 
-    # Compute entry parameters
+    # Compute entry parameters (Sprint 6: regime-configurable SL/TP)
     entry_price = current_price
-    stop_loss = _compute_sl(zone, h1_atr)
+    stop_loss = _compute_sl(zone, h1_atr, sl_atr_multiplier)
     risk_points = abs(entry_price - stop_loss) / XAUUSD_POINT_SIZE
 
     if risk_points == 0:
         return None
 
-    # TP1 at 1:2.5 RR
-    reward_1 = risk_points * _TP1_RR_RATIO
+    # TP1 at configurable RR ratio (default 2.5)
+    reward_1 = risk_points * tp1_rr
     if zone.direction == "long":
         tp1 = entry_price + reward_1 * XAUUSD_POINT_SIZE
     else:

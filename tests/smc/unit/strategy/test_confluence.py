@@ -115,29 +115,27 @@ class TestScoreConfluence:
 
 
 class TestEffectiveThreshold:
-    """Sprint 5: Tests for transitional regime confluence floor."""
+    """Sprint 6: effective_threshold returns tier-only floor (regime removed)."""
 
-    def test_trending_tier1_uses_base_threshold(self) -> None:
-        from smc.strategy.confluence import TRADEABLE_THRESHOLD, effective_threshold
-        assert effective_threshold("Tier 1: D1+H4", "trending") == TRADEABLE_THRESHOLD
-
-    def test_transitional_raises_floor(self) -> None:
-        from smc.strategy.confluence import TRANSITIONAL_CONFLUENCE_FLOOR, effective_threshold
-        result = effective_threshold("Tier 1: D1+H4", "transitional")
-        assert result == TRANSITIONAL_CONFLUENCE_FLOOR
-        assert result == 0.60
-
-    def test_transitional_tier2_takes_stricter(self) -> None:
-        """Transitional floor (0.60) > Tier 2 floor (0.55) → use 0.60."""
-        from smc.strategy.confluence import effective_threshold
-        assert effective_threshold("Tier 2: H4-only", "transitional") == 0.60
-
-    def test_ranging_not_affected(self) -> None:
-        """Ranging regime does not change the threshold (it's handled in aggregator)."""
-        from smc.strategy.confluence import TRADEABLE_THRESHOLD, effective_threshold
-        assert effective_threshold("Tier 1: D1+H4", "ranging") == TRADEABLE_THRESHOLD
-
-    def test_default_regime_is_trending(self) -> None:
-        """Default regime parameter should behave as trending."""
+    def test_tier1_uses_base_threshold(self) -> None:
         from smc.strategy.confluence import TRADEABLE_THRESHOLD, effective_threshold
         assert effective_threshold("Tier 1: D1+H4") == TRADEABLE_THRESHOLD
+
+    def test_tier2_uses_tier2_floor(self) -> None:
+        from smc.strategy.confluence import TIER2_CONFLUENCE_FLOOR, effective_threshold
+        assert effective_threshold("Tier 2: H4-only") == TIER2_CONFLUENCE_FLOOR
+
+    def test_tier3_uses_tier3_floor(self) -> None:
+        from smc.strategy.confluence import TIER3_CONFLUENCE_FLOOR, effective_threshold
+        assert effective_threshold("Tier 3: D1-only") == TIER3_CONFLUENCE_FLOOR
+
+    def test_unknown_tier_uses_base(self) -> None:
+        from smc.strategy.confluence import TRADEABLE_THRESHOLD, effective_threshold
+        assert effective_threshold("Some other rationale") == TRADEABLE_THRESHOLD
+
+    def test_no_regime_param(self) -> None:
+        """Sprint 6: effective_threshold no longer accepts regime parameter."""
+        import inspect
+        from smc.strategy.confluence import effective_threshold
+        sig = inspect.signature(effective_threshold)
+        assert list(sig.parameters.keys()) == ["bias_rationale"]

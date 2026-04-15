@@ -17,6 +17,9 @@ from datetime import datetime, timedelta, timezone
 
 import polars as pl
 
+from smc.ai.models import AIRegimeAssessment, RegimeParams
+from smc.ai.param_router import route as route_regime_params
+from smc.ai.regime_classifier import classify_regime_ai
 from smc.data.schemas import Timeframe
 from smc.smc_core.detector import SMCDetector
 from smc.smc_core.types import SMCSnapshot
@@ -82,9 +85,13 @@ class MultiTimeframeAggregator:
         swing_length: int = 10,
         *,
         enable_ob_test_trigger: bool = False,
+        ai_regime_enabled: bool = False,
+        regime_cache: "RegimeCacheLookup | None" = None,
     ) -> None:
         self._detector = detector
         self._enable_ob_test_trigger = enable_ob_test_trigger
+        self._ai_regime_enabled = ai_regime_enabled
+        self._regime_cache = regime_cache
         self._zone_cooldowns: dict[tuple[float, float, str], datetime] = {}
         self._active_zones: set[tuple[float, float, str]] = set()
         # If the detector was not created with a swing_length_map,
@@ -154,6 +161,7 @@ class MultiTimeframeAggregator:
         self,
         data: dict[Timeframe, pl.DataFrame],
         current_price: float,
+        bar_ts: datetime | None = None,
     ) -> tuple[TradeSetup, ...]:
         """Run the full strategy pipeline and return scored trade setups.
 
@@ -166,6 +174,10 @@ class MultiTimeframeAggregator:
             capability.
         current_price:
             The current market price for XAUUSD.
+        bar_ts:
+            Current bar timestamp — used for regime cache lookup in
+            backtest mode.  When None, the regime classifier computes
+            from the data directly.
 
         Returns
         -------
@@ -185,10 +197,29 @@ class MultiTimeframeAggregator:
         if bias.direction == "neutral":
             return ()
 
-        # Step 2b: Regime filter — suppress Tier 2/3 in ranging markets
-        regime = classify_regime(data.get(Timeframe.D1))
-        is_tier1 = bias.rationale.startswith("Tier 1:")
-        if regime == "ranging" and not is_tier1:
+        # Step 2b: Regime classification — cache → AI → ATR fallback
+        ai_assessment = classify_regime_ai(
+            d1_df=data.get(Timeframe.D1),
+            h4_df=data.get(Timeframe.H4),
+            ai_enabled=self._ai_regime_enabled,
+            cache=self._regime_cache,
+            cache_ts=bar_ts,
+        )
+        regime_params = ai_assessment.param_preset
+
+        # Legacy ranging gate: when NOT using AI regime (Sprint 5 compat),
+        # suppress Tier 2/3 in ranging markets.  When AI regime is active,
+        # the direction filter + allowed_triggers handle this more precisely.
+        if not self._ai_regime_enabled and not self._regime_cache:
+            regime = classify_regime(data.get(Timeframe.D1))
+            is_tier1 = bias.rationale.startswith("Tier 1:")
+            if regime == "ranging" and not is_tier1:
+                return ()
+
+        # Sprint 6: Direction filter — block counter-trend trades
+        bias_dir_map = {"bullish": "long", "bearish": "short"}
+        trade_direction = bias_dir_map.get(bias.direction)
+        if trade_direction and trade_direction not in regime_params.allowed_directions:
             return ()
 
         # Step 3: Scan H1 zones
@@ -208,16 +239,14 @@ class MultiTimeframeAggregator:
         # Sprint 4: Compute H1 ATR(14) for adaptive SL buffer
         h1_atr = self._compute_h1_atr(data.get(Timeframe.H1))
 
-        # Determine the effective confluence threshold based on bias tier + regime
-        min_confluence = effective_threshold(bias.rationale, regime)
+        # Sprint 6: Confluence floor = max(tier floor, regime floor)
+        tier_floor = effective_threshold(bias.rationale)
+        min_confluence = max(tier_floor, regime_params.confluence_floor)
 
         now = datetime.now(tz=timezone.utc)
         setups: list[TradeSetup] = []
 
-        # Sprint 5: Intra-call zone dedup — prevents generating multiple
-        # setups for the same zone within one generate_setups() call.
-        # This is the primary anti-clustering mechanism during backtesting
-        # where _active_zones cannot be driven by engine callbacks.
+        # Sprint 5: Intra-call zone dedup
         zones_used_this_call: set[tuple[float, float, str]] = set()
 
         for zone in zones:
@@ -229,22 +258,27 @@ class MultiTimeframeAggregator:
                 if now < cooldown_until:
                     continue
 
-            # Sprint 5: Zone anti-clustering — skip if zone already has
-            # an active trade (callback-driven) or already produced a
-            # setup in this call (intra-call dedup)
+            # Sprint 5: Zone anti-clustering
             if zone_key in self._active_zones:
                 continue
             if zone_key in zones_used_this_call:
                 continue
 
+            # Sprint 6: Pass regime-aware SL/TP params to entry trigger
             entry = check_entry(
                 m15_snap, zone, current_price, h1_atr=h1_atr,
-                enable_ob_test=self._enable_ob_test_trigger,
+                enable_ob_test="ob_test_rejection" in regime_params.allowed_triggers,
+                sl_atr_multiplier=regime_params.sl_atr_multiplier,
+                tp1_rr=regime_params.tp1_rr,
             )
             if entry is None:
                 continue
 
-            # Step 5: Score confluence with tier-gated threshold
+            # Sprint 6: Trigger type filter — only regime-permitted triggers
+            if entry.trigger_type not in regime_params.allowed_triggers:
+                continue
+
+            # Step 5: Score confluence
             conf_score = score_confluence(bias, zone, entry)
 
             if conf_score < min_confluence:
@@ -261,9 +295,10 @@ class MultiTimeframeAggregator:
             )
             zones_used_this_call.add(zone_key)
 
-        # Step 6: Sort by confluence score descending
+        # Step 6: Sort by confluence score descending, cap by regime max_concurrent
         sorted_setups = sorted(setups, key=lambda s: s.confluence_score, reverse=True)
-        return tuple(sorted_setups)
+        capped = sorted_setups[:regime_params.max_concurrent]
+        return tuple(capped)
 
     @staticmethod
     def _compute_h1_atr(h1_df: pl.DataFrame | None) -> float:

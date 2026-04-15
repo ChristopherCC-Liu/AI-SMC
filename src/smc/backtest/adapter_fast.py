@@ -123,7 +123,7 @@ class FastSMCStrategyAdapter:
                     data[tf] = filtered
             data[Timeframe.M15] = m15_window
 
-            setups = self._aggregator.generate_setups(data, current_price)
+            setups = self._aggregator.generate_setups(data, current_price, bar_ts=bar_ts)
             if setups:
                 result[bar_ts] = tuple(setups)
 
@@ -148,7 +148,7 @@ class FastSMCStrategyAdapter:
                         data[tf] = filtered
                 data[Timeframe.M15] = m15_window
 
-                setups = self._aggregator.generate_setups(data, current_price)
+                setups = self._aggregator.generate_setups(data, current_price, bar_ts=bar_ts)
                 if setups:
                     result[bar_ts] = tuple(setups)
 
