@@ -25,6 +25,15 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+def _trend_color(trend: str) -> str:
+    """Return a Rich color name for the given trend direction."""
+    if trend == "bullish":
+        return "green"
+    if trend == "bearish":
+        return "red"
+    return "yellow"
+
+
 app = typer.Typer(
     name="smc",
     help="AI-SMC: Smart Money Concepts trading system for XAUUSD.",
@@ -104,7 +113,7 @@ def cmd_ingest(
         )
         raise typer.Exit(code=1) from None
 
-    csv_files = sorted(csv_dir.glob("*.csv"))
+    csv_files = sorted(csv_dir.rglob("*.csv"))
     if not csv_files:
         err_console.print(f"[yellow]No CSV files found in {csv_dir}[/yellow]")
         raise typer.Exit(code=1)
@@ -121,20 +130,25 @@ def cmd_ingest(
     )
 
     try:
-        from smc.data.adapters.base import ingest_csv_files  # type: ignore[import]
+        from smc.data.ingest import ingest_csv_files
 
-        result = ingest_csv_files(
-            csv_files=csv_files,
+        manifest = ingest_csv_files(
+            csv_dir=csv_dir,
             instrument=instrument,
             timeframe=tf,
             data_dir=cfg.data_dir,
         )
-        console.print(f"[green]Ingest complete.[/green] Rows written: {result.row_count}")
-    except ImportError:
-        err_console.print(
-            "[red]smc.data.adapters.base.ingest_csv_files not yet implemented.[/red]"
+        console.print(
+            Panel(
+                f"[green]Ingest complete![/green]\n"
+                f"Rows ingested : [bold]{manifest.row_count:,}[/bold]\n"
+                f"SHA-256        : [dim]{manifest.sha256[:16]}...[/dim]\n"
+                f"Date range     : [cyan]{manifest.date_min[:10]}[/cyan] → "
+                f"[cyan]{manifest.date_max[:10]}[/cyan]\n"
+                f"Manifest path  : [dim]{cfg.data_dir / 'manifests'}[/dim]",
+                title="[bold green]Ingest Result[/bold green]",
+            )
         )
-        raise typer.Exit(code=1) from None
     except Exception as exc:  # noqa: BLE001
         err_console.print(f"[red]Ingest failed: {exc}[/red]")
         raise typer.Exit(code=1) from exc
@@ -192,49 +206,303 @@ def cmd_detect(
         )
     )
 
-    try:
-        from smc.smc_core import detect_patterns  # type: ignore[import]
+    # Parse date string to datetime if provided
+    from datetime import datetime as dt_cls
+    from datetime import timezone as tz_cls
 
-        patterns = detect_patterns(
+    detect_date: dt_cls | None = None
+    if date is not None:
+        try:
+            detect_date = dt_cls.fromisoformat(date).replace(tzinfo=tz_cls.utc)
+        except ValueError:
+            err_console.print(
+                f"[red]Invalid date format '{date}'. Use YYYY-MM-DD.[/red]"
+            )
+            raise typer.Exit(code=1) from None
+
+    try:
+        from smc.smc_core.pipeline import detect_patterns
+
+        snapshot = detect_patterns(
             instrument=instrument,
             timeframe=tf,
-            date=date,
+            date=detect_date,
             data_dir=cfg.data_dir,
         )
-    except ImportError:
-        err_console.print(
-            "[red]smc.smc_core.detect_patterns not yet implemented.[/red]"
-        )
-        raise typer.Exit(code=1) from None
     except Exception as exc:  # noqa: BLE001
         err_console.print(f"[red]Detection failed: {exc}[/red]")
         raise typer.Exit(code=1) from exc
 
-    if not patterns:
-        console.print("[yellow]No patterns detected for the given parameters.[/yellow]")
-        return
+    # --- Render SMCSnapshot as Rich tables ---
 
-    table = Table(
-        title=f"SMC Patterns — {instrument} {tf.value} ({date or 'latest'})",
-        show_header=True,
-        header_style="bold magenta",
+    # Trend direction
+    console.print(
+        f"\n[bold]Trend Direction:[/bold] [{_trend_color(snapshot.trend_direction)}]"
+        f"{snapshot.trend_direction.upper()}[/{_trend_color(snapshot.trend_direction)}]\n"
     )
-    table.add_column("Type", style="cyan", no_wrap=True)
-    table.add_column("Direction", style="yellow")
-    table.add_column("Price Level", justify="right")
-    table.add_column("Strength", justify="right")
-    table.add_column("Timestamp", style="dim")
 
-    for pattern in patterns:
-        table.add_row(
-            str(getattr(pattern, "pattern_type", "?")),
-            str(getattr(pattern, "direction", "?")),
-            f"{getattr(pattern, 'price_level', 0.0):.2f}",
-            f"{getattr(pattern, 'strength', 0.0):.3f}",
-            str(getattr(pattern, "ts", "?")),
+    # Swing Points
+    if snapshot.swing_points:
+        sw_table = Table(
+            title="Swing Points",
+            show_header=True,
+            header_style="bold magenta",
+        )
+        sw_table.add_column("Type", style="cyan", no_wrap=True)
+        sw_table.add_column("Price", justify="right")
+        sw_table.add_column("Strength", justify="right")
+        sw_table.add_column("Timestamp", style="dim")
+        for sp in snapshot.swing_points:
+            sw_table.add_row(
+                sp.swing_type,
+                f"{sp.price:.2f}",
+                str(sp.strength),
+                sp.ts.strftime("%Y-%m-%d %H:%M"),
+            )
+        console.print(sw_table)
+
+    # Order Blocks
+    if snapshot.order_blocks:
+        ob_table = Table(
+            title="Order Blocks",
+            show_header=True,
+            header_style="bold magenta",
+        )
+        ob_table.add_column("Type", style="cyan", no_wrap=True)
+        ob_table.add_column("High", justify="right")
+        ob_table.add_column("Low", justify="right")
+        ob_table.add_column("Mitigated", style="yellow")
+        ob_table.add_column("Start", style="dim")
+        for ob in snapshot.order_blocks:
+            ob_table.add_row(
+                ob.ob_type,
+                f"{ob.high:.2f}",
+                f"{ob.low:.2f}",
+                "Yes" if ob.mitigated else "No",
+                ob.ts_start.strftime("%Y-%m-%d %H:%M"),
+            )
+        console.print(ob_table)
+
+    # Fair Value Gaps
+    if snapshot.fvgs:
+        fvg_table = Table(
+            title="Fair Value Gaps",
+            show_header=True,
+            header_style="bold magenta",
+        )
+        fvg_table.add_column("Type", style="cyan", no_wrap=True)
+        fvg_table.add_column("High", justify="right")
+        fvg_table.add_column("Low", justify="right")
+        fvg_table.add_column("Filled %", justify="right")
+        fvg_table.add_column("Timestamp", style="dim")
+        for fvg in snapshot.fvgs:
+            fvg_table.add_row(
+                fvg.fvg_type,
+                f"{fvg.high:.2f}",
+                f"{fvg.low:.2f}",
+                f"{fvg.filled_pct:.1f}%",
+                fvg.ts.strftime("%Y-%m-%d %H:%M"),
+            )
+        console.print(fvg_table)
+
+    # Structure Breaks
+    if snapshot.structure_breaks:
+        sb_table = Table(
+            title="Structure Breaks",
+            show_header=True,
+            header_style="bold magenta",
+        )
+        sb_table.add_column("Type", style="cyan", no_wrap=True)
+        sb_table.add_column("Direction", style="yellow")
+        sb_table.add_column("Price", justify="right")
+        sb_table.add_column("Timestamp", style="dim")
+        for sb in snapshot.structure_breaks:
+            sb_table.add_row(
+                sb.break_type.upper(),
+                sb.direction,
+                f"{sb.price:.2f}",
+                sb.ts.strftime("%Y-%m-%d %H:%M"),
+            )
+        console.print(sb_table)
+
+    # Liquidity Levels
+    if snapshot.liquidity_levels:
+        lq_table = Table(
+            title="Liquidity Levels",
+            show_header=True,
+            header_style="bold magenta",
+        )
+        lq_table.add_column("Type", style="cyan", no_wrap=True)
+        lq_table.add_column("Price", justify="right")
+        lq_table.add_column("Touches", justify="right")
+        lq_table.add_column("Swept", style="yellow")
+        for lq in snapshot.liquidity_levels:
+            lq_table.add_row(
+                lq.level_type,
+                f"{lq.price:.2f}",
+                str(lq.touches),
+                "Yes" if lq.swept else "No",
+            )
+        console.print(lq_table)
+
+    # Summary
+    console.print(
+        Panel(
+            f"Snapshot ts     : [dim]{snapshot.ts.strftime('%Y-%m-%d %H:%M')}[/dim]\n"
+            f"Swing points    : [bold]{len(snapshot.swing_points)}[/bold]\n"
+            f"Order blocks    : [bold]{len(snapshot.order_blocks)}[/bold]\n"
+            f"Fair value gaps  : [bold]{len(snapshot.fvgs)}[/bold]\n"
+            f"Structure breaks : [bold]{len(snapshot.structure_breaks)}[/bold]\n"
+            f"Liquidity levels : [bold]{len(snapshot.liquidity_levels)}[/bold]",
+            title="[bold]Detection Summary[/bold]",
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# smc backtest
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="backtest")
+def cmd_backtest(
+    instrument: str = typer.Option(
+        "XAUUSD",
+        "--instrument",
+        help="Instrument symbol.",
+    ),
+    train_months: int = typer.Option(
+        12,
+        "--train-months",
+        help="Training window length in months.",
+    ),
+    test_months: int = typer.Option(
+        3,
+        "--test-months",
+        help="Test (OOS) window length in months.",
+    ),
+    step_months: int = typer.Option(
+        3,
+        "--step-months",
+        help="Window slide step in months.",
+    ),
+) -> None:
+    """Run walk-forward out-of-sample backtest.
+
+    Uses the SMC multi-timeframe strategy (D1+H4 bias, H1 zones, M15 entries)
+    with the bar-by-bar backtest engine and pessimistic fill model.
+
+    Requires data for D1, H4, H1, and M15 timeframes in the data lake.
+    Run ``smc ingest`` first to populate the lake.
+    """
+    from pathlib import Path
+
+    from smc.backtest.adapter import SMCStrategyAdapter
+    from smc.backtest.engine import BarBacktestEngine
+    from smc.backtest.fills import FillModel
+    from smc.backtest.types import BacktestConfig
+    from smc.backtest.walk_forward import aggregate_oos_results, walk_forward_oos
+    from smc.config import SMCConfig
+    from smc.data.lake import ForexDataLake
+    from smc.smc_core.detector import SMCDetector
+    from smc.strategy.aggregator import MultiTimeframeAggregator
+
+    cfg = SMCConfig()
+
+    console.print(
+        Panel(
+            f"Instrument    : [cyan]{instrument}[/cyan]\n"
+            f"Train window  : [cyan]{train_months}[/cyan] months\n"
+            f"Test window   : [cyan]{test_months}[/cyan] months\n"
+            f"Step          : [cyan]{step_months}[/cyan] months\n"
+            f"Data dir      : [dim]{cfg.data_dir}[/dim]",
+            title="[bold]SMC Walk-Forward Backtest[/bold]",
+        )
+    )
+
+    try:
+        # Build the pipeline
+        bt_config = BacktestConfig(instrument=instrument)
+        fill_model = FillModel(
+            bt_config.spread_points,
+            bt_config.slippage_points,
+            bt_config.commission_per_lot,
+        )
+        engine = BarBacktestEngine(bt_config, fill_model)
+        detector = SMCDetector(swing_length=cfg.swing_length)
+        aggregator = MultiTimeframeAggregator(detector=detector)
+        lake = ForexDataLake(cfg.data_dir)
+
+        strategy = SMCStrategyAdapter(aggregator, lake, instrument=instrument)
+
+        # Run walk-forward OOS
+        results = walk_forward_oos(
+            engine,
+            strategy,
+            lake,
+            train_months=train_months,
+            test_months=test_months,
+            step_months=step_months,
         )
 
-    console.print(table)
+        if not results:
+            console.print(
+                "[yellow]No OOS windows could be constructed. "
+                "Ensure sufficient data is ingested (need at least "
+                f"{train_months + test_months} months).[/yellow]"
+            )
+            raise typer.Exit(code=1)
+
+        summary = aggregate_oos_results(results)
+
+        # --- Render results ---
+        # Summary panel
+        console.print(
+            Panel(
+                f"OOS Windows       : [bold]{summary.windows}[/bold]\n"
+                f"Total OOS Trades  : [bold]{summary.total_oos_trades}[/bold]\n"
+                f"Pooled Sharpe     : [bold]{summary.pooled_sharpe:.3f}[/bold]\n"
+                f"Consistency Ratio : [bold]{summary.consistency_ratio:.1%}[/bold]",
+                title="[bold green]Walk-Forward Summary[/bold green]",
+            )
+        )
+
+        # Per-window table
+        wf_table = Table(
+            title="OOS Window Results",
+            show_header=True,
+            header_style="bold magenta",
+        )
+        wf_table.add_column("Window", style="cyan", no_wrap=True)
+        wf_table.add_column("Period", style="dim")
+        wf_table.add_column("Trades", justify="right")
+        wf_table.add_column("Sharpe", justify="right")
+        wf_table.add_column("Sortino", justify="right")
+        wf_table.add_column("Max DD%", justify="right")
+        wf_table.add_column("Win Rate", justify="right")
+        wf_table.add_column("Profit Factor", justify="right")
+
+        for idx, r in enumerate(results, 1):
+            period = (
+                f"{r.start_date.strftime('%Y-%m-%d')} to "
+                f"{r.end_date.strftime('%Y-%m-%d')}"
+            )
+            wf_table.add_row(
+                f"#{idx}",
+                period,
+                str(r.total_trades),
+                f"{r.sharpe:.3f}",
+                f"{r.sortino:.3f}",
+                f"{r.max_drawdown_pct:.2%}",
+                f"{r.win_rate:.1%}",
+                f"{r.profit_factor:.2f}" if r.profit_factor < 1000 else "inf",
+            )
+
+        console.print(wf_table)
+
+    except Exception as exc:  # noqa: BLE001
+        err_console.print(f"[red]Backtest failed: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
 
 
 # ---------------------------------------------------------------------------

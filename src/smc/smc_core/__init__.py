@@ -10,6 +10,7 @@ from __future__ import annotations
 from smc.smc_core.constants import XAUUSD_PIP_SIZE, XAUUSD_POINT_SIZE
 from smc.smc_core.detector import SMCDetector
 from smc.smc_core.fvg import detect_fvgs, update_fill_status
+from smc.smc_core.pipeline import detect_patterns
 from smc.smc_core.liquidity import detect_liquidity_levels, detect_liquidity_sweep
 from smc.smc_core.order_block import detect_order_blocks, update_mitigation
 from smc.smc_core.structure import current_trend, detect_structure
@@ -30,6 +31,8 @@ __all__ = [
     "XAUUSD_PIP_SIZE",
     # Detector
     "SMCDetector",
+    # Pipeline
+    "detect_patterns",
     # Types
     "FairValueGap",
     "LiquidityLevel",

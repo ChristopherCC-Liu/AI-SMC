@@ -108,6 +108,41 @@ class SMCConfig(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # SMC Detection Parameters
+    # ------------------------------------------------------------------
+    swing_length: int = Field(
+        default=10,
+        ge=1,
+        description="Number of candles on each side to confirm a swing high/low.",
+    )
+    liquidity_tolerance_points: float = Field(
+        default=5.0,
+        ge=0.0,
+        description="Tolerance in points for clustering equal-high/low liquidity levels.",
+    )
+    ob_lookback: int = Field(
+        default=50,
+        ge=1,
+        description="Number of bars to look back when scanning for order blocks.",
+    )
+    min_confluence_score: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="Minimum confluence score to accept a trade setup.",
+    )
+    max_concurrent_setups: int = Field(
+        default=3,
+        ge=1,
+        description="Maximum number of concurrent active trade setups.",
+    )
+    min_rr_ratio: float = Field(
+        default=2.0,
+        ge=0.5,
+        description="Minimum reward-to-risk ratio to qualify a setup.",
+    )
+
+    # ------------------------------------------------------------------
     # LLM (Phase 3+)
     # ------------------------------------------------------------------
     anthropic_api_key: SecretStr = Field(
