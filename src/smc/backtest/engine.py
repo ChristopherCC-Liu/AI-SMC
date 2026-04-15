@@ -11,7 +11,7 @@ the equity curve, and produces a complete BacktestResult.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 
 import polars as pl
 
@@ -75,6 +75,8 @@ class _OpenPosition:
         "tp2",
         "confluence",
         "trigger_type",
+        "zone_high",
+        "zone_low",
     )
 
     def __init__(
@@ -88,6 +90,8 @@ class _OpenPosition:
         tp2: float | None,
         confluence: float,
         trigger_type: str,
+        zone_high: float = 0.0,
+        zone_low: float = 0.0,
     ) -> None:
         self.open_ts = open_ts
         self.fill_price = fill_price
@@ -98,6 +102,8 @@ class _OpenPosition:
         self.tp2 = tp2
         self.confluence = confluence
         self.trigger_type = trigger_type
+        self.zone_high = zone_high
+        self.zone_low = zone_low
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +131,7 @@ class BarBacktestEngine:
         self,
         setups_by_bar: dict[datetime, tuple[TradeSetupLike, ...]],
         bars: pl.DataFrame,
+        on_sl_hit: Callable[[float, float, str, datetime], None] | None = None,
     ) -> BacktestResult:
         """Run the backtest over a chronological sequence of M15 bars.
 
@@ -200,6 +207,13 @@ class BarBacktestEngine:
                             trigger_type=pos.trigger_type,
                         )
                     )
+                    # Notify zone cooldown on SL hit
+                    if (
+                        exit_result.reason == "sl"
+                        and on_sl_hit is not None
+                        and pos.zone_high > 0.0
+                    ):
+                        on_sl_hit(pos.zone_high, pos.zone_low, pos.direction, bar_ts)
                 else:
                     still_open.append(pos)
             open_positions = still_open
@@ -226,6 +240,11 @@ class BarBacktestEngine:
                 commission = self._fill_model.commission_per_lot * lots
                 balance -= commission
 
+                # Extract zone boundaries for cooldown tracking
+                zone = getattr(setup, "zone", None)
+                z_high = zone.zone_high if zone is not None else 0.0
+                z_low = zone.zone_low if zone is not None else 0.0
+
                 open_positions.append(
                     _OpenPosition(
                         open_ts=bar_ts,
@@ -237,6 +256,8 @@ class BarBacktestEngine:
                         tp2=sig.take_profit_2,
                         confluence=setup.confluence_score,
                         trigger_type=getattr(sig, "trigger_type", type(setup).__name__),
+                        zone_high=z_high,
+                        zone_low=z_low,
                     )
                 )
 

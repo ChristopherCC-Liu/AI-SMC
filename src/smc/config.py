@@ -163,6 +163,37 @@ class SMCConfig(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # Regime Filter (Sprint 3)
+    # ------------------------------------------------------------------
+    regime_atr_trending_pct: float = Field(
+        default=1.2,
+        ge=0.1,
+        description="D1 ATR(14) as % of price above which market is 'trending'.",
+    )
+    regime_atr_ranging_pct: float = Field(
+        default=0.8,
+        ge=0.1,
+        description="D1 ATR(14) as % of price below which market is 'ranging'.",
+    )
+    zone_cooldown_hours: int = Field(
+        default=24,
+        ge=0,
+        description="Hours to lock out a zone after it produces a losing trade.",
+    )
+    tier2_confluence_floor: float = Field(
+        default=0.55,
+        ge=0.0,
+        le=1.0,
+        description="Minimum confluence for Tier 2 (H4-only) bias trades.",
+    )
+    tier3_confluence_floor: float = Field(
+        default=0.55,
+        ge=0.0,
+        le=1.0,
+        description="Minimum confluence for Tier 3 (D1-only) bias trades.",
+    )
+
+    # ------------------------------------------------------------------
     # LLM (Phase 3+)
     # ------------------------------------------------------------------
     anthropic_api_key: SecretStr = Field(

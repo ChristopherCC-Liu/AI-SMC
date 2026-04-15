@@ -31,6 +31,25 @@ _W_LIQUIDITY = 0.15
 # trade frequency while still filtering low-quality setups.
 TRADEABLE_THRESHOLD = 0.45
 
+# Tier-gated confluence floors: Tier 2 (H4-only) requires higher
+# confluence since it lacks D1 confirmation.  Tier 3 (D1-only) uses
+# an even higher floor since it lacks the more responsive H4 signal.
+TIER2_CONFLUENCE_FLOOR = 0.55
+TIER3_CONFLUENCE_FLOOR = 0.55
+
+
+def effective_threshold(bias_rationale: str) -> float:
+    """Return the effective confluence threshold based on bias tier.
+
+    The bias rationale string from ``compute_htf_bias`` starts with
+    "Tier N:" which encodes the tier level.
+    """
+    if bias_rationale.startswith("Tier 2:"):
+        return TIER2_CONFLUENCE_FLOOR
+    if bias_rationale.startswith("Tier 3:"):
+        return TIER3_CONFLUENCE_FLOOR
+    return TRADEABLE_THRESHOLD
+
 
 # ---------------------------------------------------------------------------
 # Component scorers

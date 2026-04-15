@@ -13,16 +13,21 @@ This is the single entry point for generating trade setups from raw OHLCV data.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import polars as pl
 
 from smc.data.schemas import Timeframe
 from smc.smc_core.detector import SMCDetector
 from smc.smc_core.types import SMCSnapshot
-from smc.strategy.confluence import TRADEABLE_THRESHOLD, score_confluence
+from smc.strategy.confluence import (
+    TRADEABLE_THRESHOLD,
+    effective_threshold,
+    score_confluence,
+)
 from smc.strategy.entry_trigger import check_entry
 from smc.strategy.htf_bias import compute_htf_bias
+from smc.strategy.regime import classify_regime
 from smc.strategy.types import TradeSetup
 from smc.strategy.zone_scanner import scan_zones
 
@@ -60,12 +65,16 @@ class MultiTimeframeAggregator:
         Timeframe.M15: 10,
     }
 
+    # Zone cooldown duration after a losing trade (24 hours)
+    _ZONE_COOLDOWN_HOURS = 24
+
     def __init__(
         self,
         detector: SMCDetector,
         swing_length: int = 10,
     ) -> None:
         self._detector = detector
+        self._zone_cooldowns: dict[tuple[float, float, str], datetime] = {}
         # If the detector was not created with a swing_length_map,
         # inject the default one so all aggregator pipelines benefit.
         if not detector.swing_length_map:
@@ -80,6 +89,26 @@ class MultiTimeframeAggregator:
     def detector(self) -> SMCDetector:
         """The underlying SMC detector."""
         return self._detector
+
+    def record_zone_loss(
+        self,
+        zone_high: float,
+        zone_low: float,
+        direction: str,
+        loss_time: datetime,
+    ) -> None:
+        """Record a losing trade for zone cooldown tracking.
+
+        After a zone produces a losing trade, it enters a 24-hour cooldown
+        period during which no new trades will be generated from the same zone.
+        """
+        key = (round(zone_high, 2), round(zone_low, 2), direction)
+        cooldown_until = loss_time + timedelta(hours=self._ZONE_COOLDOWN_HOURS)
+        self._zone_cooldowns[key] = cooldown_until
+
+    def clear_cooldowns(self) -> None:
+        """Clear all zone cooldowns. Called between walk-forward windows."""
+        self._zone_cooldowns.clear()
 
     def generate_setups(
         self,
@@ -116,6 +145,12 @@ class MultiTimeframeAggregator:
         if bias.direction == "neutral":
             return ()
 
+        # Step 2b: Regime filter — suppress Tier 2/3 in ranging markets
+        regime = classify_regime(data.get(Timeframe.D1))
+        is_tier1 = bias.rationale.startswith("Tier 1:")
+        if regime == "ranging" and not is_tier1:
+            return ()
+
         # Step 3: Scan H1 zones
         h1_snap = snapshots.get(Timeframe.H1)
         if h1_snap is None:
@@ -130,18 +165,28 @@ class MultiTimeframeAggregator:
         if m15_snap is None:
             return ()
 
+        # Determine the effective confluence threshold based on bias tier
+        min_confluence = effective_threshold(bias.rationale)
+
         now = datetime.now(tz=timezone.utc)
         setups: list[TradeSetup] = []
 
         for zone in zones:
+            # Zone cooldown: skip zones that recently produced a loss
+            zone_key = (round(zone.zone_high, 2), round(zone.zone_low, 2), zone.direction)
+            if zone_key in self._zone_cooldowns:
+                cooldown_until = self._zone_cooldowns[zone_key]
+                if now < cooldown_until:
+                    continue
+
             entry = check_entry(m15_snap, zone, current_price)
             if entry is None:
                 continue
 
-            # Step 5: Score confluence
+            # Step 5: Score confluence with tier-gated threshold
             conf_score = score_confluence(bias, zone, entry)
 
-            if conf_score < TRADEABLE_THRESHOLD:
+            if conf_score < min_confluence:
                 continue
 
             setups.append(
