@@ -50,12 +50,31 @@ class MultiTimeframeAggregator:
     >>> setups = agg.generate_setups(data={...}, current_price=2350.0)
     """
 
+    # Default per-TF swing_length values — D1 fastest (5), H4 medium (7),
+    # H1/M15 standard (10).  Faster HTF swing detection catches trend
+    # changes sooner without adding noise on lower timeframes.
+    _DEFAULT_SWING_LENGTH_MAP: dict[Timeframe, int] = {
+        Timeframe.D1: 5,
+        Timeframe.H4: 7,
+        Timeframe.H1: 10,
+        Timeframe.M15: 10,
+    }
+
     def __init__(
         self,
         detector: SMCDetector,
         swing_length: int = 10,
     ) -> None:
         self._detector = detector
+        # If the detector was not created with a swing_length_map,
+        # inject the default one so all aggregator pipelines benefit.
+        if not detector.swing_length_map:
+            self._detector = SMCDetector(
+                swing_length=detector.swing_length,
+                min_swing_points=detector.min_swing_points,
+                liquidity_tolerance_points=detector.liquidity_tolerance_points,
+                swing_length_map=self._DEFAULT_SWING_LENGTH_MAP,
+            )
 
     @property
     def detector(self) -> SMCDetector:
@@ -83,17 +102,14 @@ class MultiTimeframeAggregator:
         -------
         tuple[TradeSetup, ...]
             Trade setups sorted by confluence score descending.
-            Only includes setups that meet the tradeable threshold (>= 0.6).
+            Only includes setups that meet the tradeable threshold (>= 0.45).
         """
         # Step 1: Detect SMC patterns on all available timeframes
         snapshots = self._detect_all(data)
 
-        # Step 2: Compute HTF bias (requires D1 and H4)
+        # Step 2: Compute HTF bias (tiered — accepts None for missing TFs)
         d1_snap = snapshots.get(Timeframe.D1)
         h4_snap = snapshots.get(Timeframe.H4)
-
-        if d1_snap is None or h4_snap is None:
-            return ()
 
         bias = compute_htf_bias(d1_snap, h4_snap)
 

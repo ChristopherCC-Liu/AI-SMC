@@ -1,7 +1,7 @@
 """Multi-factor confluence scoring for trade setups.
 
 Evaluates the confluence of multiple SMC factors to produce a final
-quality score. Only setups scoring >= 0.6 are considered tradeable.
+quality score. Only setups scoring >= 0.45 are considered tradeable.
 
 Weight distribution:
 - HTF alignment:     0.25 (D1+H4 bias strength)
@@ -27,8 +27,9 @@ _W_ENTRY_TRIGGER = 0.20
 _W_RR_RATIO = 0.15
 _W_LIQUIDITY = 0.15
 
-# Minimum tradeable score
-TRADEABLE_THRESHOLD = 0.6
+# Minimum tradeable score — lowered from 0.6 to 0.45 to increase
+# trade frequency while still filtering low-quality setups.
+TRADEABLE_THRESHOLD = 0.45
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +72,7 @@ def _score_entry_trigger(entry: EntrySignal) -> float:
     trigger_scores = {
         "choch_in_zone": 0.9,
         "fvg_fill_in_zone": 0.7,
+        "bos_in_zone": 0.55,
         "ob_test_rejection": 0.5,
     }
     trigger_score = trigger_scores.get(entry.trigger_type, 0.3)
@@ -158,7 +160,7 @@ def score_confluence(
     Returns
     -------
     float
-        Confluence score in [0.0, 1.0]. Only setups >= 0.6 are tradeable.
+        Confluence score in [0.0, 1.0]. Only setups >= 0.45 are tradeable.
     """
     htf_score = _score_htf_alignment(bias)
     zone_score = _score_zone_quality(zone)

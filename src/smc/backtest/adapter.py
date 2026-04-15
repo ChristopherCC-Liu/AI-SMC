@@ -12,7 +12,7 @@ bar timestamp to satisfy the engine's contract.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import polars as pl
 
@@ -20,6 +20,13 @@ from smc.backtest.engine import TradeSetupLike
 from smc.data.lake import ForexDataLake
 from smc.data.schemas import Timeframe
 from smc.strategy.aggregator import MultiTimeframeAggregator
+
+# Duration of each HTF candle — a bar is only "closed" after ts + duration.
+_HTF_DURATION: dict[Timeframe, timedelta] = {
+    Timeframe.D1: timedelta(hours=24),
+    Timeframe.H4: timedelta(hours=4),
+    Timeframe.H1: timedelta(hours=1),
+}
 
 
 class SMCStrategyAdapter:
@@ -92,7 +99,11 @@ class SMCStrategyAdapter:
         for i, bar_ts in enumerate(ts_list):
             current_price = close_col[i]
 
-            data: dict[Timeframe, pl.DataFrame] = {**htf_data}
+            data: dict[Timeframe, pl.DataFrame] = {}
+            # Filter HTF data: only include bars whose close time <= bar_ts
+            for tf, htf_df in htf_data.items():
+                duration = _HTF_DURATION.get(tf, timedelta(0))
+                data[tf] = htf_df.filter(pl.col("ts") + duration <= bar_ts)
             # Filter M15 data to only bars up to and including current bar
             # (no look-ahead)
             m15_up_to = m15_bars.filter(pl.col("ts") <= bar_ts)

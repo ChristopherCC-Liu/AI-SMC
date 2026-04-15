@@ -51,15 +51,15 @@ class TestCheckEntry:
         # SL should be below the zone low (2348.00)
         assert result.stop_loss < bullish_ob_zone.zone_low
 
-    def test_tp1_at_2rr(
+    def test_tp1_at_2_5rr(
         self,
         m15_choch_in_zone_snapshot: SMCSnapshot,
         bullish_ob_zone: TradeZone,
     ) -> None:
-        """TP1 should be at approximately 1:2 RR."""
+        """TP1 should be at approximately 1:2.5 RR."""
         result = check_entry(m15_choch_in_zone_snapshot, bullish_ob_zone, 2350.00)
         assert result is not None
-        assert result.rr_ratio == pytest.approx(2.0, abs=0.1)
+        assert result.rr_ratio == pytest.approx(2.5, abs=0.1)
 
     def test_tp2_at_liquidity_level(
         self,
@@ -190,7 +190,7 @@ class TestCheckEntryShortDirection:
         )
         result = check_entry(m15_snap, zone, 2350.00)
         assert result is not None
-        # TP2 should be above TP1 (fallback 3:1 RR)
+        # TP2 should be above TP1 (fallback 4:1 RR)
         assert result.take_profit_2 > result.take_profit_1
 
     def test_fvg_zone_no_fvg_fill_trigger(self) -> None:

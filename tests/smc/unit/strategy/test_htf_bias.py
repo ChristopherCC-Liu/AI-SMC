@@ -9,15 +9,16 @@ from smc.strategy.htf_bias import compute_htf_bias
 
 
 class TestComputeHTFBias:
-    def test_bullish_d1_and_h4_aligned(
+    def test_bullish_d1_and_h4_aligned_tier1(
         self,
         d1_bullish_snapshot: SMCSnapshot,
         h4_bullish_snapshot: SMCSnapshot,
     ) -> None:
+        """D1 + H4 aligned → Tier 1 with confidence >= 0.7."""
         bias = compute_htf_bias(d1_bullish_snapshot, h4_bullish_snapshot)
         assert bias.direction == "bullish"
-        assert bias.confidence > 0.0
-        assert "bullish" in bias.rationale.lower()
+        assert bias.confidence >= 0.7
+        assert "tier 1" in bias.rationale.lower()
 
     def test_bearish_d1_and_h4_would_conflict(
         self,
@@ -30,28 +31,29 @@ class TestComputeHTFBias:
         assert bias.confidence == 0.0
         assert "conflicting" in bias.rationale.lower()
 
-    def test_d1_neutral_always_neutral(
+    def test_d1_neutral_h4_bullish_tier2(
         self,
         d1_neutral_snapshot: SMCSnapshot,
         h4_bullish_snapshot: SMCSnapshot,
     ) -> None:
-        """D1 neutral → always neutral regardless of H4."""
+        """D1 neutral + H4 bullish → Tier 2 H4-only bias (conf 0.4-0.7)."""
         bias = compute_htf_bias(d1_neutral_snapshot, h4_bullish_snapshot)
-        assert bias.direction == "neutral"
-        assert bias.confidence == 0.0
+        assert bias.direction == "bullish"
+        assert 0.4 <= bias.confidence <= 0.7
+        assert "tier 2" in bias.rationale.lower()
 
-    def test_d1_bullish_h4_neutral_weak(
+    def test_d1_bullish_h4_neutral_tier3(
         self,
         d1_bullish_snapshot: SMCSnapshot,
         h4_neutral_snapshot: SMCSnapshot,
     ) -> None:
-        """D1 bullish + H4 neutral → weak bullish bias (halved confidence)."""
+        """D1 bullish + H4 neutral → Tier 3 D1-only bias (conf 0.3-0.5)."""
         bias = compute_htf_bias(d1_bullish_snapshot, h4_neutral_snapshot)
         assert bias.direction == "bullish"
-        # Should have lower confidence than fully confirmed
+        assert 0.3 <= bias.confidence <= 0.5
+        # Should have lower confidence than Tier 1 (fully confirmed)
         full_bias = compute_htf_bias(d1_bullish_snapshot, d1_bullish_snapshot)
-        # Weak bias should generally have lower confidence
-        assert bias.confidence <= full_bias.confidence or bias.confidence <= 0.5
+        assert bias.confidence < full_bias.confidence
 
     def test_bearish_d1_and_h4_aligned(
         self,
@@ -97,3 +99,41 @@ class TestComputeHTFBias:
     ) -> None:
         bias = compute_htf_bias(d1_neutral_snapshot, h4_neutral_snapshot)
         assert bias.direction == "neutral"
+
+    def test_both_none_returns_neutral(self) -> None:
+        """Both snapshots None → neutral."""
+        bias = compute_htf_bias(None, None)
+        assert bias.direction == "neutral"
+        assert bias.confidence == 0.0
+
+    def test_d1_none_h4_bullish_tier2(
+        self,
+        h4_bullish_snapshot: SMCSnapshot,
+    ) -> None:
+        """D1 None + H4 bullish → Tier 2 H4-only bias."""
+        bias = compute_htf_bias(None, h4_bullish_snapshot)
+        assert bias.direction == "bullish"
+        assert 0.4 <= bias.confidence <= 0.7
+        assert "tier 2" in bias.rationale.lower()
+
+    def test_d1_bullish_h4_none_tier3(
+        self,
+        d1_bullish_snapshot: SMCSnapshot,
+    ) -> None:
+        """D1 bullish + H4 None → Tier 3 D1-only bias."""
+        bias = compute_htf_bias(d1_bullish_snapshot, None)
+        assert bias.direction == "bullish"
+        assert 0.3 <= bias.confidence <= 0.5
+        assert "tier 3" in bias.rationale.lower()
+
+    def test_tier1_higher_than_tier2_and_tier3(
+        self,
+        d1_bullish_snapshot: SMCSnapshot,
+        h4_bullish_snapshot: SMCSnapshot,
+    ) -> None:
+        """Tier 1 confidence > Tier 2 > Tier 3."""
+        tier1 = compute_htf_bias(d1_bullish_snapshot, h4_bullish_snapshot)
+        tier2 = compute_htf_bias(None, h4_bullish_snapshot)
+        tier3 = compute_htf_bias(d1_bullish_snapshot, None)
+        assert tier1.confidence > tier2.confidence
+        assert tier2.confidence > tier3.confidence

@@ -113,7 +113,27 @@ class SMCConfig(BaseSettings):
     swing_length: int = Field(
         default=10,
         ge=1,
-        description="Number of candles on each side to confirm a swing high/low.",
+        description="Default number of candles on each side to confirm a swing high/low.",
+    )
+    swing_length_d1: int = Field(
+        default=5,
+        ge=1,
+        description="Swing confirmation window for D1 timeframe.",
+    )
+    swing_length_h4: int = Field(
+        default=7,
+        ge=1,
+        description="Swing confirmation window for H4 timeframe.",
+    )
+    swing_length_h1: int = Field(
+        default=10,
+        ge=1,
+        description="Swing confirmation window for H1 timeframe.",
+    )
+    swing_length_m15: int = Field(
+        default=10,
+        ge=1,
+        description="Swing confirmation window for M15 timeframe.",
     )
     liquidity_tolerance_points: float = Field(
         default=5.0,
@@ -126,7 +146,7 @@ class SMCConfig(BaseSettings):
         description="Number of bars to look back when scanning for order blocks.",
     )
     min_confluence_score: float = Field(
-        default=0.6,
+        default=0.45,
         ge=0.0,
         le=1.0,
         description="Minimum confluence score to accept a trade setup.",

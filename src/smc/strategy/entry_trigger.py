@@ -8,9 +8,10 @@ Trigger conditions (any one is sufficient):
 1. **CHoCH in zone**: Price enters zone + M15 CHoCH in bias direction inside zone
 2. **FVG fill in zone**: M15 FVG fill inside an HTF OB zone
 3. **OB test rejection**: Price tests the zone boundary and shows rejection
+4. **BOS in zone**: M15 BOS in bias direction inside zone (weaker confirmation)
 
 Stop-loss is placed beyond the zone boundary + buffer.
-TP1 at 1:2 RR, TP2 at next HTF liquidity level.
+TP1 at 1:2.5 RR, TP2 at next HTF liquidity level (fallback 1:4 RR).
 """
 
 from __future__ import annotations
@@ -26,9 +27,10 @@ __all__ = ["check_entry"]
 # ---------------------------------------------------------------------------
 
 # Buffer beyond zone boundary for stop-loss placement (in points)
-_SL_BUFFER_POINTS = 30.0  # 30 points = $0.30 for XAUUSD
-_TP1_RR_RATIO = 2.0
-_TP2_RR_RATIO = 3.0  # Fallback if no liquidity level found
+# 150 points = $1.50 — proportional to XAUUSD ATR (1500-4000 pts)
+_SL_BUFFER_POINTS = 150.0
+_TP1_RR_RATIO = 2.5
+_TP2_RR_RATIO = 4.0  # Fallback if no liquidity level found
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +118,28 @@ def _find_ob_rejection(
     return False
 
 
+def _find_bos_in_zone(
+    m15_snapshot: SMCSnapshot,
+    zone: TradeZone,
+) -> bool:
+    """Check if there is a M15 BOS in the bias direction inside the zone.
+
+    BOS is a weaker confirmation than CHoCH but still shows directional
+    momentum.  Used as a 4th trigger type to increase trade frequency.
+    """
+    target_direction = "bullish" if zone.direction == "long" else "bearish"
+
+    for brk in reversed(m15_snapshot.structure_breaks):
+        if brk.break_type != "bos":
+            continue
+        if brk.direction != target_direction:
+            continue
+        if _price_in_zone(brk.price, zone):
+            return True
+
+    return False
+
+
 def _compute_sl(zone: TradeZone) -> float:
     """Compute stop-loss price beyond zone boundary + buffer."""
     buffer = _SL_BUFFER_POINTS * XAUUSD_POINT_SIZE
@@ -166,6 +190,8 @@ def _grade_entry(
         score += 0.35
     elif trigger_type == "ob_test_rejection":
         score += 0.25
+    elif trigger_type == "bos_in_zone":
+        score += 0.2
 
     # Zone type scoring
     if zone.zone_type == "ob_fvg_overlap":
@@ -218,8 +244,8 @@ def check_entry(
     """
     # Price must be in or very near the zone
     zone_range = zone.zone_high - zone.zone_low
-    expanded_high = zone.zone_high + zone_range * 0.1
-    expanded_low = zone.zone_low - zone_range * 0.1
+    expanded_high = zone.zone_high + zone_range * 0.25
+    expanded_low = zone.zone_low - zone_range * 0.25
 
     if not (expanded_low <= current_price <= expanded_high):
         return None
@@ -232,6 +258,8 @@ def check_entry(
         trigger_type = "fvg_fill_in_zone"
     elif _find_ob_rejection(m15_snapshot, zone, current_price):
         trigger_type = "ob_test_rejection"
+    elif _find_bos_in_zone(m15_snapshot, zone):
+        trigger_type = "bos_in_zone"
 
     if trigger_type is None:
         return None
@@ -244,14 +272,14 @@ def check_entry(
     if risk_points == 0:
         return None
 
-    # TP1 at 1:2 RR
+    # TP1 at 1:2.5 RR
     reward_1 = risk_points * _TP1_RR_RATIO
     if zone.direction == "long":
         tp1 = entry_price + reward_1 * XAUUSD_POINT_SIZE
     else:
         tp1 = entry_price - reward_1 * XAUUSD_POINT_SIZE
 
-    # TP2 at next liquidity level or fallback to 1:3 RR
+    # TP2 at next liquidity level or fallback to 1:4 RR
     tp2_liq = _find_next_liquidity_level(m15_snapshot, zone, current_price)
     if tp2_liq is not None:
         tp2 = tp2_liq

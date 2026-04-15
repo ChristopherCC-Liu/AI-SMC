@@ -17,7 +17,20 @@ class TestMultiTimeframeAggregator:
     def test_construction(self) -> None:
         detector = SMCDetector(swing_length=10)
         agg = MultiTimeframeAggregator(detector=detector)
+        # Aggregator auto-injects swing_length_map if absent
+        assert agg.detector.swing_length == 10
+        assert agg.detector.swing_length_map == {
+            Timeframe.D1: 5, Timeframe.H4: 7,
+            Timeframe.H1: 10, Timeframe.M15: 10,
+        }
+
+    def test_construction_preserves_custom_map(self) -> None:
+        """If detector already has a swing_length_map, aggregator preserves it."""
+        custom_map = {Timeframe.D1: 3, Timeframe.H4: 5}
+        detector = SMCDetector(swing_length=10, swing_length_map=custom_map)
+        agg = MultiTimeframeAggregator(detector=detector)
         assert agg.detector is detector
+        assert agg.detector.swing_length_map == custom_map
 
     def test_empty_data_returns_empty(self) -> None:
         detector = SMCDetector()
@@ -26,7 +39,7 @@ class TestMultiTimeframeAggregator:
         assert result == ()
 
     def test_missing_d1_returns_empty(self, sample_ohlcv_df: pl.DataFrame) -> None:
-        """Pipeline requires D1 + H4 for bias. Missing D1 → no setups."""
+        """Missing D1 → tiered bias may produce H4-only, but no M15 → no setups."""
         detector = SMCDetector()
         agg = MultiTimeframeAggregator(detector=detector)
         result = agg.generate_setups(

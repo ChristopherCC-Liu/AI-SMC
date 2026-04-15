@@ -74,7 +74,7 @@ class EntrySignal(BaseModel):
     risk_points: float
     reward_points: float
     rr_ratio: float
-    trigger_type: Literal["choch_in_zone", "fvg_fill_in_zone", "ob_test_rejection"]
+    trigger_type: Literal["choch_in_zone", "fvg_fill_in_zone", "ob_test_rejection", "bos_in_zone"]
     direction: Literal["long", "short"]
     grade: SetupGrade
 

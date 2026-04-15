@@ -81,6 +81,7 @@ class SMCDetector:
         swing_length: int = _DEFAULT_SWING_LENGTH,
         min_swing_points: float = _DEFAULT_MIN_SWING_POINTS,
         liquidity_tolerance_points: float = _DEFAULT_LIQUIDITY_TOLERANCE_POINTS,
+        swing_length_map: dict[Timeframe, int] | None = None,
     ) -> None:
         if swing_length < 1:
             raise ValueError(f"swing_length must be >= 1, got {swing_length}")
@@ -90,10 +91,19 @@ class SMCDetector:
             raise ValueError(
                 f"liquidity_tolerance_points must be >= 0, got {liquidity_tolerance_points}"
             )
+        if swing_length_map is not None:
+            for tf, sl in swing_length_map.items():
+                if sl < 1:
+                    raise ValueError(
+                        f"swing_length_map[{tf}] must be >= 1, got {sl}"
+                    )
 
         self._swing_length = swing_length
         self._min_swing_points = min_swing_points
         self._liquidity_tolerance_points = liquidity_tolerance_points
+        self._swing_length_map: dict[Timeframe, int] = (
+            dict(swing_length_map) if swing_length_map is not None else {}
+        )
 
     # ------------------------------------------------------------------
     # Properties (read-only)
@@ -113,6 +123,11 @@ class SMCDetector:
     def liquidity_tolerance_points(self) -> float:
         """Equal-high/low clustering tolerance in points."""
         return self._liquidity_tolerance_points
+
+    @property
+    def swing_length_map(self) -> dict[Timeframe, int]:
+        """Per-timeframe swing_length overrides (empty dict if none)."""
+        return dict(self._swing_length_map)
 
     # ------------------------------------------------------------------
     # Core detection
@@ -153,15 +168,18 @@ class SMCDetector:
         if len(df) == 0:
             raise ValueError("Cannot detect SMC patterns on an empty DataFrame.")
 
+        # Resolve per-TF swing_length (fall back to global default)
+        effective_sl = self._swing_length_map.get(timeframe, self._swing_length)
+
         # 1. Swing points
-        raw_swings = detect_swings(df, swing_length=self._swing_length)
+        raw_swings = detect_swings(df, swing_length=effective_sl)
         swing_points = filter_significant_swings(
             raw_swings, min_distance_points=self._min_swing_points
         )
 
         # 2. Order blocks (detect then run mitigation over the full bar history)
         raw_obs = detect_order_blocks(
-            df, swing_length=self._swing_length, timeframe=timeframe
+            df, swing_length=effective_sl, timeframe=timeframe
         )
         order_blocks = update_mitigation(raw_obs, df)
 
@@ -171,7 +189,7 @@ class SMCDetector:
 
         # 4. Structure breaks
         structure_breaks = detect_structure(
-            df, swing_length=self._swing_length, timeframe=timeframe
+            df, swing_length=effective_sl, timeframe=timeframe
         )
 
         # 5. Trend direction

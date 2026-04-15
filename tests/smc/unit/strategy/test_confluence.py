@@ -16,10 +16,10 @@ class TestScoreConfluence:
         bullish_overlap_zone: TradeZone,
         sample_entry_signal: EntrySignal,
     ) -> None:
-        """A+ setup: strong bias + overlap zone + choch trigger + 2:1 RR."""
+        """A+ setup: strong bias + overlap zone + choch trigger + 2.5:1 RR."""
         score = score_confluence(bullish_bias, bullish_overlap_zone, sample_entry_signal)
         assert score >= TRADEABLE_THRESHOLD
-        assert score > 0.6
+        assert score > 0.45
 
     def test_score_bounded_0_to_1(
         self,
@@ -69,14 +69,14 @@ class TestScoreConfluence:
         bullish_ob_zone: TradeZone,
     ) -> None:
         choch_entry = EntrySignal(
-            entry_price=2350.0, stop_loss=2347.0, take_profit_1=2356.0,
-            take_profit_2=2362.0, risk_points=300.0, reward_points=600.0,
-            rr_ratio=2.0, trigger_type="choch_in_zone", direction="long", grade="A",
+            entry_price=2350.0, stop_loss=2347.0, take_profit_1=2357.5,
+            take_profit_2=2362.0, risk_points=300.0, reward_points=750.0,
+            rr_ratio=2.5, trigger_type="choch_in_zone", direction="long", grade="A",
         )
         rejection_entry = EntrySignal(
-            entry_price=2350.0, stop_loss=2347.0, take_profit_1=2356.0,
-            take_profit_2=2362.0, risk_points=300.0, reward_points=600.0,
-            rr_ratio=2.0, trigger_type="ob_test_rejection", direction="long", grade="A",
+            entry_price=2350.0, stop_loss=2347.0, take_profit_1=2357.5,
+            take_profit_2=2362.0, risk_points=300.0, reward_points=750.0,
+            rr_ratio=2.5, trigger_type="ob_test_rejection", direction="long", grade="A",
         )
         score_choch = score_confluence(bullish_bias, bullish_ob_zone, choch_entry)
         score_reject = score_confluence(bullish_bias, bullish_ob_zone, rejection_entry)
@@ -87,19 +87,19 @@ class TestScoreConfluence:
         bullish_bias: BiasDirection,
         bullish_ob_zone: TradeZone,
     ) -> None:
-        entry_2rr = EntrySignal(
-            entry_price=2350.0, stop_loss=2347.0, take_profit_1=2356.0,
-            take_profit_2=2362.0, risk_points=300.0, reward_points=600.0,
-            rr_ratio=2.0, trigger_type="choch_in_zone", direction="long", grade="A",
+        entry_2_5rr = EntrySignal(
+            entry_price=2350.0, stop_loss=2347.0, take_profit_1=2357.5,
+            take_profit_2=2362.0, risk_points=300.0, reward_points=750.0,
+            rr_ratio=2.5, trigger_type="choch_in_zone", direction="long", grade="A",
         )
         entry_3rr = EntrySignal(
             entry_price=2350.0, stop_loss=2347.0, take_profit_1=2359.0,
             take_profit_2=2365.0, risk_points=300.0, reward_points=900.0,
             rr_ratio=3.0, trigger_type="choch_in_zone", direction="long", grade="A",
         )
-        score_2rr = score_confluence(bullish_bias, bullish_ob_zone, entry_2rr)
+        score_2_5rr = score_confluence(bullish_bias, bullish_ob_zone, entry_2_5rr)
         score_3rr = score_confluence(bullish_bias, bullish_ob_zone, entry_3rr)
-        assert score_3rr > score_2rr
+        assert score_3rr > score_2_5rr
 
     def test_weights_sum_to_1(self) -> None:
         """Verify the weight constants sum to 1.0."""

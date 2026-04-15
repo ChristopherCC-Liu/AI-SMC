@@ -8,13 +8,13 @@ chunk on a trailing window of M15 data, then the resulting setups are
 mapped to individual bar timestamps. This preserves no-look-ahead
 semantics while reducing detection calls from ~6000 to ~375 per OOS window.
 
-Chunk size of 16 bars = 4 hours of M15 data, which aligns well with H4
-candle boundaries.
+Chunk size of 4 bars = 1 hour of M15 data, which aligns with H1
+candle boundaries for finer-grained entry evaluation.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import polars as pl
 
@@ -23,9 +23,15 @@ from smc.data.lake import ForexDataLake
 from smc.data.schemas import Timeframe
 from smc.strategy.aggregator import MultiTimeframeAggregator
 
+# Duration of each HTF candle — a bar is only "closed" after ts + duration.
+_HTF_DURATION: dict[Timeframe, timedelta] = {
+    Timeframe.D1: timedelta(hours=24),
+    Timeframe.H4: timedelta(hours=4),
+    Timeframe.H1: timedelta(hours=1),
+}
 
-# Number of M15 bars per chunk (16 bars = 4 hours)
-_CHUNK_SIZE = 16
+# Number of M15 bars per chunk (4 bars = 1 hour)
+_CHUNK_SIZE = 4
 
 # Trailing window size for M15 detection (keep last N bars for context)
 _M15_TRAILING_WINDOW = 500
@@ -37,11 +43,11 @@ class FastSMCStrategyAdapter:
     Instead of running the full aggregator pipeline per M15 bar (O(n^2)),
     this adapter:
     1. Pre-queries all HTF data once for the test window
-    2. Processes M15 bars in chunks of 16 (every 4 hours)
+    2. Processes M15 bars in chunks of 4 (every 1 hour)
     3. Uses a trailing window of 500 M15 bars for detection context
     4. Maps setups to the chunk's final bar timestamp
 
-    This reduces detection calls from ~6000 to ~375 per 3-month OOS window
+    This reduces detection calls from ~6000 to ~1500 per 3-month OOS window
     while maintaining no-look-ahead correctness.
     """
 
@@ -108,10 +114,11 @@ class FastSMCStrategyAdapter:
             window_start_idx = max(0, chunk_end_idx - _M15_TRAILING_WINDOW + 1)
             m15_window = bars[window_start_idx : chunk_end_idx + 1]
 
-            # Filter HTF data to only include bars up to current timestamp
+            # Filter HTF data: only include bars whose close time <= bar_ts
             data: dict[Timeframe, pl.DataFrame] = {}
             for tf, df in htf_data.items():
-                filtered = df.filter(pl.col("ts") <= bar_ts)
+                duration = _HTF_DURATION.get(tf, timedelta(0))
+                filtered = df.filter(pl.col("ts") + duration <= bar_ts)
                 if not filtered.is_empty():
                     data[tf] = filtered
             data[Timeframe.M15] = m15_window
@@ -135,7 +142,8 @@ class FastSMCStrategyAdapter:
 
                 data = {}
                 for tf, df in htf_data.items():
-                    filtered = df.filter(pl.col("ts") <= bar_ts)
+                    duration = _HTF_DURATION.get(tf, timedelta(0))
+                    filtered = df.filter(pl.col("ts") + duration <= bar_ts)
                     if not filtered.is_empty():
                         data[tf] = filtered
                 data[Timeframe.M15] = m15_window
