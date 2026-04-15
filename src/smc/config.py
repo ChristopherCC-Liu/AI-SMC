@@ -1,0 +1,185 @@
+"""Application configuration for the AI-SMC trading system.
+
+All settings are loaded from environment variables (prefix ``SMC_``) or from
+a ``.env`` file in the working directory.  Sensitive fields (passwords, API
+keys, tokens) are never logged by default.
+
+Usage::
+
+    from smc.config import SMCConfig
+
+    cfg = SMCConfig()          # reads env / .env
+    cfg = SMCConfig(env="paper", mt5_mock=False)  # override in code
+
+The config object is intentionally *not* frozen so that test fixtures can
+construct instances with keyword overrides.  Treat it as effectively immutable
+in production code — never mutate the singleton config after startup.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Literal
+
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class SMCConfig(BaseSettings):
+    """AI-SMC application settings.
+
+    All fields can be overridden via environment variables with the ``SMC_``
+    prefix (e.g. ``SMC_ENV=paper``, ``SMC_MT5_LOGIN=12345``).
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="SMC_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    # ------------------------------------------------------------------
+    # Runtime
+    # ------------------------------------------------------------------
+    env: Literal["dev", "paper", "live"] = Field(
+        default="dev",
+        description="Execution environment. 'live' enables real order submission.",
+    )
+    data_dir: Path = Field(
+        default=Path("./data"),
+        description="Root directory for the local data lake (parquet files).",
+    )
+    log_level: str = Field(
+        default="INFO",
+        description="Python logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).",
+    )
+    mt5_mock: bool = Field(
+        default=True,
+        description="When True, MT5 calls are stubbed out. Required on macOS/Linux dev.",
+    )
+
+    # ------------------------------------------------------------------
+    # MT5 Connection
+    # ------------------------------------------------------------------
+    mt5_login: int = Field(
+        default=0,
+        description="MetaTrader 5 account login number.",
+    )
+    mt5_password: SecretStr = Field(
+        default=SecretStr(""),
+        description="MetaTrader 5 account password.",
+    )
+    mt5_server: str = Field(
+        default="",
+        description="MetaTrader 5 broker server address.",
+    )
+
+    # ------------------------------------------------------------------
+    # Trading
+    # ------------------------------------------------------------------
+    instrument: str = Field(
+        default="XAUUSD",
+        description="Primary trading instrument symbol as used by MT5.",
+    )
+    risk_per_trade_pct: float = Field(
+        default=1.0,
+        ge=0.01,
+        le=10.0,
+        description="Account equity to risk per trade, as a percentage (e.g. 1.0 = 1%).",
+    )
+    max_daily_loss_pct: float = Field(
+        default=3.0,
+        ge=0.01,
+        le=20.0,
+        description="Maximum daily loss as a percentage of account equity before halting.",
+    )
+    max_drawdown_pct: float = Field(
+        default=10.0,
+        ge=0.1,
+        le=50.0,
+        description="Maximum drawdown from equity peak before halting all trading.",
+    )
+    max_lot_size: float = Field(
+        default=0.01,
+        ge=0.01,
+        description="Hard cap on lot size per order. Prevents accidental overleveraging.",
+    )
+
+    # ------------------------------------------------------------------
+    # LLM (Phase 3+)
+    # ------------------------------------------------------------------
+    anthropic_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="Anthropic API key for LLM-assisted trade reasoning.",
+    )
+    anthropic_model: str = Field(
+        default="claude-opus-4-6",
+        description="Anthropic model ID to use for LLM reasoning steps.",
+    )
+    llm_daily_budget_usd: float = Field(
+        default=5.0,
+        ge=0.0,
+        description="Maximum daily spend on LLM API calls in USD. 0 = unlimited.",
+    )
+
+    # ------------------------------------------------------------------
+    # Alerting (Phase 4)
+    # ------------------------------------------------------------------
+    telegram_bot_token: SecretStr = Field(
+        default=SecretStr(""),
+        description="Telegram Bot API token for trade alert notifications.",
+    )
+    telegram_chat_id: str = Field(
+        default="",
+        description="Telegram chat / channel ID to send alerts to.",
+    )
+
+    # ------------------------------------------------------------------
+    # Validators
+    # ------------------------------------------------------------------
+
+    @field_validator("log_level")
+    @classmethod
+    def _validate_log_level(cls, v: str) -> str:
+        """Normalise to uppercase and assert it is a valid Python logging level."""
+        upper = v.upper()
+        valid = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        if upper not in valid:
+            raise ValueError(f"log_level must be one of {valid}, got {v!r}")
+        return upper
+
+    @field_validator("data_dir")
+    @classmethod
+    def _resolve_data_dir(cls, v: Path) -> Path:
+        """Expand user home (~) and make the path absolute."""
+        return v.expanduser().resolve()
+
+    # ------------------------------------------------------------------
+    # Convenience helpers
+    # ------------------------------------------------------------------
+
+    def is_live(self) -> bool:
+        """Return True only when the system is in live trading mode."""
+        return self.env == "live"
+
+    def is_paper(self) -> bool:
+        """Return True when running paper (simulated) trading."""
+        return self.env == "paper"
+
+    def is_dev(self) -> bool:
+        """Return True in development / backtesting mode."""
+        return self.env == "dev"
+
+    def has_mt5_credentials(self) -> bool:
+        """Return True if all three MT5 connection fields are set."""
+        return bool(self.mt5_login and self.mt5_password.get_secret_value() and self.mt5_server)
+
+    def has_llm(self) -> bool:
+        """Return True if an Anthropic API key is configured."""
+        return bool(self.anthropic_api_key.get_secret_value())
+
+    def has_telegram(self) -> bool:
+        """Return True if Telegram alerting is configured."""
+        return bool(self.telegram_bot_token.get_secret_value() and self.telegram_chat_id)

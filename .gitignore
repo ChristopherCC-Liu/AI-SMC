@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data (keep structure, ignore content)
+data/parquet/**/*.parquet
+data/journal/**/*.parquet
+data/manifests/*.json
+!data/parquet/.gitkeep
+!data/journal/.gitkeep
+!data/manifests/.gitkeep
+
+# Logs
+logs/*.log
+logs/*.jsonl
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# OS
+.DS_Store
+Thumbs.db

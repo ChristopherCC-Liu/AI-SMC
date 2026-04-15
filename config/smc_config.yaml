@@ -1,0 +1,59 @@
+# AI-SMC default strategy configuration
+# ---------------------------------------------------------------------------
+# This file provides default values for the SMC strategy, risk management,
+# and backtesting parameters. Individual settings can be overridden at
+# runtime via environment variables (SMC_* prefix) or a local .env file.
+#
+# Detection distances are in POINTS (1 point = $0.01 for XAUUSD).
+# Risk/backtest distances are in PIPS (1 pip = $0.10 for XAUUSD = 10 points).
+# ---------------------------------------------------------------------------
+
+instrument: XAUUSD
+
+# ---------------------------------------------------------------------------
+# Multi-timeframe analysis
+# ---------------------------------------------------------------------------
+timeframes:
+  htf:            # Higher Time Frame — structural bias / trend direction
+    - D1
+    - H4
+  zone: H1        # Order block / FVG identification timeframe
+  entry: M15      # Entry precision and trigger timeframe
+
+# ---------------------------------------------------------------------------
+# SMC detection parameters
+# ---------------------------------------------------------------------------
+smc:
+  swing_length: 10            # Number of bars each side for swing high/low detection
+  ob_lookback: 50             # Maximum bars to look back for order block formation
+  fvg_join_consecutive: true  # Merge consecutive FVGs into single zones
+  liquidity_tolerance_points: 5.0  # Distance in points ($0.01 each) to consider equal highs/lows
+
+# ---------------------------------------------------------------------------
+# Strategy confluence & filtering
+# ---------------------------------------------------------------------------
+strategy:
+  min_confluence_score: 0.6   # Minimum weighted confluence score to trigger a setup
+  max_concurrent_setups: 3    # Maximum number of open setups at one time
+  min_rr_ratio: 2.0           # Minimum risk:reward ratio to take a trade
+
+# ---------------------------------------------------------------------------
+# Risk management
+# ---------------------------------------------------------------------------
+risk:
+  # NOTE: risk section uses PIPS (1 pip = $0.10) — standard trading convention
+  risk_per_trade_pct: 1.0     # Account equity to risk per trade (%)
+  max_daily_loss_pct: 3.0     # Daily loss limit before halting new orders (%)
+  max_drawdown_pct: 10.0      # Equity drawdown limit before full halt (%)
+  max_lot_size: 0.01          # Hard cap per order in lots
+  pip_value_per_lot: 10.0     # XAUUSD: $10 per pip per standard lot (0.1 move = $1)
+
+# ---------------------------------------------------------------------------
+# Backtesting simulation costs
+# ---------------------------------------------------------------------------
+backtest:
+  # NOTE: backtest section uses PIPS (1 pip = $0.10) — standard trading convention
+  spread_pips: 3.0            # Simulated bid-ask spread in pips
+  slippage_pips: 0.5          # Simulated execution slippage in pips
+  commission_per_lot: 7.0     # Round-trip commission per standard lot in USD
+  initial_balance: 10000.0    # Starting account balance in USD
