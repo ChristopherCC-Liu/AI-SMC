@@ -163,7 +163,8 @@ def _claude_cli_chat(
 ) -> str:
     """Call Claude Code pipe mode and return response text."""
     prompt = f"{system}\n\n---\n\n{user}"
-    cmd = ["claude", "-p", "--model", model]
+    claude_path = shutil.which("claude") or shutil.which("claude.cmd") or "claude"
+    cmd = [claude_path, "-p", "--model", model]
     result = subprocess.run(
         cmd,
         input=prompt,

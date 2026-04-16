@@ -296,6 +296,85 @@ def make_journal_panel() -> Panel:
     return Panel(table, title=f"[bold white]Recent Signals ({total} total)[/bold white]", border_style="blue", box=box.ROUNDED)
 
 
+AI_ANALYSIS_PATH = Path("data/ai_analysis.json")
+
+
+def make_ai_panel() -> Panel:
+    """Show AI market analysis from ai_analyze.py output."""
+    if not AI_ANALYSIS_PATH.exists():
+        return Panel(
+            Align.center(Text("Run: smc-analyze to generate AI analysis", style="dim italic")),
+            title="[bold white]AI Market Analysis[/bold white]",
+            border_style="bright_magenta",
+            box=box.ROUNDED,
+        )
+
+    try:
+        with open(AI_ANALYSIS_PATH) as f:
+            a = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return Panel("[red]Failed to read analysis[/red]", title="AI Analysis", border_style="red")
+
+    table = Table(show_header=False, box=None, padding=(0, 1))
+    table.add_column("Key", style="dim", width=16)
+    table.add_column("Value")
+
+    # Direction
+    d = a.get("direction", "unknown")
+    c = a.get("confidence", 0)
+    dir_colors = {"bullish": "bold green", "bearish": "bold red", "neutral": "bold yellow"}
+    dir_style = dir_colors.get(d, "white")
+    table.add_row("Direction", f"[{dir_style}]{d.upper()}[/{dir_style}]  ({c:.0%} confidence)")
+
+    # AI override
+    if a.get("ai_direction"):
+        ai_d = a["ai_direction"]
+        ai_style = dir_colors.get(ai_d, "white")
+        table.add_row("AI Debate", f"[{ai_style}]{ai_d.upper()}[/{ai_style}]  (via {a.get('ai_source', '?')})")
+        if a.get("ai_key_drivers"):
+            drivers = ", ".join(a["ai_key_drivers"][:3])
+            table.add_row("Key Drivers", f"[dim]{drivers}[/dim]")
+
+    # Technical
+    if a.get("sma20"):
+        table.add_row("SMA20 / SMA50", f"${a['sma20']:.0f} / ${a.get('sma50', 0):.0f}")
+    if a.get("sma20_vs_sma50"):
+        cross = a["sma20_vs_sma50"]
+        cross_style = "green" if cross == "golden_cross" else "red"
+        table.add_row("Cross", f"[{cross_style}]{cross.replace('_', ' ').upper()}[/{cross_style}]")
+    if a.get("atr_pct"):
+        vol = a.get("volatility", "?")
+        vol_style = "red" if vol == "high" else ("green" if vol == "low" else "yellow")
+        table.add_row("Volatility", f"ATR {a['atr_pct']:.2f}%  [{vol_style}]{vol.upper()}[/{vol_style}]")
+    if a.get("change_5d_pct") is not None:
+        chg = a["change_5d_pct"]
+        chg_style = "green" if chg > 0 else "red"
+        table.add_row("5D Change", f"[{chg_style}]{chg:+.2f}%[/{chg_style}]")
+    if a.get("h4_trend"):
+        h4_style = "green" if a["h4_trend"] == "up" else "red"
+        table.add_row("H4 Trend", f"[{h4_style}]{a['h4_trend'].upper()}[/{h4_style}]")
+    if a.get("resistance_20d"):
+        table.add_row("Resistance", f"${a['resistance_20d']:.2f}")
+        table.add_row("Support", f"${a.get('support_20d', 0):.2f}")
+
+    # Reasoning
+    reasoning = a.get("reasoning", a.get("ai_reasoning", ""))
+    if reasoning and len(reasoning) > 80:
+        reasoning = reasoning[:77] + "..."
+    if reasoning:
+        table.add_row("", "")
+        table.add_row("Analysis", f"[italic]{reasoning}[/italic]")
+
+    # Freshness
+    assessed = a.get("assessed_at", "")
+    if assessed:
+        table.add_row("", "")
+        table.add_row("Updated", f"[dim]{assessed[:19]}[/dim]")
+
+    source = a.get("source", "?")
+    return Panel(table, title=f"[bold white]AI Market Analysis[/bold white] [dim]({source})[/dim]", border_style="bright_magenta", box=box.ROUNDED)
+
+
 def make_log_panel() -> Panel:
     if not LOG_PATH.exists():
         return Panel("[dim]No log file[/dim]", title="Live Loop Log", border_style="dim")
@@ -313,8 +392,9 @@ def make_layout() -> Layout:
 
     layout.split_column(
         Layout(name="header", size=3),
-        Layout(name="upper", size=14),
-        Layout(name="middle", size=12),
+        Layout(name="upper", size=12),
+        Layout(name="ai_row", size=16),
+        Layout(name="middle", size=10),
         Layout(name="lower"),
     )
 
@@ -324,10 +404,13 @@ def make_layout() -> Layout:
         Layout(name="regime", ratio=1),
     )
 
-    layout["middle"].split_row(
-        Layout(name="health", ratio=1),
-        Layout(name="positions", ratio=2),
+    layout["ai_row"].split_row(
+        Layout(name="ai_analysis", ratio=3),
+        Layout(name="health", ratio=2),
     )
+
+    layout["middle"].update(Panel(""))  # positions
+    layout["middle"] = Layout(name="positions")
 
     layout["lower"].split_row(
         Layout(name="journal", ratio=3),
@@ -342,6 +425,7 @@ def render(layout: Layout) -> Layout:
     layout["account"].update(make_account_panel())
     layout["price"].update(make_price_panel())
     layout["regime"].update(make_regime_panel())
+    layout["ai_analysis"].update(make_ai_panel())
     layout["health"].update(make_health_panel())
     layout["positions"].update(make_positions_panel())
     layout["journal"].update(make_journal_panel())
