@@ -121,33 +121,74 @@ def run_ai_analysis(data):
     return analysis
 
 
-def determine_action(setups, ai_analysis, regime):
-    """Determine clear BUY / SELL / HOLD based on setups + AI direction."""
-    if not setups:
-        return "HOLD", "No SMC setups found this cycle", None
+def get_session_info():
+    """Return (session_name, confidence_penalty) based on current UTC hour."""
+    hour = datetime.now(timezone.utc).hour
+    if 8 <= hour < 13:
+        return "LONDON", 0.0
+    elif 13 <= hour < 16:
+        return "LONDON/NY OVERLAP", 0.0
+    elif 16 <= hour < 21:
+        return "NEW YORK", 0.0
+    elif 21 <= hour < 24:
+        return "LATE NY", 0.1
+    else:
+        return "ASIAN", 0.2
 
-    # Best setup by confluence
+
+def determine_action(setups, ai_analysis, regime):
+    """AI HARD GATE: determine BUY / SELL / HOLD.
+
+    AI is NOT decoration — it controls whether trades happen:
+    - Session filter: Asian session = BLOCKED (PF 0.69 proven loser)
+    - Direction filter: AI must agree with SMC direction
+    - Confidence gate: AI confidence < 0.5 after session penalty = BLOCKED
+    - AI NEUTRAL = HOLD (no trade without AI clarity)
+    """
+    session, session_penalty = get_session_info()
+    ai_dir = ai_analysis.get("ai_direction", ai_analysis.get("direction", "neutral"))
+    ai_conf = ai_analysis.get("ai_confidence", ai_analysis.get("confidence", 0.3))
+    effective_conf = ai_conf - session_penalty
+
+    # GATE 1: Session filter (HARD — Asian session proven PF 0.69)
+    if session == "ASIAN":
+        return "HOLD", f"SESSION BLOCKED: {session} (PF 0.69 historically) | AI conf {ai_conf:.0%} - {session_penalty:.0%} = {effective_conf:.0%}", None
+
+    # GATE 2: AI confidence after session penalty
+    if effective_conf < 0.5:
+        return "HOLD", f"LOW CONFIDENCE: AI {ai_dir.upper()} {ai_conf:.0%} - {session_penalty:.0%} penalty = {effective_conf:.0%} (need 50%+)", None
+
+    # GATE 3: AI must not be neutral
+    if ai_dir == "neutral":
+        return "HOLD", f"AI NEUTRAL ({ai_conf:.0%}) — no trade without directional clarity", None
+
+    # GATE 4: Must have SMC setups
+    if not setups:
+        return "HOLD", f"AI {ai_dir.upper()} ({effective_conf:.0%}) but no SMC setups found", None
+
     best = max(setups, key=lambda s: s.confluence_score)
     e = best.entry_signal
 
-    ai_dir = ai_analysis.get("ai_direction", ai_analysis.get("direction", "neutral"))
-
-    # Direction alignment check
-    if ai_dir == "bullish" and e.direction == "long":
-        action = "BUY"
-        reason = f"AI BULLISH + SMC LONG setup | {e.trigger_type} | conf {best.confluence_score:.2f}"
-    elif ai_dir == "bearish" and e.direction == "short":
-        action = "SELL"
-        reason = f"AI BEARISH + SMC SHORT setup | {e.trigger_type} | conf {best.confluence_score:.2f}"
-    elif ai_dir == "neutral":
-        action = f"{'BUY' if e.direction == 'long' else 'SELL'} (weak)"
-        reason = f"AI NEUTRAL but SMC {e.direction.upper()} | {e.trigger_type} | conf {best.confluence_score:.2f}"
+    # GATE 5: Direction alignment (AI must agree with SMC)
+    ai_trade_dir = "long" if ai_dir == "bullish" else "short"
+    if ai_trade_dir == e.direction:
+        # ALIGNED — execute
+        action = "BUY" if e.direction == "long" else "SELL"
+        lot = "0.01" if effective_conf >= 0.8 else ("0.005" if effective_conf >= 0.6 else "0.0025")
+        reason = (f"AI {ai_dir.upper()} ({effective_conf:.0%}) + SMC {e.direction.upper()} "
+                  f"| {e.trigger_type} | conf {best.confluence_score:.2f} | lot {lot} | {session}")
+        return action, reason, best
     else:
-        # AI and SMC disagree
-        action = "HOLD"
-        reason = f"CONFLICT: AI {ai_dir.upper()} vs SMC {e.direction.upper()} | holding"
-
-    return action, reason, best
+        # CONFLICT — check soft override
+        if ai_conf < 0.65:
+            # Low-confidence conflict: AI uncertain, let SMC speak (quarter lot)
+            action = f"{'BUY' if e.direction == 'long' else 'SELL'} (override)"
+            reason = (f"SOFT OVERRIDE: AI {ai_dir.upper()} ({ai_conf:.0%}) vs SMC {e.direction.upper()} "
+                      f"| AI uncertain → SMC wins at 1/4 lot | {e.trigger_type}")
+            return action, reason, best
+        else:
+            # High-confidence conflict: AI wins
+            return "HOLD", f"AI BLOCKED: AI {ai_dir.upper()} ({ai_conf:.0%}) vs SMC {e.direction.upper()} | AI confident → no trade", None
 
 
 def save_state(cycle, price, action, reason, ai_analysis, regime, setups, best_setup):
