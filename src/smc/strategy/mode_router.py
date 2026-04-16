@@ -1,11 +1,11 @@
-"""Pure-function mode router: decides trending vs ranging trading mode.
+"""Pure-function mode router: decides trending vs ranging vs v1-passthrough.
 
 Priority logic:
   1. Asian session → HOLD (mode="trending", reason explains session block)
-  2. AI bullish/bearish + confidence >= 0.5 → trending
+  2. AI bullish/bearish + confidence >= 0.5 → trending (AI-gated 5-gate)
   3. AI neutral OR confidence < 0.5:
      a. range_bounds exists AND regime != "trending" → ranging
-     b. else → trending (hold — no setups expected)
+     b. else → v1_passthrough (v1 pipeline runs without AI direction gate)
 """
 
 from __future__ import annotations
@@ -79,11 +79,13 @@ def route_trading_mode(
             range_bounds=range_bounds,
         )
 
-    # Fallback: trending hold — no actionable setups expected
+    # Fallback: v1 passthrough — AI unsure, no range detected.
+    # v1 pipeline has its own HTF bias (D1+H4 BOS/CHoCH) for direction,
+    # so it can operate without the AI direction gate.
     return TradingMode(
-        mode="trending",
-        reason=f"Low AI conviction (dir={ai_direction}, conf={ai_confidence:.2f}), "
-        f"no range detected — holding, no setups expected",
+        mode="v1_passthrough",
+        reason=f"AI unsure (dir={ai_direction}, conf={ai_confidence:.2f}), "
+        f"no range — v1 pipeline runs with HTF bias only",
         ai_direction=ai_direction,
         ai_confidence=ai_confidence,
         regime=regime,

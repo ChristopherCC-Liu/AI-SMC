@@ -159,7 +159,8 @@ class TestRegimeTrendingBlocksRanging:
     def test_neutral_range_trending_regime(
         self, sample_range_bounds: RangeBounds,
     ) -> None:
-        """Even with range_bounds, regime='trending' prevents ranging mode."""
+        """Even with range_bounds, regime='trending' prevents ranging mode.
+        Falls through to v1_passthrough instead."""
         result = route_trading_mode(
             ai_direction="neutral",
             ai_confidence=0.2,
@@ -167,15 +168,17 @@ class TestRegimeTrendingBlocksRanging:
             session="LONDON",
             range_bounds=sample_range_bounds,
         )
-        assert result.mode == "trending"
-        assert "no setups expected" in result.reason
+        assert result.mode == "v1_passthrough"
+        assert "v1 pipeline" in result.reason
 
 
 # ---------------------------------------------------------------------------
 # Fallback: neutral + no range → trending (hold)
 # ---------------------------------------------------------------------------
 
-class TestFallbackTrendingHold:
+class TestV1Passthrough:
+    """When AI is unsure and no range exists, v1 pipeline runs autonomously."""
+
     def test_neutral_no_range(self) -> None:
         result = route_trading_mode(
             ai_direction="neutral",
@@ -184,8 +187,8 @@ class TestFallbackTrendingHold:
             session="LONDON",
             range_bounds=None,
         )
-        assert result.mode == "trending"
-        assert "no range detected" in result.reason
+        assert result.mode == "v1_passthrough"
+        assert "v1 pipeline" in result.reason
 
     def test_low_conf_bearish_no_range(self) -> None:
         result = route_trading_mode(
@@ -195,8 +198,20 @@ class TestFallbackTrendingHold:
             session="NEW_YORK",
             range_bounds=None,
         )
-        assert result.mode == "trending"
-        assert "no range detected" in result.reason
+        assert result.mode == "v1_passthrough"
+        assert "v1 pipeline" in result.reason
+
+    def test_neutral_trending_regime_no_range(self) -> None:
+        """The key fix: neutral AI + trending regime + no range used to deadlock."""
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.3,
+            regime="trending",
+            session="LONDON",
+            range_bounds=None,
+        )
+        assert result.mode == "v1_passthrough"
+        assert "AI unsure" in result.reason
 
 
 # ---------------------------------------------------------------------------
@@ -226,4 +241,4 @@ class TestContextFields:
             range_bounds=None,
         )
         with pytest.raises(Exception):
-            result.mode = "ranging"  # type: ignore[misc]
+            result.mode = "trending"  # type: ignore[misc]

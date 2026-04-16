@@ -182,6 +182,31 @@ def _determine_trending(setups, ai_dir, ai_conf, effective_conf, session):
             return "HOLD", f"AI BLOCKED: AI {ai_dir.upper()} ({ai_conf:.0%}) vs SMC {e.direction.upper()} | AI confident → no trade", None
 
 
+def _determine_v1_passthrough(setups, session):
+    """V1 passthrough: AI is unsure, let v1 HTF bias decide direction.
+
+    Setups already passed compute_htf_bias (D1+H4 BOS/CHoCH) and confluence
+    scoring in MultiTimeframeAggregator.generate_setups(). We trust v1's own
+    direction filter and only apply session + setup availability gates.
+
+    Returns (action, reason, best_setup).
+    """
+    if session == "ASIAN":
+        return "HOLD", f"SESSION BLOCKED: {session} (PF 0.69 historically) | v1 passthrough", None
+
+    if not setups:
+        return "HOLD", "V1 PASSTHROUGH: AI unsure, no SMC setups from HTF bias", None
+
+    best = max(setups, key=lambda s: s.confluence_score)
+    e = best.entry_signal
+    action = "BUY" if e.direction == "long" else "SELL"
+    # Conservative lot sizing — AI is unsure, so use reduced position
+    reason = (f"V1 PASSTHROUGH: AI unsure → HTF bias {e.direction.upper()} "
+              f"| {e.trigger_type} | conf {best.confluence_score:.2f} "
+              f"| lot 0.0025 (reduced) | {session}")
+    return action, reason, best
+
+
 def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
                        range_trader, breakout_detector):
     """Ranging mode: breakout guard + mean-reversion setups at range boundaries.
@@ -250,6 +275,13 @@ def determine_action(setups, ai_analysis, regime, *,
             price, mode.range_bounds, h1_snapshot, m15_snapshot, h1_atr,
             range_trader, breakout_detector,
         )
+        return action, reason, best, mode
+
+    if mode.mode == "v1_passthrough":
+        # AI unsure — let v1 pipeline decide using its own HTF bias.
+        # v1 setups already passed compute_htf_bias (D1+H4 BOS/CHoCH)
+        # and confluence scoring — they have their own direction filter.
+        action, reason, best = _determine_v1_passthrough(setups, session)
         return action, reason, best, mode
 
     # Fallback: router returned no actionable mode
@@ -435,7 +467,7 @@ def main():
             # Display action prominently
             action_colors = {
                 "BUY": "+++", "SELL": "---", "HOLD": "===",
-                "RANGE": "~~~",
+                "RANGE": "~~~", "V1": ">>>",
             }
             marker = action_colors.get(action.split()[0], "???")
             print()

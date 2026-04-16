@@ -73,7 +73,7 @@ class TradingMode(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    mode: Literal["trending", "ranging"]
+    mode: Literal["trending", "ranging", "v1_passthrough"]
     reason: str
     ai_direction: str  # "bullish" | "bearish" | "neutral"
     ai_confidence: float  # 0.0 – 1.0
