@@ -409,8 +409,9 @@ def make_layout() -> Layout:
         Layout(name="health", ratio=2),
     )
 
-    layout["middle"].update(Panel(""))  # positions
-    layout["middle"] = Layout(name="positions")
+    layout["middle"].split_row(
+        Layout(name="positions"),
+    )
 
     layout["lower"].split_row(
         Layout(name="journal", ratio=3),
