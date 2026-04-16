@@ -83,7 +83,7 @@ class TestConsolidationPreset:
 
     def test_all_triggers_allowed(self) -> None:
         """v7c fix: CONSOLIDATION allows all triggers (choch has 40% WR in ranging)."""
-        assert len(route("CONSOLIDATION").allowed_triggers) == 4
+        assert len(route("CONSOLIDATION").allowed_triggers) == 5
 
     def test_uses_base_sl(self) -> None:
         """v7 fix: CONSOLIDATION uses Sprint 5 base SL, not wider."""
@@ -141,7 +141,7 @@ class TestATHBreakoutPreset:
     def test_all_triggers_allowed(self) -> None:
         """ATH breakout allows all triggers (v7 fix: uses base triggers)."""
         triggers = route("ATH_BREAKOUT").allowed_triggers
-        assert len(triggers) == 4
+        assert len(triggers) == 5
 
     def test_uses_base_tp(self) -> None:
         """v7 fix: ATH uses Sprint 5 base TP, not extended."""

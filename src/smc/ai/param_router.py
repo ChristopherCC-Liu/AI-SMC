@@ -22,7 +22,7 @@ __all__ = ["route", "PRESETS"]
 
 # Sprint 5 validated base parameters — DO NOT change these without backtest evidence.
 # Regime routing only varies: allowed_directions, allowed_triggers, confluence_floor.
-_ALL_TRIGGERS = ("choch_in_zone", "fvg_fill_in_zone", "ob_test_rejection", "bos_in_zone")
+_ALL_TRIGGERS = ("choch_in_zone", "fvg_fill_in_zone", "ob_test_rejection", "bos_in_zone", "fvg_sweep_continuation")
 _BASE_SL = 0.75
 _BASE_TP1 = 2.5
 _BASE_FLOOR = 0.45
@@ -68,7 +68,7 @@ PRESETS: dict[MarketRegimeAI, RegimeParams] = {
         tp1_rr=_BASE_TP1,
         confluence_floor=0.55,
         allowed_directions=("long", "short"),
-        allowed_triggers=("fvg_fill_in_zone", "bos_in_zone"),
+        allowed_triggers=("fvg_fill_in_zone", "bos_in_zone", "fvg_sweep_continuation"),
         max_concurrent=_BASE_CONCURRENT,
         zone_cooldown_hours=_BASE_COOLDOWN,
         enable_ob_test=False,

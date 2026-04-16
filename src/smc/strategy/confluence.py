@@ -103,6 +103,7 @@ def _score_entry_trigger(entry: EntrySignal) -> float:
         "fvg_fill_in_zone": 0.7,
         "bos_in_zone": 0.55,
         "ob_test_rejection": 0.5,
+        "fvg_sweep_continuation": 0.6,
     }
     trigger_score = trigger_scores.get(entry.trigger_type, 0.3)
 
