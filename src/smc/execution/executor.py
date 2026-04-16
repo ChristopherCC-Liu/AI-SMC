@@ -403,7 +403,9 @@ class SimBrokerPort:
         equity = self._balance + total_pnl
         margin_used = sum(p.lots * self._margin_per_lot for p in self._positions.values())
         margin_free = equity - margin_used
-        margin_level = (equity / margin_used * 100.0) if margin_used > 0 else 0.0
+        # When no margin used, return a large value matching MT5 behavior
+        # (MT5 reports 0.0 but conceptually margin is infinite when no positions)
+        margin_level = (equity / margin_used * 100.0) if margin_used > 0 else 9999.0
 
         return AccountInfo(
             balance=round(self._balance, 2),

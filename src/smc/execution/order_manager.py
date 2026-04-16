@@ -314,9 +314,19 @@ class OrderManager:
         return None
 
     def _realize_pnl(self, pos: PositionState, close_price: float) -> None:
-        """Update daily P&L after a position close."""
-        # Use the PnL from the position state (broker-calculated)
-        self._daily_pnl += pos.pnl_usd
+        """Update daily P&L after a position close.
+
+        Recomputes PnL from close_price rather than relying on potentially
+        stale ``pos.pnl_usd``, ensuring the drawdown guard receives accurate
+        daily loss figures.
+        """
+        # XAUUSD: 1 lot = 100 oz, so $1 price move = $100 per lot
+        _POINT_VALUE_PER_LOT = 100.0
+        price_diff = close_price - pos.open_price
+        if pos.direction == "short":
+            price_diff = -price_diff
+        realized = price_diff * pos.lots * _POINT_VALUE_PER_LOT
+        self._daily_pnl += realized
 
     def _refresh_position(self, ticket: int) -> None:
         """Re-fetch a single position from the broker to update local state."""

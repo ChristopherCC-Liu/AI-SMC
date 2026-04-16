@@ -18,7 +18,10 @@ __all__ = [
     "TradeZone",
     "SetupGrade",
     "EntrySignal",
+    "EntrySignalV2",
+    "TriggerTypeV2",
     "TradeSetup",
+    "TradeSetupV2",
 ]
 
 # ---------------------------------------------------------------------------
@@ -80,6 +83,39 @@ class EntrySignal(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# M15 Entry Signal V2 (Dual: normal + inverted + new)
+# ---------------------------------------------------------------------------
+
+TriggerTypeV2 = Literal[
+    "fvg_fill_in_zone",
+    "bos_in_zone",
+    "choch_in_zone",
+    "ob_breakout",
+    "choch_continuation",
+    "fvg_sweep_continuation",
+]
+
+
+class EntrySignalV2(BaseModel):
+    """V2 entry signal supporting normal, inverted, and new trigger types."""
+
+    model_config = ConfigDict(frozen=True)
+
+    entry_price: float
+    stop_loss: float
+    take_profit_1: float
+    take_profit_2: float
+    risk_points: float
+    reward_points: float
+    rr_ratio: float
+    direction: Literal["long", "short"]
+    grade: SetupGrade
+    trigger_type: TriggerTypeV2
+    entry_mode: Literal["normal", "inverted"]
+    inversion_confidence: float  # 0.0-1.0 (1.0 for normal entries)
+
+
+# ---------------------------------------------------------------------------
 # Complete Trade Setup
 # ---------------------------------------------------------------------------
 
@@ -93,4 +129,29 @@ class TradeSetup(BaseModel):
     bias: BiasDirection
     zone: TradeZone
     confluence_score: float  # 0.0 – 1.0
+    generated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# V2 Trade Setup (uses AIDirection + EntrySignalV2)
+# ---------------------------------------------------------------------------
+
+
+class TradeSetupV2(BaseModel):
+    """V2 trade setup using AI direction and dual-mode entry signals.
+
+    Key differences from v1 TradeSetup:
+    - ``ai_direction`` replaces ``bias`` (AIDirection from DirectionEngine)
+    - ``entry_signal`` uses ``EntrySignalV2`` (supports normal + inverted modes)
+    - ``entry_mode`` surfaces the entry mode for quick filtering
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    entry_signal: EntrySignalV2
+    ai_direction: str  # "bullish" | "bearish" | "neutral" — from AIDirection
+    ai_confidence: float  # 0.0 – 1.0
+    zone: TradeZone
+    confluence_score: float  # 0.0 – 1.0
+    entry_mode: Literal["normal", "inverted"]
     generated_at: datetime

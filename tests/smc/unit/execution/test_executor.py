@@ -135,6 +135,8 @@ class TestSimBrokerPortAccountInfo:
         assert info.balance == 10_000.0
         assert info.equity == 10_000.0
         assert info.margin_used == 0.0
+        # No positions: margin_level should be large (not 0), matching MT5 behavior
+        assert info.margin_level == 9999.0
 
     def test_balance_after_position(self) -> None:
         broker = SimBrokerPort(initial_balance=10_000.0)

@@ -127,6 +127,26 @@ class TestExecuteSetup:
         positions = broker.get_positions()
         assert positions[0].direction == "short"
 
+    def test_unknown_sizer_config_keys_ignored(self) -> None:
+        """Unknown keys in position_sizer_config should not cause TypeError."""
+        broker = SimBrokerPort(initial_balance=10_000.0, spread_points=0.0)
+        guard = DrawdownGuard(max_daily_loss_pct=3.0, max_drawdown_pct=10.0)
+        manager = OrderManager(
+            broker=broker,
+            risk_guard=guard,
+            position_sizer_config={
+                "risk_pct": 1.0,
+                "max_lot_size": 0.1,
+                "bogus_key": 999,  # should be silently ignored
+            },
+            peak_balance=10_000.0,
+        )
+        setup = _make_setup()
+        account = _make_account()
+        result = manager.execute_setup(setup, account)
+        assert result is not None
+        assert result.success is True
+
     def test_risk_guard_rejects_after_daily_loss(self) -> None:
         manager, broker = _make_manager()
         # Simulate a daily loss of 4% (exceeds 3% limit)

@@ -21,6 +21,8 @@ __all__ = [
     "DebateRound",
     "JudgeVerdict",
     "ExternalContext",
+    "AIDirection",
+    "H4TechnicalContext",
 ]
 
 # ---------------------------------------------------------------------------
@@ -169,3 +171,43 @@ class ExternalContext(BaseModel):
     central_bank_stance: Literal["hawkish", "neutral", "dovish"] | None = None
     fetched_at: datetime
     source_quality: Literal["live", "cached", "unavailable"]
+
+
+# ---------------------------------------------------------------------------
+# Direction Engine types (Sprint 7)
+# ---------------------------------------------------------------------------
+
+
+class H4TechnicalContext(BaseModel):
+    """Pre-computed H4 technical features for the direction debate.
+
+    Extracted deterministically from H4 OHLCV data. Used by the Judge
+    to apply technical confirmation bonuses/penalties.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    sma50_direction: Literal["up", "down", "flat"]
+    sma50_slope: float  # normalized % slope per bar
+    higher_highs: int
+    lower_lows: int
+    bar_count: int  # number of H4 bars used for extraction
+
+
+class AIDirection(BaseModel):
+    """Result of an AI direction assessment — bullish/bearish/neutral.
+
+    This is the primary output of the Direction Engine. The strategy
+    uses ``direction`` + ``confidence`` to filter trade entries:
+    only take long setups when bullish, shorts when bearish.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    direction: Literal["bullish", "bearish", "neutral"]
+    confidence: float
+    key_drivers: tuple[str, ...]
+    reasoning: str
+    assessed_at: datetime
+    source: Literal["ai_debate", "sma_fallback", "cache", "neutral_default"]
+    cost_usd: float = 0.0
