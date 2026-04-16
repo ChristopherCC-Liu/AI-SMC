@@ -1,0 +1,638 @@
+{
+  "all_trades": {
+    "n": 56,
+    "wr": 0.4107,
+    "pf": 1.0859,
+    "pnl": 41.58,
+    "avg_pnl": 0.74
+  },
+  "aligned": {
+    "n": 37,
+    "wr": 0.4324,
+    "pf": 1.097,
+    "pnl": 31.47,
+    "avg_pnl": 0.85
+  },
+  "conflict": {
+    "n": 19,
+    "wr": 0.3684,
+    "pf": 1.0635,
+    "pnl": 10.11,
+    "avg_pnl": 0.53
+  },
+  "filter_improvement": {
+    "pf_delta": 0.0111,
+    "wr_delta": 0.0217,
+    "trades_removed": 19,
+    "loser_selectivity": 0.3636
+  },
+  "trades_per_year": {
+    "without_filter": 14.0,
+    "with_filter": 9.2,
+    "by_year_all": {
+      "2021": 23,
+      "2022": 11,
+      "2023": 16,
+      "2024": 6
+    },
+    "by_year_filtered": {
+      "2021": 17,
+      "2022": 8,
+      "2023": 9,
+      "2024": 3
+    }
+  },
+  "session_analysis": {
+    "Asian": {
+      "n": 16,
+      "wr": 0.3125,
+      "pf": 0.6925,
+      "pnl": -52.4,
+      "avg_pnl": -3.27
+    },
+    "London": {
+      "n": 20,
+      "wr": 0.55,
+      "pf": 2.2451,
+      "pnl": 133.52,
+      "avg_pnl": 6.68
+    },
+    "NewYork": {
+      "n": 20,
+      "wr": 0.35,
+      "pf": 0.8082,
+      "pnl": -39.54,
+      "avg_pnl": -1.98
+    }
+  },
+  "verdict": "AI_FILTER_NEUTRAL",
+  "methodology": {
+    "sma_period": 50,
+    "sma_direction_lookback": 5,
+    "aligned_def": "long+bullish OR short+bearish",
+    "conflict_def": "long+bearish OR short+bullish",
+    "data_source": "D1 XAUUSD parquet, SMA50 slope over 5-bar lookback"
+  },
+  "trade_details": [
+    {
+      "open_ts": "2021-01-20 08:45:00+00:00",
+      "direction": "short",
+      "sma_direction": "bearish",
+      "alignment": "aligned",
+      "pnl_usd": -14.96,
+      "close_reason": "sl",
+      "session": "London",
+      "window": 1
+    },
+    {
+      "open_ts": "2021-01-20 09:45:00+00:00",
+      "direction": "short",
+      "sma_direction": "bearish",
+      "alignment": "aligned",
+      "pnl_usd": 1.76,
+      "close_reason": "sl",
+      "session": "London",
+      "window": 1
+    },
+    {
+      "open_ts": "2021-01-28 11:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": 7.07,
+      "close_reason": "tp2",
+      "session": "London",
+      "window": 1
+    },
+    {
+      "open_ts": "2021-01-28 12:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": 18.35,
+      "close_reason": "tp2",
+      "session": "London",
+      "window": 1
+    },
+    {
+      "open_ts": "2021-01-28 13:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": 18.91,
+      "close_reason": "tp2",
+      "session": "London",
+      "window": 1
+    },
+    {
+      "open_ts": "2021-01-29 16:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": 13.04,
+      "close_reason": "tp2",
+      "session": "NewYork",
+      "window": 1
+    },
+    {
+      "open_ts": "2021-02-02 06:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": -18.08,
+      "close_reason": "sl",
+      "session": "Asian",
+      "window": 1
+    },
+    {
+      "open_ts": "2021-02-02 07:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": -16.75,
+      "close_reason": "sl",
+      "session": "Asian",
+      "window": 1
+    },
+    {
+      "open_ts": "2021-02-02 08:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": -5.73,
+      "close_reason": "sl",
+      "session": "London",
+      "window": 1
+    },
+    {
+      "open_ts": "2021-03-16 03:45:00+00:00",
+      "direction": "short",
+      "sma_direction": "bearish",
+      "alignment": "aligned",
+      "pnl_usd": -10.51,
+      "close_reason": "sl",
+      "session": "Asian",
+      "window": 1
+    },
+    {
+      "open_ts": "2021-03-31 01:45:00+00:00",
+      "direction": "short",
+      "sma_direction": "bearish",
+      "alignment": "aligned",
+      "pnl_usd": -10.08,
+      "close_reason": "sl",
+      "session": "Asian",
+      "window": 1
+    },
+    {
+      "open_ts": "2021-04-09 00:45:00+00:00",
+      "direction": "short",
+      "sma_direction": "bearish",
+      "alignment": "aligned",
+      "pnl_usd": 24.83,
+      "close_reason": "tp1",
+      "session": "Asian",
+      "window": 2
+    },
+    {
+      "open_ts": "2021-09-20 01:45:00+00:00",
+      "direction": "short",
+      "sma_direction": "bearish",
+      "alignment": "aligned",
+      "pnl_usd": -7.85,
+      "close_reason": "sl",
+      "session": "Asian",
+      "window": 3
+    },
+    {
+      "open_ts": "2021-10-05 04:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": 25.4,
+      "close_reason": "tp1",
+      "session": "Asian",
+      "window": 4
+    },
+    {
+      "open_ts": "2021-10-05 06:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": 20.5,
+      "close_reason": "tp1",
+      "session": "Asian",
+      "window": 4
+    },
+    {
+      "open_ts": "2021-10-05 22:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": 26.41,
+      "close_reason": "tp1",
+      "session": "NewYork",
+      "window": 4
+    },
+    {
+      "open_ts": "2021-10-08 10:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": 25.05,
+      "close_reason": "tp1",
+      "session": "London",
+      "window": 4
+    },
+    {
+      "open_ts": "2021-10-26 22:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": -16.37,
+      "close_reason": "sl",
+      "session": "NewYork",
+      "window": 4
+    },
+    {
+      "open_ts": "2021-10-27 03:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": -11.4,
+      "close_reason": "sl",
+      "session": "Asian",
+      "window": 4
+    },
+    {
+      "open_ts": "2021-10-27 04:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": -11.49,
+      "close_reason": "sl",
+      "session": "Asian",
+      "window": 4
+    },
+    {
+      "open_ts": "2021-12-23 14:15:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": -12.47,
+      "close_reason": "sl",
+      "session": "NewYork",
+      "window": 4
+    },
+    {
+      "open_ts": "2021-12-23 15:15:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": -12.56,
+      "close_reason": "sl",
+      "session": "NewYork",
+      "window": 4
+    },
+    {
+      "open_ts": "2021-12-26 18:15:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": -11.46,
+      "close_reason": "sl",
+      "session": "NewYork",
+      "window": 4
+    },
+    {
+      "open_ts": "2022-01-06 19:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": 26.96,
+      "close_reason": "tp1",
+      "session": "NewYork",
+      "window": 5
+    },
+    {
+      "open_ts": "2022-01-06 20:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": 22.9,
+      "close_reason": "tp1",
+      "session": "NewYork",
+      "window": 5
+    },
+    {
+      "open_ts": "2022-01-07 00:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": 19.75,
+      "close_reason": "tp1",
+      "session": "Asian",
+      "window": 5
+    },
+    {
+      "open_ts": "2022-01-20 23:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": -8.18,
+      "close_reason": "sl",
+      "session": "NewYork",
+      "window": 5
+    },
+    {
+      "open_ts": "2022-02-10 12:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": 37.96,
+      "close_reason": "tp1",
+      "session": "London",
+      "window": 5
+    },
+    {
+      "open_ts": "2022-02-21 06:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": 27.55,
+      "close_reason": "tp1",
+      "session": "Asian",
+      "window": 5
+    },
+    {
+      "open_ts": "2022-03-10 02:15:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": -26.5,
+      "close_reason": "sl",
+      "session": "Asian",
+      "window": 5
+    },
+    {
+      "open_ts": "2022-06-09 01:15:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": -11.82,
+      "close_reason": "sl",
+      "session": "Asian",
+      "window": 6
+    },
+    {
+      "open_ts": "2022-09-07 21:45:00+00:00",
+      "direction": "short",
+      "sma_direction": "bearish",
+      "alignment": "aligned",
+      "pnl_usd": -14.08,
+      "close_reason": "sl",
+      "session": "NewYork",
+      "window": 7
+    },
+    {
+      "open_ts": "2022-11-30 10:30:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": 19.79,
+      "close_reason": "tp1",
+      "session": "London",
+      "window": 8
+    },
+    {
+      "open_ts": "2022-12-05 01:30:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": -30.81,
+      "close_reason": "sl",
+      "session": "Asian",
+      "window": 8
+    },
+    {
+      "open_ts": "2023-01-30 22:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": -12.99,
+      "close_reason": "sl",
+      "session": "NewYork",
+      "window": 9
+    },
+    {
+      "open_ts": "2023-05-01 10:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": 25.65,
+      "close_reason": "tp1",
+      "session": "London",
+      "window": 10
+    },
+    {
+      "open_ts": "2023-05-02 08:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": 27.09,
+      "close_reason": "tp1",
+      "session": "London",
+      "window": 10
+    },
+    {
+      "open_ts": "2023-06-01 12:15:00+00:00",
+      "direction": "short",
+      "sma_direction": "bearish",
+      "alignment": "aligned",
+      "pnl_usd": 19.77,
+      "close_reason": "tp2",
+      "session": "London",
+      "window": 10
+    },
+    {
+      "open_ts": "2023-08-14 09:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": -7.63,
+      "close_reason": "sl",
+      "session": "London",
+      "window": 11
+    },
+    {
+      "open_ts": "2023-08-14 21:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": -7.97,
+      "close_reason": "sl",
+      "session": "NewYork",
+      "window": 11
+    },
+    {
+      "open_ts": "2023-08-14 22:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": -8.55,
+      "close_reason": "sl",
+      "session": "NewYork",
+      "window": 11
+    },
+    {
+      "open_ts": "2023-08-15 08:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": -4.65,
+      "close_reason": "sl",
+      "session": "London",
+      "window": 11
+    },
+    {
+      "open_ts": "2023-08-16 14:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": 27.63,
+      "close_reason": "tp1",
+      "session": "NewYork",
+      "window": 11
+    },
+    {
+      "open_ts": "2023-08-16 15:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": 22.05,
+      "close_reason": "tp1",
+      "session": "NewYork",
+      "window": 11
+    },
+    {
+      "open_ts": "2023-08-16 18:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": 27.64,
+      "close_reason": "tp1",
+      "session": "NewYork",
+      "window": 11
+    },
+    {
+      "open_ts": "2023-11-01 19:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": -25.81,
+      "close_reason": "sl",
+      "session": "NewYork",
+      "window": 12
+    },
+    {
+      "open_ts": "2023-11-01 20:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": -27.9,
+      "close_reason": "sl",
+      "session": "NewYork",
+      "window": 12
+    },
+    {
+      "open_ts": "2023-11-01 22:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": -25.7,
+      "close_reason": "sl",
+      "session": "NewYork",
+      "window": 12
+    },
+    {
+      "open_ts": "2023-11-17 09:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": -4.89,
+      "close_reason": "sl",
+      "session": "London",
+      "window": 12
+    },
+    {
+      "open_ts": "2023-11-20 08:45:00+00:00",
+      "direction": "long",
+      "sma_direction": "bullish",
+      "alignment": "aligned",
+      "pnl_usd": 39.36,
+      "close_reason": "tp1",
+      "session": "London",
+      "window": 12
+    },
+    {
+      "open_ts": "2024-01-31 10:15:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": -26.86,
+      "close_reason": "sl",
+      "session": "London",
+      "window": 13
+    },
+    {
+      "open_ts": "2024-01-31 11:15:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": -22.22,
+      "close_reason": "sl",
+      "session": "London",
+      "window": 13
+    },
+    {
+      "open_ts": "2024-01-31 23:15:00+00:00",
+      "direction": "long",
+      "sma_direction": "bearish",
+      "alignment": "conflict",
+      "pnl_usd": -22.13,
+      "close_reason": "sl",
+      "session": "NewYork",
+      "window": 13
+    },
+    {
+      "open_ts": "2024-02-22 03:45:00+00:00",
+      "direction": "short",
+      "sma_direction": "bearish",
+      "alignment": "aligned",
+      "pnl_usd": -15.14,
+      "close_reason": "sl",
+      "session": "Asian",
+      "window": 13
+    },
+    {
+      "open_ts": "2024-02-23 11:45:00+00:00",
+      "direction": "short",
+      "sma_direction": "bearish",
+      "alignment": "aligned",
+      "pnl_usd": -10.12,
+      "close_reason": "sl",
+      "session": "London",
+      "window": 13
+    },
+    {
+      "open_ts": "2024-02-23 12:45:00+00:00",
+      "direction": "short",
+      "sma_direction": "bearish",
+      "alignment": "aligned",
+      "pnl_usd": -10.18,
+      "close_reason": "sl",
+      "session": "London",
+      "window": 13
+    }
+  ]
+}

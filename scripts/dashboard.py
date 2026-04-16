@@ -36,21 +36,89 @@ console = Console()
 
 JOURNAL_PATH = Path("data/journal/live_trades.jsonl")
 LOG_PATH = Path("logs/live_stdout.log")
+STATE_PATH = Path("data/live_state.json")
+AI_ANALYSIS_PATH = Path("data/ai_analysis.json")
 
 
-def make_header() -> Panel:
+def _load_json(path: Path) -> dict | None:
+    """Load a JSON file safely, return None on failure."""
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return None
+
+
+def make_action_banner() -> Panel:
+    """Giant action banner showing current AI+SMC decision at top of screen."""
     now = datetime.now(timezone.utc)
-    grid = Table.grid(expand=True)
-    grid.add_column(justify="left", ratio=1)
-    grid.add_column(justify="center", ratio=2)
-    grid.add_column(justify="right", ratio=1)
+    state = _load_json(STATE_PATH)
 
-    grid.add_row(
-        Text("AI-SMC", style="bold cyan"),
-        Text("Smart Money Concepts Trading System", style="bold white"),
-        Text(now.strftime("%Y-%m-%d %H:%M:%S UTC"), style="dim"),
-    )
-    return Panel(grid, style="bold blue", box=box.DOUBLE)
+    if state is None:
+        # No live state yet — show waiting banner
+        grid = Table.grid(expand=True)
+        grid.add_column(justify="center")
+        grid.add_row(Text("=== WAITING FOR LIVE LOOP ===", style="bold yellow"))
+        grid.add_row(Text("Run: python scripts/live_demo.py to start", style="dim"))
+        grid.add_row(Text(now.strftime("%Y-%m-%d %H:%M:%S UTC"), style="dim"))
+        return Panel(grid, style="bold yellow", box=box.DOUBLE)
+
+    action_raw = state.get("action", "HOLD")
+    action_word = action_raw.split()[0].upper()
+    price = state.get("price", 0)
+    reason = state.get("reason", "")
+    ai_dir = state.get("ai_direction", "?").upper()
+    ai_conf = state.get("ai_confidence", 0)
+    setup = state.get("best_setup")
+
+    # Color coding by action
+    if action_word == "BUY":
+        arrow = "▲▲▲"
+        style = "bold green"
+    elif action_word == "SELL":
+        arrow = "▼▼▼"
+        style = "bold red"
+    else:
+        arrow = "==="
+        style = "bold yellow"
+
+    grid = Table.grid(expand=True)
+    grid.add_column(justify="center")
+
+    # Line 1: giant action
+    grid.add_row(Text(
+        f"  {arrow}  {action_raw}  XAUUSD @ ${price:.2f}  {arrow}  ",
+        style=style,
+    ))
+
+    # Line 2: AI + SMC summary
+    setup_trigger = setup.get("trigger", "?") if setup else "no setup"
+    setup_dir = setup.get("direction", "?").upper() if setup else "-"
+    grid.add_row(Text(
+        f"AI: {ai_dir} ({ai_conf:.0%}) + SMC: {setup_dir} {setup_trigger}",
+        style="white",
+    ))
+
+    # Line 3: SL / TP / Confluence (or reason when HOLD)
+    if setup:
+        sl = setup.get("sl", 0)
+        tp = setup.get("tp1", 0)
+        conf = setup.get("confluence", 0)
+        grid.add_row(Text(
+            f"SL: ${sl:.2f} | TP: ${tp:.2f} | Confluence: {conf:.2f}",
+            style="dim white",
+        ))
+    else:
+        grid.add_row(Text(reason, style="dim white"))
+
+    # Line 4: timestamp + cycle
+    cycle = state.get("cycle", "?")
+    ts = state.get("timestamp", "")[:19]
+    grid.add_row(Text(f"Cycle #{cycle} | {ts} UTC", style="dim"))
+
+    return Panel(grid, style=style, box=box.DOUBLE, title="[bold white]AI-SMC ACTION[/bold white]")
 
 
 def make_account_panel() -> Panel:
@@ -211,14 +279,30 @@ def make_health_panel() -> Panel:
         margin_ok = info.margin_level > 200 or info.margin_level == 0
         checks.append(("Margin Level", margin_ok, f"{info.margin_level:.0f}%"))
 
-    # Live process
-    log_exists = LOG_PATH.exists()
-    if log_exists:
-        log_age = time.time() - LOG_PATH.stat().st_mtime
-        alive = log_age < 1800
-        checks.append(("Live Loop", alive, f"log {log_age:.0f}s ago"))
+    # Live loop — check live_state.json freshness (<900s = running)
+    state_exists = STATE_PATH.exists()
+    if state_exists:
+        state_age = time.time() - STATE_PATH.stat().st_mtime
+        alive = state_age < 900
+        checks.append(("Live Loop", alive, f"state {state_age:.0f}s ago"))
     else:
-        checks.append(("Live Loop", False, "No log file"))
+        # Fallback to log file
+        log_exists = LOG_PATH.exists()
+        if log_exists:
+            log_age = time.time() - LOG_PATH.stat().st_mtime
+            alive = log_age < 1800
+            checks.append(("Live Loop", alive, f"log {log_age:.0f}s ago"))
+        else:
+            checks.append(("Live Loop", False, "Not running"))
+
+    # AI Analysis freshness
+    ai_exists = AI_ANALYSIS_PATH.exists()
+    if ai_exists:
+        ai_age = time.time() - AI_ANALYSIS_PATH.stat().st_mtime
+        ai_fresh = ai_age < 14400  # 4 hours
+        checks.append(("AI Analysis", ai_fresh, f"{ai_age / 60:.0f}min ago"))
+    else:
+        checks.append(("AI Analysis", False, "No analysis"))
 
     # Journal
     journal_exists = JOURNAL_PATH.exists()
@@ -246,10 +330,11 @@ def make_health_panel() -> Panel:
 
 
 def make_journal_panel() -> Panel:
+    """Trade journal showing AI's role in each signal — AGREED, BLOCKED, or CONFLICT."""
     if not JOURNAL_PATH.exists():
         return Panel(
             Align.center(Text("No trades yet — waiting for signals", style="dim italic")),
-            title="[bold white]Recent Signals[/bold white]",
+            title="[bold white]Trade History + AI Role[/bold white]",
             border_style="blue",
             box=box.ROUNDED,
         )
@@ -260,110 +345,147 @@ def make_journal_panel() -> Panel:
     if not lines:
         return Panel(
             Align.center(Text("Journal empty", style="dim")),
-            title="[bold white]Recent Signals[/bold white]",
+            title="[bold white]Trade History + AI Role[/bold white]",
             border_style="blue",
             box=box.ROUNDED,
         )
 
     table = Table(box=box.SIMPLE, show_lines=False)
-    table.add_column("Time", style="dim", width=12)
+    table.add_column("Time", style="dim", width=9)
+    table.add_column("Action", width=10)
     table.add_column("Dir", width=6)
     table.add_column("Entry", width=10)
     table.add_column("SL", width=10)
     table.add_column("TP", width=10)
-    table.add_column("Trigger", width=18)
+    table.add_column("Trigger", width=14)
+    table.add_column("AI Role", width=12)
     table.add_column("Conf", width=6)
-    table.add_column("Regime", width=12)
 
     for line in lines[-10:]:
         try:
             d = json.loads(line.strip())
             dir_style = "green" if d.get("direction") == "long" else "red"
+
+            # Determine AI's role in this signal
+            ai_dir = d.get("ai_direction", "?")
+            smc_dir = d.get("direction", "?")
+            action = d.get("action", "?")
+
+            if ai_dir == "bullish" and smc_dir == "long":
+                ai_role = "[bold green]AGREED[/bold green]"
+            elif ai_dir == "bearish" and smc_dir == "short":
+                ai_role = "[bold green]AGREED[/bold green]"
+            elif "HOLD" in action.upper():
+                ai_role = "[bold red]BLOCKED[/bold red]"
+            elif ai_dir == "neutral":
+                ai_role = "[yellow]NEUTRAL[/yellow]"
+            else:
+                ai_role = "[red]CONFLICT[/red]"
+
+            time_str = d.get("time", "")
+            if "T" in time_str:
+                time_str = time_str.split("T")[1][:8]
+            else:
+                time_str = time_str[:8]
+
             table.add_row(
-                d.get("time", "")[:19].split("T")[1] if "T" in d.get("time", "") else d.get("time", "")[:12],
-                f"[{dir_style}]{d.get('direction', '?').upper()}[/{dir_style}]",
+                time_str,
+                f"[{dir_style}]{action[:9]}[/{dir_style}]",
+                f"[{dir_style}]{smc_dir[:5].upper()}[/{dir_style}]",
                 f"${d.get('entry', d.get('price', 0)):.2f}",
                 f"${d.get('sl', 0):.2f}",
                 f"${d.get('tp1', 0):.2f}",
-                d.get("trigger", "?"),
+                d.get("trigger", "?")[:14],
+                ai_role,
                 f"{d.get('confluence', 0):.2f}",
-                d.get("regime", "?"),
             )
         except (json.JSONDecodeError, KeyError):
             continue
 
     total = len(lines)
-    return Panel(table, title=f"[bold white]Recent Signals ({total} total)[/bold white]", border_style="blue", box=box.ROUNDED)
-
-
-AI_ANALYSIS_PATH = Path("data/ai_analysis.json")
+    return Panel(
+        table,
+        title=f"[bold white]Trade History + AI Role ({total} total)[/bold white]",
+        border_style="blue",
+        box=box.ROUNDED,
+    )
 
 
 def make_ai_panel() -> Panel:
-    """Show AI market analysis from ai_analyze.py output."""
-    if not AI_ANALYSIS_PATH.exists():
+    """Show AI market analysis with full reasoning — the WHY behind every decision."""
+    a = _load_json(AI_ANALYSIS_PATH)
+    if a is None:
         return Panel(
             Align.center(Text("Run: smc-analyze to generate AI analysis", style="dim italic")),
-            title="[bold white]AI Market Analysis[/bold white]",
+            title="[bold white]AI Analysis — WHY[/bold white]",
             border_style="bright_magenta",
             box=box.ROUNDED,
         )
 
-    try:
-        with open(AI_ANALYSIS_PATH) as f:
-            a = json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return Panel("[red]Failed to read analysis[/red]", title="AI Analysis", border_style="red")
+    dir_colors = {"bullish": "bold green", "bearish": "bold red", "neutral": "bold yellow"}
 
     table = Table(show_header=False, box=None, padding=(0, 1))
     table.add_column("Key", style="dim", width=16)
     table.add_column("Value")
 
-    # Direction
+    # Direction + confidence
     d = a.get("direction", "unknown")
     c = a.get("confidence", 0)
-    dir_colors = {"bullish": "bold green", "bearish": "bold red", "neutral": "bold yellow"}
     dir_style = dir_colors.get(d, "white")
-    table.add_row("Direction", f"[{dir_style}]{d.upper()}[/{dir_style}]  ({c:.0%} confidence)")
+    table.add_row("Direction", f"[{dir_style}]{d.upper()}[/{dir_style}]  ({c:.0%})")
 
-    # AI override
+    # AI debate override
     if a.get("ai_direction"):
         ai_d = a["ai_direction"]
         ai_style = dir_colors.get(ai_d, "white")
         table.add_row("AI Debate", f"[{ai_style}]{ai_d.upper()}[/{ai_style}]  (via {a.get('ai_source', '?')})")
-        if a.get("ai_key_drivers"):
-            drivers = ", ".join(a["ai_key_drivers"][:3])
-            table.add_row("Key Drivers", f"[dim]{drivers}[/dim]")
 
-    # Technical
-    if a.get("sma20"):
-        table.add_row("SMA20 / SMA50", f"${a['sma20']:.0f} / ${a.get('sma50', 0):.0f}")
-    if a.get("sma20_vs_sma50"):
-        cross = a["sma20_vs_sma50"]
-        cross_style = "green" if cross == "golden_cross" else "red"
-        table.add_row("Cross", f"[{cross_style}]{cross.replace('_', ' ').upper()}[/{cross_style}]")
-    if a.get("atr_pct"):
-        vol = a.get("volatility", "?")
-        vol_style = "red" if vol == "high" else ("green" if vol == "low" else "yellow")
-        table.add_row("Volatility", f"ATR {a['atr_pct']:.2f}%  [{vol_style}]{vol.upper()}[/{vol_style}]")
+    # --- KEY FACTORS as bullet list (the WHY) ---
+    factors = a.get("key_factors", [])
+    ai_drivers = a.get("ai_key_drivers", [])
+    all_reasons = factors + ai_drivers
+    if all_reasons:
+        table.add_row("", "")
+        table.add_row("[bold]WHY[/bold]", "")
+        for reason in all_reasons[:6]:
+            table.add_row("", f"[cyan]>[/cyan] {reason}")
+    else:
+        # Fall back to reasoning string
+        reasoning = a.get("reasoning", a.get("ai_reasoning", ""))
+        if reasoning:
+            table.add_row("", "")
+            table.add_row("[bold]WHY[/bold]", "")
+            # Split long reasoning into readable lines
+            for chunk in _wrap_text(reasoning, 50):
+                table.add_row("", f"[dim]{chunk}[/dim]")
+
+    # Technical summary row
+    table.add_row("", "")
+    tech_parts = []
+    if a.get("sma20") and a.get("sma50"):
+        cross = a.get("sma20_vs_sma50", "?")
+        cross_label = "GOLDEN" if cross == "golden_cross" else "DEATH"
+        tech_parts.append(f"SMA20 ${a['sma20']:.0f} / SMA50 ${a['sma50']:.0f} ({cross_label})")
     if a.get("change_5d_pct") is not None:
         chg = a["change_5d_pct"]
         chg_style = "green" if chg > 0 else "red"
-        table.add_row("5D Change", f"[{chg_style}]{chg:+.2f}%[/{chg_style}]")
+        tech_parts.append(f"5D [{chg_style}]{chg:+.2f}%[/{chg_style}]")
     if a.get("h4_trend"):
         h4_style = "green" if a["h4_trend"] == "up" else "red"
-        table.add_row("H4 Trend", f"[{h4_style}]{a['h4_trend'].upper()}[/{h4_style}]")
-    if a.get("resistance_20d"):
-        table.add_row("Resistance", f"${a['resistance_20d']:.2f}")
-        table.add_row("Support", f"${a.get('support_20d', 0):.2f}")
+        tech_parts.append(f"H4 [{h4_style}]{a['h4_trend'].upper()}[/{h4_style}]")
+    if a.get("atr_pct"):
+        vol = a.get("volatility", "?")
+        vol_style = "red" if vol == "high" else ("green" if vol == "low" else "yellow")
+        tech_parts.append(f"ATR {a['atr_pct']:.2f}% [{vol_style}]{vol.upper()}[/{vol_style}]")
 
-    # Reasoning
-    reasoning = a.get("reasoning", a.get("ai_reasoning", ""))
-    if reasoning and len(reasoning) > 80:
-        reasoning = reasoning[:77] + "..."
-    if reasoning:
-        table.add_row("", "")
-        table.add_row("Analysis", f"[italic]{reasoning}[/italic]")
+    if tech_parts:
+        table.add_row("Technicals", " | ".join(tech_parts[:2]))
+        if len(tech_parts) > 2:
+            table.add_row("", " | ".join(tech_parts[2:]))
+
+    # Support / Resistance
+    if a.get("resistance_20d"):
+        table.add_row("S/R (20D)", f"${a.get('support_20d', 0):.2f} — ${a['resistance_20d']:.2f}")
 
     # Freshness
     assessed = a.get("assessed_at", "")
@@ -372,7 +494,28 @@ def make_ai_panel() -> Panel:
         table.add_row("Updated", f"[dim]{assessed[:19]}[/dim]")
 
     source = a.get("source", "?")
-    return Panel(table, title=f"[bold white]AI Market Analysis[/bold white] [dim]({source})[/dim]", border_style="bright_magenta", box=box.ROUNDED)
+    return Panel(
+        table,
+        title=f"[bold white]AI Analysis — WHY[/bold white] [dim]({source})[/dim]",
+        border_style="bright_magenta",
+        box=box.ROUNDED,
+    )
+
+
+def _wrap_text(text: str, width: int) -> list[str]:
+    """Split text into lines of approximately `width` characters."""
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        if current and len(current) + 1 + len(word) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}" if current else word
+    if current:
+        lines.append(current)
+    return lines
 
 
 def make_log_panel() -> Panel:
@@ -391,9 +534,9 @@ def make_layout() -> Layout:
     layout = Layout()
 
     layout.split_column(
-        Layout(name="header", size=3),
+        Layout(name="action_banner", size=6),
         Layout(name="upper", size=12),
-        Layout(name="ai_row", size=16),
+        Layout(name="ai_row", size=18),
         Layout(name="middle", size=10),
         Layout(name="lower"),
     )
@@ -422,7 +565,7 @@ def make_layout() -> Layout:
 
 
 def render(layout: Layout) -> Layout:
-    layout["header"].update(make_header())
+    layout["action_banner"].update(make_action_banner())
     layout["account"].update(make_account_panel())
     layout["price"].update(make_price_panel())
     layout["regime"].update(make_regime_panel())
