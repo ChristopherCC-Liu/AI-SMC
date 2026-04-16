@@ -72,9 +72,17 @@ def make_action_banner() -> Panel:
     ai_dir = state.get("ai_direction", "?").upper()
     ai_conf = state.get("ai_confidence", 0)
     setup = state.get("best_setup")
+    trading_mode = state.get("trading_mode", "trending")
+    range_bounds = state.get("range_bounds")
 
-    # Color coding by action
-    if action_word == "BUY":
+    # Color coding by action — including RANGE BUY (cyan) / RANGE SELL (magenta)
+    if action_raw.startswith("RANGE BUY"):
+        arrow = "~~~"
+        style = "bold cyan"
+    elif action_raw.startswith("RANGE SELL"):
+        arrow = "~~~"
+        style = "bold magenta"
+    elif action_word == "BUY":
         arrow = "▲▲▲"
         style = "bold green"
     elif action_word == "SELL":
@@ -87,19 +95,26 @@ def make_action_banner() -> Panel:
     grid = Table.grid(expand=True)
     grid.add_column(justify="center")
 
-    # Line 1: giant action
+    # Line 1: giant action + trading mode badge
+    mode_badge = f"[{trading_mode.upper()}]"
     grid.add_row(Text(
-        f"  {arrow}  {action_raw}  XAUUSD @ ${price:.2f}  {arrow}  ",
+        f"  {arrow}  {action_raw}  XAUUSD @ ${price:.2f}  {mode_badge}  {arrow}  ",
         style=style,
     ))
 
-    # Line 2: AI + SMC summary
+    # Line 2: AI + setup summary (context-aware for mode)
     setup_trigger = setup.get("trigger", "?") if setup else "no setup"
     setup_dir = setup.get("direction", "?").upper() if setup else "-"
-    grid.add_row(Text(
-        f"AI: {ai_dir} ({ai_conf:.0%}) + SMC: {setup_dir} {setup_trigger}",
-        style="white",
-    ))
+    if trading_mode == "ranging":
+        grid.add_row(Text(
+            f"AI: {ai_dir} ({ai_conf:.0%}) | MODE: RANGING | {setup_dir} {setup_trigger}",
+            style="white",
+        ))
+    else:
+        grid.add_row(Text(
+            f"AI: {ai_dir} ({ai_conf:.0%}) + SMC: {setup_dir} {setup_trigger}",
+            style="white",
+        ))
 
     # Line 3: SL / TP / Confluence (or reason when HOLD)
     if setup:
@@ -112,6 +127,16 @@ def make_action_banner() -> Panel:
         ))
     else:
         grid.add_row(Text(reason, style="dim white"))
+
+    # Line 3b: Range bounds (shown when detected, regardless of mode)
+    if range_bounds:
+        rb_upper = range_bounds.get("upper", 0)
+        rb_lower = range_bounds.get("lower", 0)
+        rb_width = range_bounds.get("width", rb_upper - rb_lower)
+        grid.add_row(Text(
+            f"Range: ${rb_lower:.0f}-${rb_upper:.0f} | Width: ${rb_width:.0f}",
+            style="bold cyan" if trading_mode == "ranging" else "dim cyan",
+        ))
 
     # Line 4: timestamp + cycle
     cycle = state.get("cycle", "?")
@@ -359,7 +384,7 @@ def make_journal_panel() -> Panel:
     table.add_column("TP", width=10)
     table.add_column("Trigger", width=14)
     table.add_column("AI Role", width=12)
-    table.add_column("Conf", width=6)
+    table.add_column("Mode", width=7)
 
     for line in lines[-10:]:
         try:
@@ -370,6 +395,7 @@ def make_journal_panel() -> Panel:
             ai_dir = d.get("ai_direction", "?")
             smc_dir = d.get("direction", "?")
             action = d.get("action", "?")
+            trade_mode = d.get("trading_mode", "trend")
 
             if ai_dir == "bullish" and smc_dir == "long":
                 ai_role = "[bold green]AGREED[/bold green]"
@@ -379,8 +405,14 @@ def make_journal_panel() -> Panel:
                 ai_role = "[bold red]BLOCKED[/bold red]"
             elif ai_dir == "neutral":
                 ai_role = "[yellow]NEUTRAL[/yellow]"
+            elif "RANGE" in action.upper():
+                ai_role = "[cyan]RANGE[/cyan]"
             else:
                 ai_role = "[red]CONFLICT[/red]"
+
+            # Mode badge
+            mode_style = "cyan" if trade_mode == "ranging" else "dim"
+            mode_label = trade_mode[:7].upper()
 
             time_str = d.get("time", "")
             if "T" in time_str:
@@ -397,7 +429,7 @@ def make_journal_panel() -> Panel:
                 f"${d.get('tp1', 0):.2f}",
                 d.get("trigger", "?")[:14],
                 ai_role,
-                f"{d.get('confluence', 0):.2f}",
+                f"[{mode_style}]{mode_label}[/{mode_style}]",
             )
         except (json.JSONDecodeError, KeyError):
             continue
@@ -534,7 +566,7 @@ def make_layout() -> Layout:
     layout = Layout()
 
     layout.split_column(
-        Layout(name="action_banner", size=6),
+        Layout(name="action_banner", size=8),
         Layout(name="upper", size=12),
         Layout(name="ai_row", size=18),
         Layout(name="middle", size=10),

@@ -1,0 +1,512 @@
+"""Tests for range detection and mean-reversion setup generation.
+
+Covers:
+- Range detection via OB boundaries (Method A)
+- Range detection via swing extremes (Method B fallback)
+- Width rejection (too narrow / too wide)
+- Long setup at lower boundary
+- Short setup at upper boundary
+- No setup when price is mid-range
+- TP targets and SL placement
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import polars as pl
+import pytest
+
+from smc.data.schemas import Timeframe
+from smc.smc_core.constants import XAUUSD_POINT_SIZE
+from smc.smc_core.types import (
+    OrderBlock,
+    SMCSnapshot,
+    StructureBreak,
+    SwingPoint,
+)
+from smc.strategy.range_trader import RangeTrader
+from smc.strategy.range_types import RangeBounds, RangeSetup
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_BASE_TS = datetime(2024, 7, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def _make_snapshot(
+    *,
+    timeframe: Timeframe = Timeframe.H1,
+    trend: str = "ranging",
+    swing_points: tuple[SwingPoint, ...] = (),
+    order_blocks: tuple[OrderBlock, ...] = (),
+    structure_breaks: tuple[StructureBreak, ...] = (),
+) -> SMCSnapshot:
+    return SMCSnapshot(
+        ts=_BASE_TS,
+        timeframe=timeframe,
+        swing_points=swing_points,
+        order_blocks=order_blocks,
+        fvgs=(),
+        structure_breaks=structure_breaks,
+        liquidity_levels=(),
+        trend_direction=trend,  # type: ignore[arg-type]
+    )
+
+
+def _empty_h1_df() -> pl.DataFrame:
+    """Minimal H1 DataFrame (detect_range signature requires it)."""
+    return pl.DataFrame({"high": [2380.0], "low": [2340.0], "close": [2360.0]})
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def trader() -> RangeTrader:
+    return RangeTrader(min_range_width=300, max_range_width=3000)
+
+
+@pytest.fixture()
+def h1_with_obs() -> SMCSnapshot:
+    """H1 snapshot with bearish OB at top + bullish OB at bottom → valid range.
+
+    Range: 2370.00 (bearish OB high) - 2348.00 (bullish OB low) = $22 = 2200 pts.
+    Within the 300-3000 point bounds.
+    """
+    return _make_snapshot(
+        timeframe=Timeframe.H1,
+        order_blocks=(
+            OrderBlock(
+                ts_start=_BASE_TS,
+                ts_end=_BASE_TS,
+                high=2370.00,
+                low=2366.00,
+                ob_type="bearish",
+                timeframe=Timeframe.H1,
+            ),
+            OrderBlock(
+                ts_start=_BASE_TS,
+                ts_end=_BASE_TS,
+                high=2352.00,
+                low=2348.00,
+                ob_type="bullish",
+                timeframe=Timeframe.H1,
+            ),
+        ),
+        swing_points=(
+            SwingPoint(ts=_BASE_TS, price=2348.00, swing_type="low", strength=5),
+            SwingPoint(ts=_BASE_TS, price=2370.00, swing_type="high", strength=5),
+            SwingPoint(ts=_BASE_TS, price=2350.00, swing_type="low", strength=5),
+        ),
+    )
+
+
+@pytest.fixture()
+def h1_swings_only() -> SMCSnapshot:
+    """H1 snapshot with swings but no OBs → Method B fallback.
+
+    Range: 2368.00 (max high) - 2348.00 (min low) = $20 = 2000 pts.
+    """
+    return _make_snapshot(
+        timeframe=Timeframe.H1,
+        swing_points=(
+            SwingPoint(ts=_BASE_TS, price=2348.00, swing_type="low", strength=5),
+            SwingPoint(ts=_BASE_TS, price=2368.00, swing_type="high", strength=5),
+            SwingPoint(ts=_BASE_TS, price=2350.00, swing_type="low", strength=5),
+            SwingPoint(ts=_BASE_TS, price=2365.00, swing_type="high", strength=5),
+        ),
+    )
+
+
+@pytest.fixture()
+def m15_choch_at_lower() -> SMCSnapshot:
+    """M15 snapshot with bullish CHoCH near the lower boundary (2348 area)."""
+    return _make_snapshot(
+        timeframe=Timeframe.M15,
+        structure_breaks=(
+            StructureBreak(
+                ts=_BASE_TS,
+                price=2349.00,
+                break_type="choch",
+                direction="bullish",
+                timeframe=Timeframe.M15,
+            ),
+        ),
+    )
+
+
+@pytest.fixture()
+def m15_choch_at_upper() -> SMCSnapshot:
+    """M15 snapshot with bearish CHoCH near the upper boundary (2370 area)."""
+    return _make_snapshot(
+        timeframe=Timeframe.M15,
+        structure_breaks=(
+            StructureBreak(
+                ts=_BASE_TS,
+                price=2369.00,
+                break_type="choch",
+                direction="bearish",
+                timeframe=Timeframe.M15,
+            ),
+        ),
+    )
+
+
+@pytest.fixture()
+def m15_no_choch() -> SMCSnapshot:
+    """M15 snapshot with no CHoCH — setup should be rejected."""
+    return _make_snapshot(timeframe=Timeframe.M15)
+
+
+# ---------------------------------------------------------------------------
+# Range Detection: OB boundaries (Method A)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectRangeOBBoundaries:
+    """Method A: derive range from highest bearish OB + lowest bullish OB."""
+
+    def test_valid_range_from_obs(
+        self, trader: RangeTrader, h1_with_obs: SMCSnapshot
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+
+        assert bounds is not None
+        assert bounds.source == "ob_boundaries"
+        assert bounds.upper == 2370.00
+        assert bounds.lower == 2348.00
+        assert bounds.confidence == 0.8
+        expected_width = (2370.00 - 2348.00) / XAUUSD_POINT_SIZE
+        assert bounds.width_points == pytest.approx(expected_width, rel=1e-3)
+        assert bounds.midpoint == pytest.approx((2370.00 + 2348.00) / 2.0, rel=1e-3)
+
+    def test_no_range_without_bearish_ob(self, trader: RangeTrader) -> None:
+        """Only bullish OBs present — no upper boundary → None."""
+        snapshot = _make_snapshot(
+            order_blocks=(
+                OrderBlock(
+                    ts_start=_BASE_TS,
+                    ts_end=_BASE_TS,
+                    high=2352.00,
+                    low=2348.00,
+                    ob_type="bullish",
+                    timeframe=Timeframe.H1,
+                ),
+            ),
+        )
+        assert trader.detect_range(_empty_h1_df(), snapshot) is None
+
+
+# ---------------------------------------------------------------------------
+# Range Detection: Swing extremes (Method B)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectRangeSwingExtremes:
+    """Method B: derive range from max swing high + min swing low."""
+
+    def test_fallback_to_swings(
+        self, trader: RangeTrader, h1_swings_only: SMCSnapshot
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_swings_only)
+
+        assert bounds is not None
+        assert bounds.source == "swing_extremes"
+        assert bounds.upper == 2368.00
+        assert bounds.lower == 2348.00
+        assert bounds.confidence == 0.6
+
+    def test_no_range_with_one_swing(self, trader: RangeTrader) -> None:
+        """Fewer than 2 swing points → None."""
+        snapshot = _make_snapshot(
+            swing_points=(
+                SwingPoint(ts=_BASE_TS, price=2360.00, swing_type="high", strength=5),
+            ),
+        )
+        assert trader.detect_range(_empty_h1_df(), snapshot) is None
+
+
+# ---------------------------------------------------------------------------
+# Width rejection
+# ---------------------------------------------------------------------------
+
+
+class TestWidthRejection:
+    def test_too_narrow(self) -> None:
+        """Range < min_range_width (300 points = $3.00) → rejected."""
+        trader = RangeTrader(min_range_width=300, max_range_width=3000)
+        # Swings only $2.00 apart = 200 points
+        snapshot = _make_snapshot(
+            swing_points=(
+                SwingPoint(ts=_BASE_TS, price=2360.00, swing_type="low", strength=5),
+                SwingPoint(ts=_BASE_TS, price=2362.00, swing_type="high", strength=5),
+            ),
+        )
+        assert trader.detect_range(_empty_h1_df(), snapshot) is None
+
+    def test_too_wide(self) -> None:
+        """Range > max_range_width (3000 points = $30.00) → rejected."""
+        trader = RangeTrader(min_range_width=300, max_range_width=3000)
+        # Swings $40.00 apart = 4000 points
+        snapshot = _make_snapshot(
+            swing_points=(
+                SwingPoint(ts=_BASE_TS, price=2300.00, swing_type="low", strength=5),
+                SwingPoint(ts=_BASE_TS, price=2340.00, swing_type="high", strength=5),
+            ),
+        )
+        assert trader.detect_range(_empty_h1_df(), snapshot) is None
+
+
+# ---------------------------------------------------------------------------
+# Setup generation: lower boundary → long
+# ---------------------------------------------------------------------------
+
+
+class TestSetupAtLowerBoundary:
+    def test_long_setup_at_support(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_lower: SMCSnapshot,
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+
+        # Price near lower boundary
+        current_price = 2349.00
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_lower, current_price, bounds
+        )
+
+        assert len(setups) >= 1
+        long_setup = setups[0]
+        assert long_setup.direction == "long"
+        assert long_setup.trigger == "support_bounce"
+        assert long_setup.entry_price == current_price
+
+    def test_long_tp_at_midpoint(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_lower: SMCSnapshot,
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_lower, 2349.00, bounds
+        )
+        assert len(setups) >= 1
+        assert setups[0].take_profit == bounds.midpoint
+
+    def test_long_sl_below_boundary(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_lower: SMCSnapshot,
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_lower, 2349.00, bounds
+        )
+        assert len(setups) >= 1
+        # SL must be below the lower boundary
+        assert setups[0].stop_loss < bounds.lower
+
+
+# ---------------------------------------------------------------------------
+# Setup generation: upper boundary → short
+# ---------------------------------------------------------------------------
+
+
+class TestSetupAtUpperBoundary:
+    def test_short_setup_at_resistance(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_upper: SMCSnapshot,
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+
+        # Price near upper boundary
+        current_price = 2369.00
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_upper, current_price, bounds
+        )
+
+        assert len(setups) >= 1
+        short_setup = setups[0]
+        assert short_setup.direction == "short"
+        assert short_setup.trigger == "resistance_rejection"
+        assert short_setup.entry_price == current_price
+
+    def test_short_sl_above_boundary(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_upper: SMCSnapshot,
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_upper, 2369.00, bounds
+        )
+        assert len(setups) >= 1
+        # SL must be above the upper boundary
+        assert setups[0].stop_loss > bounds.upper
+
+
+# ---------------------------------------------------------------------------
+# No setup when price is mid-range
+# ---------------------------------------------------------------------------
+
+
+class TestNoSetupMidRange:
+    def test_no_setup_at_midpoint(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_lower: SMCSnapshot,
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+
+        # Price right at midpoint — not near any boundary
+        mid_price = bounds.midpoint
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_lower, mid_price, bounds
+        )
+
+        assert len(setups) == 0
+
+
+# ---------------------------------------------------------------------------
+# Setup requires M15 CHoCH confirmation
+# ---------------------------------------------------------------------------
+
+
+class TestM15Confirmation:
+    def test_no_setup_without_choch(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_no_choch: SMCSnapshot,
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+
+        # Price at lower boundary but no M15 CHoCH
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_no_choch, 2349.00, bounds
+        )
+        assert len(setups) == 0
+
+
+# ---------------------------------------------------------------------------
+# TP extended at opposite boundary minus 10%
+# ---------------------------------------------------------------------------
+
+
+class TestTPExtended:
+    def test_long_tp_ext_near_upper(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_lower: SMCSnapshot,
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_lower, 2349.00, bounds
+        )
+        assert len(setups) >= 1
+
+        range_price = bounds.width_points * XAUUSD_POINT_SIZE
+        expected_ext = bounds.upper - range_price * 0.10
+        assert setups[0].take_profit_ext == pytest.approx(expected_ext, rel=1e-3)
+
+    def test_short_tp_ext_near_lower(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_upper: SMCSnapshot,
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_upper, 2369.00, bounds
+        )
+        assert len(setups) >= 1
+
+        range_price = bounds.width_points * XAUUSD_POINT_SIZE
+        expected_ext = bounds.lower + range_price * 0.10
+        assert setups[0].take_profit_ext == pytest.approx(expected_ext, rel=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Grade assignment
+# ---------------------------------------------------------------------------
+
+
+class TestGrading:
+    def test_ob_source_high_rr_gets_grade_a(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_lower: SMCSnapshot,
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+        assert bounds.source == "ob_boundaries"
+
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_lower, 2349.00, bounds
+        )
+        assert len(setups) >= 1
+        # OB source (0.5) + decent RR should yield A or B
+        assert setups[0].grade in ("A", "B")
+
+    def test_max_two_setups(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+    ) -> None:
+        """generate_range_setups returns at most 2 setups."""
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+
+        # Create M15 with both bullish and bearish CHoCH
+        m15 = _make_snapshot(
+            timeframe=Timeframe.M15,
+            structure_breaks=(
+                StructureBreak(
+                    ts=_BASE_TS,
+                    price=2349.00,
+                    break_type="choch",
+                    direction="bullish",
+                    timeframe=Timeframe.M15,
+                ),
+                StructureBreak(
+                    ts=_BASE_TS,
+                    price=2369.00,
+                    break_type="choch",
+                    direction="bearish",
+                    timeframe=Timeframe.M15,
+                ),
+            ),
+        )
+        # Price at lower boundary only
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15, 2349.00, bounds
+        )
+        assert len(setups) <= 2

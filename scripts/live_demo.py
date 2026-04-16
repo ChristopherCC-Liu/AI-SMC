@@ -1,11 +1,12 @@
-"""AI-SMC Live Trading Loop — with AI analysis integration.
+"""AI-SMC Live Trading Loop — dual-mode (trending + ranging).
 
 Runs every M15 bar close:
 1. Fetch XAUUSD data from MT5
 2. Run AI direction analysis (Claude debate or SMA fallback)
-3. Run SMC strategy pipeline
-4. Output clear BUY / SELL / HOLD signal
-5. Save state to data/live_state.json for dashboard
+3. Detect range bounds on H1 (always, for display)
+4. Route trading mode: trending (v1 5-gate) or ranging (mean-reversion)
+5. Output BUY / SELL / RANGE BUY / RANGE SELL / HOLD signal
+6. Save state to data/live_state.json for dashboard
 
 Usage:
     python scripts/live_demo.py
@@ -28,6 +29,9 @@ from smc.data.schemas import Timeframe
 from smc.smc_core.detector import SMCDetector
 from smc.strategy.aggregator import MultiTimeframeAggregator
 from smc.strategy.regime import classify_regime
+from smc.strategy.range_trader import RangeTrader
+from smc.strategy.breakout_detector import BreakoutDetector
+from smc.strategy.mode_router import route_trading_mode
 from smc.monitor.timing import next_bar_close
 
 JOURNAL_PATH = Path("data/journal/live_trades.jsonl")
@@ -136,27 +140,18 @@ def get_session_info():
         return "ASIAN", 0.2
 
 
-def determine_action(setups, ai_analysis, regime):
-    """AI HARD GATE: determine BUY / SELL / HOLD.
+def _determine_trending(setups, ai_dir, ai_conf, effective_conf, session):
+    """V1 trending mode: 5-gate AI filter (unchanged from original logic).
 
-    AI is NOT decoration — it controls whether trades happen:
-    - Session filter: Asian session = BLOCKED (PF 0.69 proven loser)
-    - Direction filter: AI must agree with SMC direction
-    - Confidence gate: AI confidence < 0.5 after session penalty = BLOCKED
-    - AI NEUTRAL = HOLD (no trade without AI clarity)
+    Returns (action, reason, best_setup).
     """
-    session, session_penalty = get_session_info()
-    ai_dir = ai_analysis.get("ai_direction", ai_analysis.get("direction", "neutral"))
-    ai_conf = ai_analysis.get("ai_confidence", ai_analysis.get("confidence", 0.3))
-    effective_conf = ai_conf - session_penalty
-
     # GATE 1: Session filter (HARD — Asian session proven PF 0.69)
     if session == "ASIAN":
-        return "HOLD", f"SESSION BLOCKED: {session} (PF 0.69 historically) | AI conf {ai_conf:.0%} - {session_penalty:.0%} = {effective_conf:.0%}", None
+        return "HOLD", f"SESSION BLOCKED: {session} (PF 0.69 historically) | AI conf {ai_conf:.0%} = {effective_conf:.0%}", None
 
     # GATE 2: AI confidence after session penalty
     if effective_conf < 0.5:
-        return "HOLD", f"LOW CONFIDENCE: AI {ai_dir.upper()} {ai_conf:.0%} - {session_penalty:.0%} penalty = {effective_conf:.0%} (need 50%+)", None
+        return "HOLD", f"LOW CONFIDENCE: AI {ai_dir.upper()} {ai_conf:.0%} → {effective_conf:.0%} (need 50%+)", None
 
     # GATE 3: AI must not be neutral
     if ai_dir == "neutral":
@@ -172,27 +167,98 @@ def determine_action(setups, ai_analysis, regime):
     # GATE 5: Direction alignment (AI must agree with SMC)
     ai_trade_dir = "long" if ai_dir == "bullish" else "short"
     if ai_trade_dir == e.direction:
-        # ALIGNED — execute
         action = "BUY" if e.direction == "long" else "SELL"
         lot = "0.01" if effective_conf >= 0.8 else ("0.005" if effective_conf >= 0.6 else "0.0025")
         reason = (f"AI {ai_dir.upper()} ({effective_conf:.0%}) + SMC {e.direction.upper()} "
                   f"| {e.trigger_type} | conf {best.confluence_score:.2f} | lot {lot} | {session}")
         return action, reason, best
     else:
-        # CONFLICT — check soft override
         if ai_conf < 0.65:
-            # Low-confidence conflict: AI uncertain, let SMC speak (quarter lot)
             action = f"{'BUY' if e.direction == 'long' else 'SELL'} (override)"
             reason = (f"SOFT OVERRIDE: AI {ai_dir.upper()} ({ai_conf:.0%}) vs SMC {e.direction.upper()} "
                       f"| AI uncertain → SMC wins at 1/4 lot | {e.trigger_type}")
             return action, reason, best
         else:
-            # High-confidence conflict: AI wins
             return "HOLD", f"AI BLOCKED: AI {ai_dir.upper()} ({ai_conf:.0%}) vs SMC {e.direction.upper()} | AI confident → no trade", None
 
 
-def save_state(cycle, price, action, reason, ai_analysis, regime, setups, best_setup):
-    """Save live state for dashboard display."""
+def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
+                       range_trader, breakout_detector):
+    """Ranging mode: breakout guard + mean-reversion setups at range boundaries.
+
+    Returns (action, reason, best_setup).
+    """
+    # Breakout invalidation — if price breaks the range, hold and wait
+    breakout = breakout_detector.check_breakout(price, range_bounds, h1_atr)
+    if breakout != "none":
+        return "HOLD", f"BREAKOUT: {breakout} — range invalidated", None
+
+    range_setups = range_trader.generate_range_setups(
+        h1_snapshot, m15_snapshot, price, range_bounds, h1_atr,
+    )
+    if range_setups:
+        best = max(range_setups, key=lambda s: s.confidence)
+        action = "RANGE BUY" if best.direction == "long" else "RANGE SELL"
+        reason = (f"RANGE {best.trigger} | "
+                  f"${range_bounds.lower:.0f}-${range_bounds.upper:.0f}")
+        return action, reason, best
+
+    return (
+        "HOLD",
+        f"RANGING but no boundary setups | "
+        f"Range ${range_bounds.lower:.0f}-${range_bounds.upper:.0f}",
+        None,
+    )
+
+
+def determine_action(setups, ai_analysis, regime, *,
+                     h1_df=None, h1_snapshot=None, m15_snapshot=None,
+                     h1_atr=0.0, price=0.0,
+                     range_trader=None, breakout_detector=None):
+    """Dual-mode action router: trending (v1 5-gate) or ranging (mean-reversion).
+
+    Always detects range for display. Mode router decides which path runs.
+    Returns (action, reason, best_setup, mode_decision).
+    """
+    session, session_penalty = get_session_info()
+    ai_dir = ai_analysis.get("ai_direction", ai_analysis.get("direction", "neutral"))
+    ai_conf = ai_analysis.get("ai_confidence", ai_analysis.get("confidence", 0.3))
+    effective_conf = ai_conf - session_penalty
+
+    # Always detect range (for display even in trending mode)
+    range_bounds = None
+    if range_trader is not None and h1_snapshot is not None:
+        range_bounds = range_trader.detect_range(h1_df, h1_snapshot)
+
+    # Route trading mode
+    mode = route_trading_mode(
+        ai_direction=ai_dir,
+        ai_confidence=effective_conf,
+        regime=regime,
+        session=session,
+        range_bounds=range_bounds,
+    )
+
+    if mode.mode == "trending":
+        action, reason, best = _determine_trending(
+            setups, ai_dir, ai_conf, effective_conf, session,
+        )
+        return action, reason, best, mode
+
+    if mode.mode == "ranging" and mode.range_bounds is not None:
+        action, reason, best = _determine_ranging(
+            price, mode.range_bounds, h1_snapshot, m15_snapshot, h1_atr,
+            range_trader, breakout_detector,
+        )
+        return action, reason, best, mode
+
+    # Fallback: router returned no actionable mode
+    return "HOLD", mode.reason, None, mode
+
+
+def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
+               best_setup, *, mode_decision=None):
+    """Save live state for dashboard display (dual-mode aware)."""
     state = {
         "cycle": cycle,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -204,17 +270,43 @@ def save_state(cycle, price, action, reason, ai_analysis, regime, setups, best_s
         "ai_confidence": ai_analysis.get("ai_confidence", ai_analysis.get("confidence", 0)),
         "setups_count": len(setups),
         "volatility": ai_analysis.get("volatility", "?"),
+        "trading_mode": mode_decision.mode if mode_decision else "trending",
     }
-    if best_setup:
-        e = best_setup.entry_signal
-        state["best_setup"] = {
-            "direction": e.direction,
-            "entry": e.entry_price,
-            "sl": e.stop_loss,
-            "tp1": e.take_profit_1,
-            "trigger": e.trigger_type,
-            "confluence": best_setup.confluence_score,
+
+    # Range bounds (always populated when detected, even in trending mode)
+    rb = mode_decision.range_bounds if mode_decision else None
+    if rb is not None:
+        state["range_bounds"] = {
+            "upper": rb.upper,
+            "lower": rb.lower,
+            "width": rb.upper - rb.lower,
         }
+    else:
+        state["range_bounds"] = None
+
+    if best_setup:
+        # Range setups use .direction/.trigger/.confidence directly (RangeSetup)
+        # Trending setups use .entry_signal (TradeSetup)
+        if hasattr(best_setup, "entry_signal"):
+            e = best_setup.entry_signal
+            state["best_setup"] = {
+                "direction": e.direction,
+                "entry": e.entry_price,
+                "sl": e.stop_loss,
+                "tp1": e.take_profit_1,
+                "trigger": e.trigger_type,
+                "confluence": best_setup.confluence_score,
+            }
+        else:
+            # RangeSetup from range_trader
+            state["best_setup"] = {
+                "direction": best_setup.direction,
+                "entry": getattr(best_setup, "entry_price", price),
+                "sl": getattr(best_setup, "stop_loss", 0),
+                "tp1": getattr(best_setup, "take_profit", 0),
+                "trigger": best_setup.trigger,
+                "confluence": best_setup.confidence,
+            }
 
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(STATE_PATH, "w") as f:
@@ -229,7 +321,7 @@ def main():
     print("  Mode:       DEMO (paper, log only)")
     print("  Instrument: XAUUSD")
     print("  AI:         Claude Debate + SMA Fallback")
-    print("  Strategy:   v1 (PF 1.66, validated)")
+    print("  Strategy:   DUAL-MODE (trending v1 + ranging)")
     print("=" * 60)
     print()
 
@@ -244,6 +336,8 @@ def main():
 
     detector = SMCDetector(swing_length=10)
     aggregator = MultiTimeframeAggregator(detector=detector, ai_regime_enabled=False)
+    range_trader = RangeTrader()
+    breakout_det = BreakoutDetector()
 
     JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -311,23 +405,53 @@ def main():
             regime = classify_regime(data.get(Timeframe.D1))
             print(f"  Regime: {regime}")
 
-            # 5. Strategy
+            # 4b. Detect H1 SMC snapshot + ATR for range detection
+            h1_df = data.get(Timeframe.H1)
+            h1_snapshot = None
+            if h1_df is not None and len(h1_df) > 0:
+                h1_snapshot = detector.detect(h1_df, Timeframe.H1)
+            m15_snapshot = None
+            m15_df = data.get(Timeframe.M15)
+            if m15_df is not None and len(m15_df) > 0:
+                m15_snapshot = detector.detect(m15_df, Timeframe.M15)
+            h1_atr = aggregator._compute_h1_atr(h1_df)
+
+            # 5. Strategy (v1 trending setups — always generated)
             setups = aggregator.generate_setups(data, price)
             print(f"  SMC Setups: {len(setups)}")
 
-            # 6. Action
-            action, reason, best = determine_action(setups, ai_analysis, regime)
+            # 6. Dual-mode action routing
+            action, reason, best, mode = determine_action(
+                setups, ai_analysis, regime,
+                h1_df=h1_df,
+                h1_snapshot=h1_snapshot,
+                m15_snapshot=m15_snapshot,
+                h1_atr=h1_atr,
+                price=price,
+                range_trader=range_trader,
+                breakout_detector=breakout_det,
+            )
 
             # Display action prominently
-            action_colors = {"BUY": "+++", "SELL": "---", "HOLD": "==="}
+            action_colors = {
+                "BUY": "+++", "SELL": "---", "HOLD": "===",
+                "RANGE": "~~~",
+            }
             marker = action_colors.get(action.split()[0], "???")
             print()
-            print(f"  {marker} ACTION: {action} {marker}")
+            print(f"  {marker} ACTION: {action} [{mode.mode.upper()}] {marker}")
             print(f"  {reason}")
 
-            if best:
+            # Display range bounds when detected (even in trending mode)
+            if mode.range_bounds is not None:
+                rb = mode.range_bounds
+                print(f"  Range: ${rb.lower:.0f}-${rb.upper:.0f} | Width: ${rb.upper - rb.lower:.0f}")
+
+            if best and hasattr(best, "entry_signal"):
                 e = best.entry_signal
                 print(f"  Entry: ${e.entry_price:.2f} | SL: ${e.stop_loss:.2f} | TP: ${e.take_profit_1:.2f}")
+            elif best and hasattr(best, "entry_price"):
+                print(f"  Entry: ${best.entry_price:.2f} | SL: ${best.stop_loss:.2f} | TP: ${best.take_profit:.2f}")
 
             # 7. Journal
             for s in setups:
@@ -346,12 +470,14 @@ def main():
                     "regime": regime,
                     "ai_direction": ai_analysis.get("ai_direction", ai_analysis.get("direction", "?")),
                     "mode": "PAPER",
+                    "trading_mode": mode.mode,
                 }
                 with open(JOURNAL_PATH, "a") as f:
                     f.write(json.dumps(log_entry) + "\n")
 
-            # 8. Save state for dashboard
-            save_state(cycle, price, action, reason, ai_analysis, regime, setups, best)
+            # 8. Save state for dashboard (dual-mode aware)
+            save_state(cycle, price, action, reason, ai_analysis, regime, setups,
+                       best, mode_decision=mode)
 
         except Exception as exc:
             print(f"  ERROR: {exc}")
