@@ -1,0 +1,461 @@
+{
+  "ranging_pct_time": 23.72,
+  "transitional_pct_time": 50.75,
+  "trending_pct_time": 25.54,
+  "regime_by_year": {
+    "2020": {
+      "ranging": 11.78,
+      "transitional": 43.77,
+      "trending": 44.44
+    },
+    "2021": {
+      "ranging": 24.19,
+      "transitional": 57.74,
+      "trending": 18.06
+    },
+    "2022": {
+      "ranging": 18.39,
+      "transitional": 54.84,
+      "trending": 26.77
+    },
+    "2023": {
+      "ranging": 41.1,
+      "transitional": 45.63,
+      "trending": 13.27
+    },
+    "2024": {
+      "ranging": 22.68,
+      "transitional": 51.44,
+      "trending": 25.88
+    }
+  },
+  "avg_range_width_points": 6057.7,
+  "avg_range_width_usd": 60.58,
+  "avg_range_duration_days": 13.5,
+  "n_ranging_periods": 25,
+  "range_characteristics": {
+    "n_periods": 25,
+    "avg_duration_days": 13.5,
+    "median_duration_days": 6,
+    "max_duration_days": 91,
+    "min_duration_days": 3,
+    "avg_range_width_points": 6057.7,
+    "avg_range_width_usd": 60.58,
+    "median_range_width_usd": 45.16,
+    "avg_upper_touches": 2.7,
+    "avg_lower_touches": 3.2,
+    "avg_h1_bar_range_usd": 3.57,
+    "avg_h1_bar_range_points": 357.2
+  },
+  "mean_reversion_backtest": {
+    "trades": 37,
+    "wins": 35,
+    "losses": 2,
+    "wr": 94.59,
+    "pf": 108.66,
+    "gross_profit": 397.71,
+    "gross_loss": 3.66,
+    "pnl": 394.05,
+    "avg_pnl_per_trade": 10.65,
+    "tp_exits": 28,
+    "sl_exits": 0,
+    "expire_exits": 9,
+    "lot_size": 0.005,
+    "spread_cost_per_trade": 0.015
+  },
+  "opportunity_cost_per_year": 120.52,
+  "opportunity_cost_detail": {
+    "total_d1_bars": 1539,
+    "non_trending_d1_bars": 1146,
+    "non_trending_pct": 74.46,
+    "total_m15_bars": 115144,
+    "idle_m15_bars": 85455,
+    "ranging_m15_bars": 26330,
+    "idle_m15_pct": 74.22,
+    "ranging_m15_pct": 22.87,
+    "avg_daily_range_usd_ranging": 16.51,
+    "capture_assumption_pct": 20.0,
+    "opportunity_pnl_total_5y": 602.6,
+    "opportunity_cost_per_year": 120.52,
+    "lot_size_assumed": 0.005
+  },
+  "session_regime_analysis": {
+    "session_regime_matrix": {
+      "asian_ranging": {
+        "n_bars": 2932,
+        "avg_range_usd": 3.13,
+        "avg_range_points": 312.8,
+        "avg_body_usd": 1.48,
+        "body_range_ratio": 0.4741,
+        "bullish_pct": 49.22
+      },
+      "asian_transitional": {
+        "n_bars": 6557,
+        "avg_range_usd": 4.34,
+        "avg_range_points": 434.1,
+        "avg_body_usd": 2.08,
+        "body_range_ratio": 0.4799,
+        "bullish_pct": 50.6
+      },
+      "asian_trending": {
+        "n_bars": 3269,
+        "avg_range_usd": 6.01,
+        "avg_range_points": 601.2,
+        "avg_body_usd": 2.82,
+        "body_range_ratio": 0.4697,
+        "bullish_pct": 51.21
+      },
+      "london_ranging": {
+        "n_bars": 1371,
+        "avg_range_usd": 6.19,
+        "avg_range_points": 619.2,
+        "avg_body_usd": 3.04,
+        "body_range_ratio": 0.4906,
+        "bullish_pct": 50.91
+      },
+      "london_transitional": {
+        "n_bars": 3181,
+        "avg_range_usd": 7.82,
+        "avg_range_points": 782.2,
+        "avg_body_usd": 3.8,
+        "body_range_ratio": 0.4862,
+        "bullish_pct": 50.68
+      },
+      "london_trending": {
+        "n_bars": 1610,
+        "avg_range_usd": 10.1,
+        "avg_range_points": 1009.6,
+        "avg_body_usd": 4.74,
+        "body_range_ratio": 0.4696,
+        "bullish_pct": 50.62
+      },
+      "ny_overlap_ranging": {
+        "n_bars": 1057,
+        "avg_range_usd": 2.71,
+        "avg_range_points": 271.5,
+        "avg_body_usd": 1.29,
+        "body_range_ratio": 0.4745,
+        "bullish_pct": 47.11
+      },
+      "ny_overlap_transitional": {
+        "n_bars": 2441,
+        "avg_range_usd": 3.79,
+        "avg_range_points": 378.6,
+        "avg_body_usd": 1.82,
+        "body_range_ratio": 0.4802,
+        "bullish_pct": 49.32
+      },
+      "ny_overlap_trending": {
+        "n_bars": 1247,
+        "avg_range_usd": 5.98,
+        "avg_range_points": 598.1,
+        "avg_body_usd": 2.95,
+        "body_range_ratio": 0.4938,
+        "bullish_pct": 49.48
+      },
+      "ny_ranging": {
+        "n_bars": 1227,
+        "avg_range_usd": 2.83,
+        "avg_range_points": 282.6,
+        "avg_body_usd": 1.34,
+        "body_range_ratio": 0.4745,
+        "bullish_pct": 56.48
+      },
+      "ny_transitional": {
+        "n_bars": 2609,
+        "avg_range_usd": 4.06,
+        "avg_range_points": 406.3,
+        "avg_body_usd": 1.98,
+        "body_range_ratio": 0.4862,
+        "bullish_pct": 54.89
+      },
+      "ny_trending": {
+        "n_bars": 1297,
+        "avg_range_usd": 5.91,
+        "avg_range_points": 591.2,
+        "avg_body_usd": 2.81,
+        "body_range_ratio": 0.4745,
+        "bullish_pct": 51.73
+      }
+    },
+    "reversal_quality_during_ranging": {
+      "asian": {
+        "n_bars": 2932,
+        "reversal_rate": 34.45
+      },
+      "london": {
+        "n_bars": 1371,
+        "reversal_rate": 30.12
+      },
+      "ny_overlap": {
+        "n_bars": 1057,
+        "reversal_rate": 35.0
+      },
+      "ny": {
+        "n_bars": 1227,
+        "reversal_rate": 32.84
+      }
+    }
+  },
+  "combined_projection": {
+    "trending_pf": 1.09,
+    "ranging_pf_hindsight": 108.66,
+    "ranging_pf_realistic": 1.8,
+    "combined_pf": 1.43,
+    "trending_pct": 25.54,
+    "ranging_pct": 23.72,
+    "note": "ranging_pf_realistic is a conservative estimate for real-time detection (hindsight bias discount)"
+  },
+  "ranging_periods_detail": [
+    {
+      "start": "2020-01-23 00:00:00+00:00",
+      "end": "2020-02-03 00:00:00+00:00",
+      "duration_days": 10,
+      "range_width_points": 4169.0,
+      "range_width_usd": 41.69,
+      "mid_price": 1572.64,
+      "upper_touches": 3,
+      "lower_touches": 2
+    },
+    {
+      "start": "2020-02-10 00:00:00+00:00",
+      "end": "2020-02-23 00:00:00+00:00",
+      "duration_days": 12,
+      "range_width_points": 11887.7,
+      "range_width_usd": 118.88,
+      "mid_price": 1621.17,
+      "upper_touches": 1,
+      "lower_touches": 6
+    },
+    {
+      "start": "2020-07-09 00:00:00+00:00",
+      "end": "2020-07-21 00:00:00+00:00",
+      "duration_days": 11,
+      "range_width_points": 7532.0,
+      "range_width_usd": 75.32,
+      "mid_price": 1828.08,
+      "upper_touches": 1,
+      "lower_touches": 7
+    },
+    {
+      "start": "2021-07-05 00:00:00+00:00",
+      "end": "2021-08-05 00:00:00+00:00",
+      "duration_days": 28,
+      "range_width_points": 4943.8,
+      "range_width_usd": 49.44,
+      "mid_price": 1809.26,
+      "upper_touches": 6,
+      "lower_touches": 4
+    },
+    {
+      "start": "2021-08-25 00:00:00+00:00",
+      "end": "2021-09-15 00:00:00+00:00",
+      "duration_days": 19,
+      "range_width_points": 5398.0,
+      "range_width_usd": 53.98,
+      "mid_price": 1806.92,
+      "upper_touches": 3,
+      "lower_touches": 9
+    },
+    {
+      "start": "2021-10-31 00:00:00+00:00",
+      "end": "2021-11-02 00:00:00+00:00",
+      "duration_days": 3,
+      "range_width_points": 1729.0,
+      "range_width_usd": 17.29,
+      "mid_price": 1787.64,
+      "upper_touches": 2,
+      "lower_touches": 3
+    },
+    {
+      "start": "2021-12-13 00:00:00+00:00",
+      "end": "2022-02-14 00:00:00+00:00",
+      "duration_days": 54,
+      "range_width_points": 12600.0,
+      "range_width_usd": 126.0,
+      "mid_price": 1815.93,
+      "upper_touches": 3,
+      "lower_touches": 2
+    },
+    {
+      "start": "2022-06-05 00:00:00+00:00",
+      "end": "2022-06-09 00:00:00+00:00",
+      "duration_days": 5,
+      "range_width_points": 2265.0,
+      "range_width_usd": 22.65,
+      "mid_price": 1848.25,
+      "upper_touches": 3,
+      "lower_touches": 3
+    },
+    {
+      "start": "2022-08-21 00:00:00+00:00",
+      "end": "2022-08-29 00:00:00+00:00",
+      "duration_days": 8,
+      "range_width_points": 4516.0,
+      "range_width_usd": 45.16,
+      "mid_price": 1742.79,
+      "upper_touches": 2,
+      "lower_touches": 2
+    },
+    {
+      "start": "2022-11-27 00:00:00+00:00",
+      "end": "2022-11-29 00:00:00+00:00",
+      "duration_days": 3,
+      "range_width_points": 2427.0,
+      "range_width_usd": 24.27,
+      "mid_price": 1751.48,
+      "upper_touches": 1,
+      "lower_touches": 1
+    },
+    {
+      "start": "2023-02-26 00:00:00+00:00",
+      "end": "2023-03-09 00:00:00+00:00",
+      "duration_days": 11,
+      "range_width_points": 5357.4,
+      "range_width_usd": 53.57,
+      "mid_price": 1831.38,
+      "upper_touches": 4,
+      "lower_touches": 5
+    },
+    {
+      "start": "2023-06-25 00:00:00+00:00",
+      "end": "2023-10-08 00:00:00+00:00",
+      "duration_days": 91,
+      "range_width_points": 17709.7,
+      "range_width_usd": 177.1,
+      "mid_price": 1898.84,
+      "upper_touches": 15,
+      "lower_touches": 5
+    },
+    {
+      "start": "2023-11-05 00:00:00+00:00",
+      "end": "2023-11-07 00:00:00+00:00",
+      "duration_days": 3,
+      "range_width_points": 3635.7,
+      "range_width_usd": 36.36,
+      "mid_price": 1974.78,
+      "upper_touches": 2,
+      "lower_touches": 1
+    },
+    {
+      "start": "2023-11-12 00:00:00+00:00",
+      "end": "2023-11-14 00:00:00+00:00",
+      "duration_days": 3,
+      "range_width_points": 3932.0,
+      "range_width_usd": 39.32,
+      "mid_price": 1951.18,
+      "upper_touches": 1,
+      "lower_touches": 2
+    },
+    {
+      "start": "2023-11-16 00:00:00+00:00",
+      "end": "2023-11-20 00:00:00+00:00",
+      "duration_days": 4,
+      "range_width_points": 3221.7,
+      "range_width_usd": 32.22,
+      "mid_price": 1978.09,
+      "upper_touches": 2,
+      "lower_touches": 2
+    },
+    {
+      "start": "2023-11-23 00:00:00+00:00",
+      "end": "2023-12-01 00:00:00+00:00",
+      "duration_days": 8,
+      "range_width_points": 8555.0,
+      "range_width_usd": 85.55,
+      "mid_price": 2032.49,
+      "upper_touches": 1,
+      "lower_touches": 3
+    },
+    {
+      "start": "2024-01-01 00:00:00+00:00",
+      "end": "2024-01-04 00:00:00+00:00",
+      "duration_days": 4,
+      "range_width_points": 4831.0,
+      "range_width_usd": 48.31,
+      "mid_price": 2054.67,
+      "upper_touches": 1,
+      "lower_touches": 2
+    },
+    {
+      "start": "2024-01-22 00:00:00+00:00",
+      "end": "2024-02-12 00:00:00+00:00",
+      "duration_days": 19,
+      "range_width_points": 5589.3,
+      "range_width_usd": 55.89,
+      "mid_price": 2037.4,
+      "upper_touches": 2,
+      "lower_touches": 6
+    },
+    {
+      "start": "2024-02-15 00:00:00+00:00",
+      "end": "2024-03-07 00:00:00+00:00",
+      "duration_days": 19,
+      "range_width_points": 17314.0,
+      "range_width_usd": 173.14,
+      "mid_price": 2078.07,
+      "upper_touches": 3,
+      "lower_touches": 5
+    },
+    {
+      "start": "2024-06-30 00:00:00+00:00",
+      "end": "2024-07-02 00:00:00+00:00",
+      "duration_days": 3,
+      "range_width_points": 1999.3,
+      "range_width_usd": 19.99,
+      "mid_price": 2328.39,
+      "upper_touches": 2,
+      "lower_touches": 2
+    },
+    {
+      "start": "2024-07-07 00:00:00+00:00",
+      "end": "2024-07-10 00:00:00+00:00",
+      "duration_days": 4,
+      "range_width_points": 4148.0,
+      "range_width_usd": 41.48,
+      "mid_price": 2370.19,
+      "upper_touches": 3,
+      "lower_touches": 2
+    },
+    {
+      "start": "2024-09-08 00:00:00+00:00",
+      "end": "2024-09-10 00:00:00+00:00",
+      "duration_days": 3,
+      "range_width_points": 3701.0,
+      "range_width_usd": 37.01,
+      "mid_price": 2503.91,
+      "upper_touches": 1,
+      "lower_touches": 1
+    },
+    {
+      "start": "2024-10-20 00:00:00+00:00",
+      "end": "2024-10-22 00:00:00+00:00",
+      "duration_days": 3,
+      "range_width_points": 3461.0,
+      "range_width_usd": 34.61,
+      "mid_price": 2731.47,
+      "upper_touches": 1,
+      "lower_touches": 1
+    },
+    {
+      "start": "2024-10-24 00:00:00+00:00",
+      "end": "2024-10-30 00:00:00+00:00",
+      "duration_days": 6,
+      "range_width_points": 7312.0,
+      "range_width_usd": 73.12,
+      "mid_price": 2753.45,
+      "upper_touches": 2,
+      "lower_touches": 4
+    },
+    {
+      "start": "2024-12-29 00:00:00+00:00",
+      "end": "2024-12-31 00:00:00+00:00",
+      "duration_days": 3,
+      "range_width_points": 3208.0,
+      "range_width_usd": 32.08,
+      "mid_price": 2611.95,
+      "upper_touches": 3,
+      "lower_touches": 1
+    }
+  ]
+}
