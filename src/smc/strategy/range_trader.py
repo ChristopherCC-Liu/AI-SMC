@@ -59,10 +59,25 @@ _GUARD_DURATION_MIN_ASIAN = 8
 # Round 4.6-F (USER DIRECTIVE): Asian 专用 boundary_pct.
 # 用户期望 5-10 笔/天; 48-bar Donchian 下 15% band 自然到达概率极低.
 # Asian 30% 让 price 在 range 中 60% 内就触发 near_lower/upper.
-# London/NY 保留 15% 维持 mean-reversion 经典定义.
-# 风险: Asian PF 可能 <1, CircuitBreaker + RangeQuota 仍兜底.
+# 风险: PF 可能 <1, CircuitBreaker + RangeQuota 仍兜底.
+#
+# Round 4.6-I (USER DIRECTIVE 延续): UTC 08:00 cycle 显示 London 切换后 15%
+# 过严 (price $4784 距 lower $4768 差 $16.38, 15% band 仅 $10.60 不触发).
+# 扩展到所有 ranging sessions 统一 30%. default 0.15 保留给未知 session.
 _BOUNDARY_PCT_DEFAULT = 0.15
-_BOUNDARY_PCT_ASIAN = 0.30
+_BOUNDARY_PCT_ASIAN = 0.30  # retained for naming symmetry / history
+_BOUNDARY_PCT_WIDE = 0.30
+
+_WIDE_BAND_SESSIONS: frozenset[str] = frozenset(
+    {
+        "ASIAN_CORE",
+        "ASIAN_LONDON_TRANSITION",
+        "LONDON",
+        "LONDON/NY OVERLAP",
+        "NEW YORK",
+        "LATE NY",
+    }
+)
 _SECONDS_PER_H1_BAR = 3600
 
 
@@ -355,8 +370,10 @@ class RangeTrader:
         target. Non-Asian sessions keep constructor/default value.
         """
         setups: list[RangeSetup] = []
+        # Round 4.6-I: all active ranging sessions use wide band (30%).
+        # Unknown/empty session falls back to constructor value (default 0.15).
         effective_boundary_pct = (
-            _BOUNDARY_PCT_ASIAN if session in _ASIAN_SESSIONS else self._boundary_pct
+            _BOUNDARY_PCT_WIDE if session in _WIDE_BAND_SESSIONS else self._boundary_pct
         )
         boundary_width_price = (
             bounds.width_points * XAUUSD_POINT_SIZE * effective_boundary_pct
