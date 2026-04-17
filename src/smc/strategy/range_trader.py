@@ -302,6 +302,11 @@ class RangeTrader:
         # so we can see which method/condition caused range_bounds=None.
         self._last_diagnostic: dict[str, object] = {}
         self._last_setups_diagnostic: dict[str, object] = {}
+        # Round 4.6-W: same-direction cooldown (30 min) to prevent over-trading.
+        # Tracks last setup timestamp per direction — blocks _build_setup from
+        # returning a non-None setup within cooldown window. Solves UTC 16:45-18:00
+        # 6-SHORT same-zone stacking (quality dropped Grade A → C, RR 2.31 → 1.45).
+        self._last_setup_ts: dict[str, datetime] = {}
 
     # ------------------------------------------------------------------
     # Range detection
@@ -640,6 +645,15 @@ class RangeTrader:
         """
         bp = boundary_pct if boundary_pct is not None else self._boundary_pct
 
+        # Round 4.6-W: same-direction cooldown (30 min). Prevents over-trading
+        # of same-zone same-direction setups (UTC 16:45-18:00 saw 6 SHORT in 90min
+        # stacking risk Grade A→C). Instance-level only; restart resets cooldown.
+        last_ts = self._last_setup_ts.get(direction)
+        if last_ts is not None:
+            elapsed = (datetime.now(tz=timezone.utc) - last_ts).total_seconds()
+            if elapsed < 1800:  # 30 minutes
+                return None
+
         # Create a synthetic TradeZone at the boundary for CHoCH check
         if direction == "long":
             boundary_width = bounds.width_points * XAUUSD_POINT_SIZE * bp
@@ -707,6 +721,9 @@ class RangeTrader:
             return None
 
         grade = self._grade_setup(bounds, rr_ratio)
+
+        # Round 4.6-W: record successful setup timestamp for cooldown gate
+        self._last_setup_ts[direction] = datetime.now(tz=timezone.utc)
 
         return RangeSetup(
             direction=direction,  # type: ignore[arg-type]
