@@ -32,7 +32,7 @@ from smc.strategy.regime import classify_regime
 from smc.strategy.range_trader import RangeTrader
 from smc.strategy.breakout_detector import BreakoutDetector
 from smc.strategy.mode_router import route_trading_mode
-from smc.strategy.range_trader import check_bounds_only_guards
+from smc.strategy.range_trader import _ASIAN_SESSIONS, check_bounds_only_guards
 from smc.strategy.range_quota import AsianRangeQuota
 from smc.strategy.phase1a_circuit_breaker import Phase1aCircuitBreaker
 from smc.monitor.timing import next_bar_close
@@ -529,20 +529,24 @@ def main():
             #    `setups` (TradeSetup tuple) 通过 s.entry_signal 取字段, 但 range
             #    path 的 `best` 是 RangeSetup 不在 setups 里 → journal 漏记.
             if action.startswith("RANGE") and best is not None:
-                # Round 4.6-J (USER CATCH): journal 缺 lot size. Asian ranging
-                # 用 0.3x lot multiplier (风险降档 Phase1a 协议), 其他 session
-                # ranging 用 1.0x. base_lot=0.01 XAUUSD minimum. margin 估算用
-                # 100:1 leverage. 这些字段是 PAPER mode 记录, 实际 execution
-                # 时 MT5 会按账户参数重算.
-                lot_multiplier = (
-                    0.3
-                    if session in ("ASIAN_CORE", "ASIAN_LONDON_TRANSITION")
-                    else 1.0
-                )
+                # Round 4.6-J (USER CATCH) + 4.6-J-fix: journal lot size 字段.
+                # Asian ranging 用 0.3x multiplier (Phase1a 降档协议), 其他 1.0x.
+                # base_lot=0.01 XAUUSD minimum. margin 公式分两步避免 bug:
+                #   notional_usd = entry × contract_size × lots  (1 XAUUSD lot = 100 oz)
+                #   margin_usd   = notional / leverage           (100:1 simplification)
+                # 旧写法 entry*lots*100/100 数值正确但语义混淆 (100 既是 contract
+                # size 又似 leverage). PAPER mode, live execution 时 MT5 按账户重算.
+                # Round 4.6-J-fix: 用 _ASIAN_SESSIONS frozenset 避免 inline tuple drift.
+                XAUUSD_CONTRACT_SIZE_OZ = 100
+                PAPER_LEVERAGE_RATIO = 100  # 100:1 typical retail XAUUSD
+                lot_multiplier = 0.3 if session in _ASIAN_SESSIONS else 1.0
                 base_lot = 0.01
                 position_size_lots = round(base_lot * lot_multiplier, 4)
+                notional_value_usd = (
+                    best.entry_price * XAUUSD_CONTRACT_SIZE_OZ * position_size_lots
+                )
                 margin_used_estimate_usd = round(
-                    best.entry_price * position_size_lots * 100 / 100.0, 2
+                    notional_value_usd / PAPER_LEVERAGE_RATIO, 2
                 )
                 log_entry = {
                     "time": now.isoformat(),
@@ -568,10 +572,12 @@ def main():
                     "mode": "PAPER",
                     "trading_mode": mode.mode,
                     "session": session,
-                    # Round 4.6-J position sizing fields
+                    # Round 4.6-J position sizing fields (4.6-J-fix: notional separated)
                     "lot_multiplier": lot_multiplier,
                     "position_size_lots": position_size_lots,
+                    "notional_value_usd": round(notional_value_usd, 2),
                     "margin_used_estimate_usd": margin_used_estimate_usd,
+                    "paper_leverage_ratio": PAPER_LEVERAGE_RATIO,
                 }
                 with open(JOURNAL_PATH, "a") as f:
                     f.write(json.dumps(log_entry) + "\n")
