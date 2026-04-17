@@ -295,7 +295,7 @@ def determine_action(setups, ai_analysis, regime, *,
 
 
 def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
-               best_setup, *, mode_decision=None):
+               best_setup, *, mode_decision=None, range_trader=None):
     """Save live state for dashboard display (dual-mode aware)."""
     state = {
         "cycle": cycle,
@@ -321,6 +321,12 @@ def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
         }
     else:
         state["range_bounds"] = None
+
+    # Round 4.6-C2 (measure-first): per-cycle range detection diagnostic.
+    # Writes why range_bounds is None so we can locate the failing branch
+    # without blind hotfixes. See range_trader.RangeTrader._last_diagnostic.
+    if range_trader is not None:
+        state["range_diagnostic"] = dict(range_trader._last_diagnostic or {})
 
     if best_setup:
         # Range setups use .direction/.trigger/.confidence directly (RangeSetup)
@@ -525,7 +531,7 @@ def main():
 
             # 8. Save state for dashboard (dual-mode aware)
             save_state(cycle, price, action, reason, ai_analysis, regime, setups,
-                       best, mode_decision=mode)
+                       best, mode_decision=mode, range_trader=range_trader)
 
         except Exception as exc:
             print(f"  ERROR: {exc}")

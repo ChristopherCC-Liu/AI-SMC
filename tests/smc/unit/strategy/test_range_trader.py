@@ -710,3 +710,66 @@ class TestMethodABDurationBars:
         assert bounds is not None
         assert bounds.source == "swing_extremes"
         assert bounds.duration_bars >= 12
+
+
+# ---------------------------------------------------------------------------
+# Round 4.6-C2: measure-first diagnostic exposed via _last_diagnostic
+# ---------------------------------------------------------------------------
+
+
+class TestDetectRangeDiagnostic:
+    """Round 4.6-C2: _last_diagnostic surfaces per-cycle failure reasoning."""
+
+    def test_diagnostic_populated_on_failure(self, trader: RangeTrader) -> None:
+        snapshot = _empty_snapshot()
+        h1_df = pl.DataFrame(
+            {"high": [2361.0], "low": [2360.0], "close": [2360.5]},
+            schema={"high": pl.Float64, "low": pl.Float64, "close": pl.Float64},
+        )
+        bounds = trader.detect_range(h1_df, snapshot)
+        assert bounds is None
+        diag = trader._last_diagnostic
+        assert diag["h1_bars_count"] == 1
+        assert diag["n_bearish_ob"] == 0
+        assert diag["n_bullish_ob"] == 0
+        assert diag["method_a_hit"] is False
+        assert diag["method_b_hit"] is False
+        assert diag["method_d_hit"] is False
+        assert diag["donchian_width_pts"] is None
+        assert diag["final_source"] is None
+        assert diag["donchian_lookback_required"] == 48
+        # fixture trader uses min_range_width=300 (test override, not prod default 200)
+        assert diag["min_range_width_required"] == trader._min_range_width
+
+    def test_diagnostic_populated_on_method_d_success(
+        self, trader: RangeTrader
+    ) -> None:
+        highs = [2370.0] * 48
+        lows = [2360.0] * 48
+        closes = [2365.0] * 48
+        h1_df = pl.DataFrame({"high": highs, "low": lows, "close": closes})
+        bounds = trader.detect_range(h1_df, _empty_snapshot())
+        assert bounds is not None
+        diag = trader._last_diagnostic
+        assert diag["h1_bars_count"] == 48
+        assert diag["method_a_hit"] is False
+        assert diag["method_b_hit"] is False
+        assert diag["method_d_hit"] is True
+        assert diag["final_source"] == "donchian_channel"
+        assert diag["donchian_width_pts"] == 1000.0
+
+    def test_diagnostic_populated_on_method_a_success(
+        self, trader: RangeTrader, h1_with_obs: SMCSnapshot
+    ) -> None:
+        h1_df = pl.DataFrame(
+            {"high": [2370.0] * 48, "low": [2360.0] * 48, "close": [2365.0] * 48}
+        )
+        bounds = trader.detect_range(h1_df, h1_with_obs)
+        assert bounds is not None
+        diag = trader._last_diagnostic
+        assert diag["method_a_hit"] is True
+        assert diag["method_b_hit"] is False  # short-circuited
+        assert diag["method_d_hit"] is False
+        assert diag["final_source"] == "ob_boundaries"
+        assert diag["n_bearish_ob"] >= 1
+        assert diag["n_bullish_ob"] >= 1

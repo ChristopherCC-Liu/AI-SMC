@@ -156,6 +156,10 @@ class RangeTrader:
         self._min_range_width = min_range_width
         self._max_range_width = max_range_width
         self._boundary_pct = boundary_pct
+        # Round 4.6-C2: measure-first diagnostic.
+        # live_demo writes this into journal['range_diagnostic'] each cycle
+        # so we can see which method/condition caused range_bounds=None.
+        self._last_diagnostic: dict[str, object] = {}
 
     # ------------------------------------------------------------------
     # Range detection
@@ -171,23 +175,61 @@ class RangeTrader:
         Tries Method A (OB boundaries), then Method B (swing extremes),
         then Method D (Donchian channel — Round 4.5 hotfix for Asian core
         low-volatility fallback). Returns None if no valid range is found.
+
+        Round 4.6-C2: populates self._last_diagnostic so live_demo can surface
+        per-cycle reasoning in the journal (measure-first debugging).
         """
         now = datetime.now(tz=timezone.utc)
 
-        # Method A: OB boundaries
-        bounds = self._detect_from_ob_boundaries(h1_snapshot, now)
-        if bounds is not None:
-            return bounds
+        # Counts useful for diagnostic regardless of which method succeeds.
+        n_bearish_ob = sum(
+            1 for ob in h1_snapshot.order_blocks
+            if ob.ob_type == "bearish" and not ob.mitigated
+        )
+        n_bullish_ob = sum(
+            1 for ob in h1_snapshot.order_blocks
+            if ob.ob_type == "bullish" and not ob.mitigated
+        )
+        n_swing_high = sum(1 for s in h1_snapshot.swing_points if s.swing_type == "high")
+        n_swing_low = sum(1 for s in h1_snapshot.swing_points if s.swing_type == "low")
+        h1_bars_count = h1_df.height if h1_df is not None else 0
 
-        # Method B: Swing extreme fallback
-        bounds = self._detect_from_swing_extremes(h1_snapshot, now)
-        if bounds is not None:
-            return bounds
+        method_a = self._detect_from_ob_boundaries(h1_snapshot, now)
+        method_b = self._detect_from_swing_extremes(h1_snapshot, now) if method_a is None else None
+        method_d = (
+            self._detect_from_donchian_channel(h1_df, now)
+            if method_a is None and method_b is None
+            else None
+        )
 
-        # Method D: Donchian channel fallback (Round 4.5)
-        # Asian core 低波动场景下 OB/swing 稀疏 → 用 N-bar high/low channel
-        # Guard 1 (width >= 800) 自然过滤过窄 channel
-        return self._detect_from_donchian_channel(h1_df, now)
+        # Compute Donchian candidate width for diagnostic (regardless of success).
+        donchian_width_pts: float | None = None
+        if h1_bars_count >= _DONCHIAN_LOOKBACK_BARS:
+            recent = h1_df.tail(_DONCHIAN_LOOKBACK_BARS)
+            try:
+                upper = float(recent["high"].max())
+                lower = float(recent["low"].min())
+                if upper > lower:
+                    donchian_width_pts = round((upper - lower) / XAUUSD_POINT_SIZE, 1)
+            except Exception:
+                donchian_width_pts = None
+
+        bounds = method_a or method_b or method_d
+        self._last_diagnostic = {
+            "h1_bars_count": h1_bars_count,
+            "donchian_lookback_required": _DONCHIAN_LOOKBACK_BARS,
+            "n_bearish_ob": n_bearish_ob,
+            "n_bullish_ob": n_bullish_ob,
+            "n_swing_high": n_swing_high,
+            "n_swing_low": n_swing_low,
+            "donchian_width_pts": donchian_width_pts,
+            "min_range_width_required": self._min_range_width,
+            "method_a_hit": method_a is not None,
+            "method_b_hit": method_b is not None,
+            "method_d_hit": method_d is not None,
+            "final_source": bounds.source if bounds is not None else None,
+        }
+        return bounds
 
     # ------------------------------------------------------------------
     # Setup generation
