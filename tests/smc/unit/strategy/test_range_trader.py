@@ -857,3 +857,68 @@ class TestSetupsDiagnostic:
         assert diag["near_lower"] is True
         assert diag["long_setup_built"] is True
         assert diag["reason_if_zero"] is None
+
+
+class TestAsianBoundaryPctProfile:
+    """Round 4.6-F (USER DIRECTIVE): Asian session uses 30% boundary_pct."""
+
+    def test_asian_wider_band_triggers_near_lower(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_lower: SMCSnapshot,
+    ) -> None:
+        """Same price that was mid-range under 15% triggers near_lower under 30%."""
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+        # At 15% band, a price 20% into the range is mid-range.
+        # At 30% band, the same price is near_lower.
+        price_20pct = bounds.lower + (bounds.upper - bounds.lower) * 0.20
+
+        # Non-Asian: 15% default from trader fixture
+        trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_lower, price_20pct, bounds, session="LONDON"
+        )
+        diag_london = trader._last_setups_diagnostic
+        assert diag_london["near_lower"] is False
+        assert diag_london["boundary_pct_applied"] == trader._boundary_pct  # 0.15
+
+        # Asian: 30% from _BOUNDARY_PCT_ASIAN
+        trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_lower, price_20pct, bounds, session="ASIAN_CORE"
+        )
+        diag_asian = trader._last_setups_diagnostic
+        assert diag_asian["near_lower"] is True
+        assert diag_asian["boundary_pct_applied"] == 0.30
+
+    def test_asian_london_transition_also_uses_wider_band(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_lower: SMCSnapshot,
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+        price_25pct = bounds.lower + (bounds.upper - bounds.lower) * 0.25
+        trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_lower, price_25pct, bounds,
+            session="ASIAN_LONDON_TRANSITION",
+        )
+        diag = trader._last_setups_diagnostic
+        assert diag["boundary_pct_applied"] == 0.30
+        assert diag["near_lower"] is True  # 25% < 30%
+
+    def test_default_session_uses_constructor_value(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_lower: SMCSnapshot,
+    ) -> None:
+        """Unknown/empty session falls back to trader._boundary_pct."""
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+        trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_lower, bounds.lower + 0.1, bounds, session=""
+        )
+        diag = trader._last_setups_diagnostic
+        assert diag["boundary_pct_applied"] == trader._boundary_pct

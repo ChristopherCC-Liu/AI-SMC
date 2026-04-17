@@ -207,10 +207,11 @@ def _determine_v1_passthrough(setups, session):
 
 
 def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
-                       range_trader, breakout_detector):
+                       range_trader, breakout_detector, session=""):
     """Ranging mode: breakout guard + mean-reversion setups at range boundaries.
 
-    Returns (action, reason, best_setup).
+    Returns (action, reason, best_setup). Round 4.6-F: session kwarg so
+    generate_range_setups can apply Asian-wide boundary_pct (30%).
     """
     # Breakout invalidation — if price breaks the range, hold and wait
     breakout = breakout_detector.check_breakout(price, range_bounds, h1_atr)
@@ -219,6 +220,7 @@ def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
 
     range_setups = range_trader.generate_range_setups(
         h1_snapshot, m15_snapshot, price, range_bounds, h1_atr,
+        session=session,
     )
     if range_setups:
         best = max(range_setups, key=lambda s: s.confidence)
@@ -288,7 +290,7 @@ def determine_action(setups, ai_analysis, regime, *,
                 return "HOLD", f"[COOLDOWN] Asian ranging already used today | {session}", None, mode
         action, reason, best = _determine_ranging(
             price, mode.range_bounds, h1_snapshot, m15_snapshot, h1_atr,
-            range_trader, breakout_detector,
+            range_trader, breakout_detector, session=session,
         )
         return action, reason, best, mode
 

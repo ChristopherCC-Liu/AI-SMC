@@ -55,6 +55,14 @@ _GUARD_WIDTH_MIN_DEFAULT = 800.0
 _GUARD_WIDTH_MIN_ASIAN = 400.0
 _GUARD_DURATION_MIN_DEFAULT = 12
 _GUARD_DURATION_MIN_ASIAN = 8
+
+# Round 4.6-F (USER DIRECTIVE): Asian 专用 boundary_pct.
+# 用户期望 5-10 笔/天; 48-bar Donchian 下 15% band 自然到达概率极低.
+# Asian 30% 让 price 在 range 中 60% 内就触发 near_lower/upper.
+# London/NY 保留 15% 维持 mean-reversion 经典定义.
+# 风险: Asian PF 可能 <1, CircuitBreaker + RangeQuota 仍兜底.
+_BOUNDARY_PCT_DEFAULT = 0.15
+_BOUNDARY_PCT_ASIAN = 0.30
 _SECONDS_PER_H1_BAR = 3600
 
 
@@ -331,6 +339,7 @@ class RangeTrader:
         current_price: float,
         bounds: RangeBounds,
         h1_atr: float = 0.0,
+        session: str = "",
     ) -> tuple[RangeSetup, ...]:
         """Generate mean-reversion setups at range boundaries.
 
@@ -340,9 +349,18 @@ class RangeTrader:
         Round 4.6-C2: populates self._last_setups_diagnostic for live_demo to
         surface reasons when no setups are generated (price away from boundary
         / no M15 CHoCH / ...).
+
+        Round 4.6-F (USER DIRECTIVE): session-aware boundary_pct. Asian
+        sessions use 30% (wider entry window) to meet user's 5-10 trades/day
+        target. Non-Asian sessions keep constructor/default value.
         """
         setups: list[RangeSetup] = []
-        boundary_width_price = bounds.width_points * XAUUSD_POINT_SIZE * self._boundary_pct
+        effective_boundary_pct = (
+            _BOUNDARY_PCT_ASIAN if session in _ASIAN_SESSIONS else self._boundary_pct
+        )
+        boundary_width_price = (
+            bounds.width_points * XAUUSD_POINT_SIZE * effective_boundary_pct
+        )
 
         near_lower = current_price <= bounds.lower + boundary_width_price
         near_upper = current_price >= bounds.upper - boundary_width_price
@@ -391,6 +409,8 @@ class RangeTrader:
             "lower_boundary": bounds.lower,
             "upper_boundary": bounds.upper,
             "boundary_band_price": boundary_width_price,
+            "boundary_pct_applied": effective_boundary_pct,
+            "session": session,
             "near_lower": near_lower,
             "near_upper": near_upper,
             "long_setup_built": long_setup is not None,
