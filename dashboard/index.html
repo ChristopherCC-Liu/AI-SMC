@@ -1,0 +1,686 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI-SMC · 盯盘台</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          bg: "#0F172A",
+          card: "#1E293B",
+          cardHi: "#273449",
+          text: "#F1F5F9",
+          long: "#10B981",
+          short: "#EF4444",
+          muted: "#94A3B8",
+          accent: "#A78BFA",
+          warn: "#F59E0B",
+        },
+        fontFamily: {
+          mono: ['"SF Mono"', '"JetBrains Mono"', "ui-monospace", "Menlo", "monospace"],
+        },
+      },
+    },
+  };
+</script>
+<style>
+  html, body { background: #0F172A; color: #F1F5F9; }
+  body { font-family: "ui-sans-serif", "system-ui", "-apple-system", "PingFang SC", sans-serif; }
+  .num { font-family: "SF Mono", "JetBrains Mono", "ui-monospace", "Menlo", monospace; font-variant-numeric: tabular-nums; }
+  .card { background: #1E293B; border: 1px solid rgba(148, 163, 184, 0.08); border-radius: 12px; }
+  .card-hi { background: #273449; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 999px; }
+  .range-track { background: linear-gradient(to right, rgba(16, 185, 129, 0.22) 0%, rgba(16, 185, 129, 0.22) 30%, rgba(148, 163, 184, 0.14) 30%, rgba(148, 163, 184, 0.14) 70%, rgba(239, 68, 68, 0.22) 70%, rgba(239, 68, 68, 0.22) 100%); }
+  details > summary { list-style: none; cursor: pointer; }
+  details > summary::-webkit-details-marker { display: none; }
+  .pulse { animation: pulse 2s cubic-bezier(.4,0,.6,1) infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+</style>
+</head>
+<body class="min-h-screen" x-data="dashboard()" x-init="start()">
+
+<!-- 顶部 nav -->
+<nav class="sticky top-0 z-20 bg-bg/90 backdrop-blur border-b border-slate-800">
+  <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
+    <div class="flex items-center gap-3">
+      <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-accent to-indigo-500 flex items-center justify-center font-bold text-sm">A</div>
+      <div>
+        <div class="text-sm font-semibold tracking-wide">AI-SMC</div>
+        <div class="text-xs text-muted num" x-text="accountLabel"></div>
+      </div>
+    </div>
+    <!-- Tab 切换 -->
+    <div class="flex gap-1 p-1 rounded-lg bg-card">
+      <button @click="tab = 'monitor'"
+        :class="tab === 'monitor' ? 'bg-cardHi text-text' : 'text-muted hover:text-text'"
+        class="px-4 py-1.5 text-sm rounded-md transition">监控</button>
+      <button @click="tab = 'settings'"
+        :class="tab === 'settings' ? 'bg-cardHi text-text' : 'text-muted hover:text-text'"
+        class="px-4 py-1.5 text-sm rounded-md transition">设置</button>
+    </div>
+    <!-- 全局状态灯 -->
+    <div class="flex items-center gap-2">
+      <span class="dot pulse" :style="{ background: globalStatus.color }"></span>
+      <span class="text-xs text-muted" x-text="globalStatus.label"></span>
+    </div>
+  </div>
+</nav>
+
+<main class="max-w-7xl mx-auto px-4 py-6">
+
+<!-- ======== 监控页 ======== -->
+<section x-show="tab === 'monitor'" class="space-y-4 md:space-y-6">
+
+  <!-- 卡片 1: Hero -->
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6">
+    <!-- 持仓状态 -->
+    <div class="card p-5 md:p-6">
+      <div class="text-xs uppercase tracking-wider text-muted">持仓状态</div>
+      <div class="mt-3 flex items-baseline gap-3">
+        <div class="num text-4xl md:text-5xl font-bold" :style="{ color: positionSummary.color }" x-text="positionSummary.label"></div>
+      </div>
+      <div class="mt-2 text-sm text-muted" x-text="positionSummary.sub"></div>
+    </div>
+    <!-- 今日 P&L -->
+    <div class="card p-5 md:p-6">
+      <div class="text-xs uppercase tracking-wider text-muted">今日 P&L</div>
+      <div class="mt-3 num text-4xl md:text-5xl font-bold" :style="{ color: pnlSummary.color }" x-text="pnlSummary.label"></div>
+      <div class="mt-2 text-sm text-muted" x-text="pnlSummary.sub"></div>
+    </div>
+    <!-- 金价 -->
+    <div class="card p-5 md:p-6">
+      <div class="text-xs uppercase tracking-wider text-muted">XAUUSD 金价</div>
+      <div class="mt-3 num text-4xl md:text-5xl font-bold" x-text="priceSummary.label"></div>
+      <div class="mt-2 text-sm" :style="{ color: priceSummary.color }" x-text="priceSummary.sub"></div>
+    </div>
+  </div>
+
+  <!-- 卡片 2: 健康条 -->
+  <div class="card p-5 md:p-6">
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-xs uppercase tracking-wider text-muted">系统健康</div>
+      <button @click="fetchAll()" class="text-xs text-muted hover:text-text">手动刷新</button>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <template x-for="b in healthBadges" :key="b.key">
+        <div class="flex items-center gap-3 p-3 rounded-lg card-hi">
+          <span class="dot" :style="{ background: b.color }"></span>
+          <div class="flex-1 min-w-0">
+            <div class="text-sm font-medium" x-text="b.title"></div>
+            <div class="text-xs text-muted truncate" x-text="b.detail"></div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- 卡片 3: 为什么不开 (HOLD 时显示) -->
+  <div x-show="showReasonCard" class="card p-5 md:p-6 border-l-4" style="border-left-color: #A78BFA">
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-xs uppercase tracking-wider text-muted">为什么不开仓</div>
+      <span class="text-xs text-muted">系统在观察</span>
+    </div>
+    <div class="text-lg md:text-xl font-medium leading-relaxed" x-text="reasonTranslation"></div>
+    <details class="mt-4">
+      <summary class="text-xs text-muted hover:text-text select-none">查看原始诊断（开发者）</summary>
+      <pre class="mt-2 p-3 text-xs num overflow-x-auto card-hi rounded" x-text="rawDiagnostic"></pre>
+    </details>
+  </div>
+
+  <!-- 卡片 4: 区间可视化 -->
+  <div x-show="rangeBounds" class="card p-5 md:p-6">
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-xs uppercase tracking-wider text-muted">价格在区间哪里</div>
+      <div class="text-xs text-muted">区间来源: <span x-text="sourceLabel"></span></div>
+    </div>
+    <div class="relative pt-6 pb-4">
+      <div class="h-3 rounded-full range-track"></div>
+      <template x-if="rangeBounds">
+        <div class="absolute -top-1" :style="{ left: rangeDotPct + '%' }">
+          <div class="w-4 h-4 rounded-full bg-accent ring-4 ring-accent/30 -translate-x-1/2"></div>
+          <div class="mt-1 text-xs num -translate-x-1/2 whitespace-nowrap text-text" x-text="'$' + formatNum(state?.price)"></div>
+        </div>
+      </template>
+      <div class="mt-7 flex justify-between text-xs num text-muted">
+        <span>下轨 $<span x-text="formatNum(rangeBounds?.lower)"></span></span>
+        <span>上轨 $<span x-text="formatNum(rangeBounds?.upper)"></span></span>
+      </div>
+    </div>
+    <div class="mt-2 grid grid-cols-3 text-center text-xs text-muted">
+      <div>多单区（靠下）</div>
+      <div>中段（观望）</div>
+      <div>空单区（靠上）</div>
+    </div>
+  </div>
+
+  <!-- 卡片 5: 今日 trades 表 -->
+  <div class="card p-5 md:p-6">
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-xs uppercase tracking-wider text-muted">今日交易</div>
+      <div class="text-xs text-muted">共 <span class="num" x-text="todayTrades.length"></span> 笔</div>
+    </div>
+    <div x-show="todayTrades.length === 0" class="py-8 text-center text-muted text-sm">今天还没开单，继续等</div>
+    <!-- 桌面表格 -->
+    <div x-show="todayTrades.length > 0" class="hidden md:block overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs uppercase tracking-wider text-muted border-b border-slate-700">
+            <th class="py-2 pr-3">时间</th>
+            <th class="py-2 pr-3">方向</th>
+            <th class="py-2 pr-3 num text-right">入场</th>
+            <th class="py-2 pr-3 num text-right">止损</th>
+            <th class="py-2 pr-3 num text-right">止盈</th>
+            <th class="py-2 pr-3 num text-right">风险回报</th>
+            <th class="py-2 pr-3">AI 同意</th>
+            <th class="py-2 pr-3">来源</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="t in todayTrades" :key="t.time + (t.cycle || '')">
+            <tr class="border-b border-slate-800 last:border-0">
+              <td class="py-2.5 pr-3 num text-muted" x-text="formatTime(t.time)"></td>
+              <td class="py-2.5 pr-3"><span class="px-2 py-0.5 rounded text-xs font-medium" :style="tradeDirStyle(t)" x-text="tradeDirLabel(t)"></span></td>
+              <td class="py-2.5 pr-3 num text-right" x-text="'$' + formatNum(t.entry)"></td>
+              <td class="py-2.5 pr-3 num text-right text-muted" x-text="'$' + formatNum(t.sl)"></td>
+              <td class="py-2.5 pr-3 num text-right text-muted" x-text="'$' + formatNum(t.tp1)"></td>
+              <td class="py-2.5 pr-3 num text-right" :class="(t.rr_ratio||0) >= 1.2 ? 'text-long' : 'text-warn'" x-text="(t.rr_ratio||0).toFixed(2) + ' : 1'"></td>
+              <td class="py-2.5 pr-3" x-text="aiAgreeLabel(t)"></td>
+              <td class="py-2.5 pr-3 text-muted" x-text="translateTrigger(t.trigger)"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+    <!-- 手机卡片堆叠 -->
+    <div x-show="todayTrades.length > 0" class="md:hidden space-y-2">
+      <template x-for="t in todayTrades" :key="t.time + (t.cycle || '')">
+        <div class="card-hi p-3 rounded-lg">
+          <div class="flex items-center justify-between mb-1">
+            <span class="px-2 py-0.5 rounded text-xs font-medium" :style="tradeDirStyle(t)" x-text="tradeDirLabel(t)"></span>
+            <span class="text-xs num text-muted" x-text="formatTime(t.time)"></span>
+          </div>
+          <div class="num text-lg" x-text="'$' + formatNum(t.entry)"></div>
+          <div class="mt-1 text-xs text-muted flex gap-3 num">
+            <span>SL $<span x-text="formatNum(t.sl)"></span></span>
+            <span>TP $<span x-text="formatNum(t.tp1)"></span></span>
+            <span :class="(t.rr_ratio||0) >= 1.2 ? 'text-long' : 'text-warn'" x-text="'RR ' + (t.rr_ratio||0).toFixed(2)"></span>
+          </div>
+          <div class="mt-1 text-xs text-muted" x-text="aiAgreeLabel(t) + ' · ' + translateTrigger(t.trigger)"></div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- 卡片 6: AI 看法 (折叠默认) -->
+  <div class="card p-5 md:p-6">
+    <details>
+      <summary class="flex items-center justify-between">
+        <div class="text-xs uppercase tracking-wider text-muted">AI 方向看法</div>
+        <div class="text-sm flex items-center gap-2">
+          <span :style="{ color: aiSummary.color }" class="font-medium" x-text="aiSummary.label"></span>
+          <span class="text-muted text-xs" x-text="aiSummary.sub"></span>
+        </div>
+      </summary>
+      <div class="mt-3 text-sm text-text leading-relaxed" x-text="aiReasoning"></div>
+      <ul class="mt-3 space-y-1 text-sm text-muted" x-show="aiFactors.length">
+        <template x-for="(f, i) in aiFactors" :key="i">
+          <li class="flex gap-2"><span class="text-accent">·</span><span x-text="f"></span></li>
+        </template>
+      </ul>
+      <div class="mt-3 text-xs text-muted">最后更新: <span x-text="aiLastUpdate"></span></div>
+    </details>
+  </div>
+</section>
+
+<!-- ======== 设置页 ======== -->
+<section x-show="tab === 'settings'" class="space-y-4 md:space-y-6">
+
+  <!-- KillSwitch -->
+  <div class="card p-5 md:p-6 border-l-4" :style="{ borderLeftColor: tradingPaused ? '#F59E0B' : '#EF4444' }">
+    <div class="text-xs uppercase tracking-wider text-muted">紧急开关</div>
+    <div class="mt-2 flex items-center justify-between gap-4 flex-wrap">
+      <div>
+        <div class="text-lg font-semibold" x-text="tradingPaused ? '当前状态: 已暂停' : '当前状态: 运行中'"></div>
+        <div class="text-sm text-muted mt-1" x-text="tradingPaused ? '系统已停止开新仓（已开仓位不受影响）' : '系统正常运行，按策略开仓'"></div>
+      </div>
+      <button @click="confirmKillSwitch = true"
+        class="px-6 py-3 rounded-xl font-bold text-lg shadow-lg transition"
+        :class="tradingPaused ? 'bg-long text-white hover:bg-emerald-600' : 'bg-short text-white hover:bg-red-600'"
+        x-text="tradingPaused ? '▶ 恢复交易' : '⏸ 暂停交易'"></button>
+    </div>
+  </div>
+
+  <!-- 风险参数 -->
+  <div class="card p-5 md:p-6">
+    <div class="text-xs uppercase tracking-wider text-muted mb-4">风险参数</div>
+    <div class="space-y-5">
+      <!-- boundary_band_pct -->
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <label class="text-sm font-medium">边界触发宽度</label>
+          <span class="num text-accent" x-text="Math.round((config.risk?.boundary_band_pct || 0.30) * 100) + '%'"></span>
+        </div>
+        <input type="range" min="10" max="40" step="1"
+          :value="Math.round((config.risk?.boundary_band_pct || 0.30) * 100)"
+          @input="setRisk('boundary_band_pct', $event.target.value / 100)"
+          class="w-full accent-accent" />
+        <div class="text-xs text-muted mt-1">价格离上下边界多近才算入场信号。数字越大越容易开单，越小越严格。</div>
+      </div>
+      <!-- min_rr_ratio -->
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <label class="text-sm font-medium">最低风险回报比</label>
+          <span class="num text-accent" x-text="(config.risk?.min_rr_ratio || 1.2).toFixed(1) + ' : 1'"></span>
+        </div>
+        <input type="range" min="1.0" max="2.5" step="0.1"
+          :value="config.risk?.min_rr_ratio || 1.2"
+          @input="setRisk('min_rr_ratio', parseFloat($event.target.value))"
+          class="w-full accent-accent" />
+        <div class="text-xs text-muted mt-1">每承担 1 元风险至少要能赚回这么多才开单。越高越挑剔。</div>
+      </div>
+      <!-- asian_daily_quota -->
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <label class="text-sm font-medium">亚盘时段每日最多开仓</label>
+          <span class="num text-accent" x-text="(config.risk?.asian_daily_quota ?? 2) + ' 笔'"></span>
+        </div>
+        <input type="range" min="0" max="5" step="1"
+          :value="config.risk?.asian_daily_quota ?? 2"
+          @input="setRisk('asian_daily_quota', parseInt($event.target.value, 10))"
+          class="w-full accent-accent" />
+        <div class="text-xs text-muted mt-1">亚盘（北京 8-16 点）一天最多几笔。0 = 禁止亚盘开仓。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 策略开关 -->
+  <div class="card p-5 md:p-6">
+    <div class="text-xs uppercase tracking-wider text-muted mb-4">时段 / AI 开关</div>
+    <div class="space-y-3">
+      <template x-for="t in sessionToggles" :key="t.key">
+        <label class="flex items-center justify-between p-3 card-hi rounded-lg cursor-pointer hover:bg-slate-700/40 transition">
+          <div>
+            <div class="text-sm font-medium" x-text="t.label"></div>
+            <div class="text-xs text-muted mt-0.5" x-text="t.desc"></div>
+          </div>
+          <input type="checkbox"
+            :checked="config.sessions?.[t.key] ?? true"
+            @change="setSession(t.key, $event.target.checked)"
+            class="w-11 h-6 rounded-full accent-accent" />
+        </label>
+      </template>
+    </div>
+  </div>
+
+  <!-- 保存 + 状态显示 -->
+  <div class="card p-5 md:p-6">
+    <div class="flex items-center justify-between gap-4 flex-wrap">
+      <div class="text-sm text-muted">
+        <div>改动会写入 <code class="text-accent num">data/user_config.json</code></div>
+        <div class="text-xs mt-1">下一个 cycle (15 分钟内) 生效。不影响已开仓位。</div>
+        <div class="text-xs mt-2" x-show="config.updated_at">最后生效: <span class="num" x-text="formatTime(config.updated_at)"></span></div>
+      </div>
+      <div class="flex gap-2">
+        <button @click="loadConfigFromServer()" class="px-4 py-2 rounded-lg text-sm text-muted hover:text-text">重置</button>
+        <button @click="saveConfig()" :disabled="saving"
+          class="px-5 py-2 rounded-lg text-sm font-medium bg-accent text-white hover:bg-violet-500 disabled:opacity-50">
+          <span x-text="saving ? '保存中…' : '保存设置'"></span>
+        </button>
+      </div>
+    </div>
+    <div x-show="saveMessage" x-transition class="mt-3 text-sm" :class="saveError ? 'text-short' : 'text-long'" x-text="saveMessage"></div>
+  </div>
+</section>
+
+</main>
+
+<!-- KillSwitch 双重确认 modal -->
+<div x-show="confirmKillSwitch" x-transition
+  class="fixed inset-0 z-30 bg-black/70 flex items-center justify-center p-4"
+  @click.self="confirmKillSwitch = false">
+  <div class="card p-6 max-w-md w-full">
+    <div class="text-lg font-semibold mb-2" x-text="tradingPaused ? '确定恢复交易？' : '确定暂停交易？'"></div>
+    <div class="text-sm text-muted mb-5" x-text="tradingPaused
+      ? '系统将在下个 cycle 恢复按策略开仓。已有持仓不受影响。'
+      : '系统将停止开新仓。已开仓位不会自动平仓，需要在 MT5 手动处理。'"></div>
+    <div class="flex gap-2 justify-end">
+      <button @click="confirmKillSwitch = false" class="px-4 py-2 text-sm text-muted hover:text-text">取消</button>
+      <button @click="toggleTrading()"
+        class="px-5 py-2 rounded-lg text-sm font-medium text-white"
+        :class="tradingPaused ? 'bg-long hover:bg-emerald-600' : 'bg-short hover:bg-red-600'"
+        x-text="tradingPaused ? '确认恢复' : '确认暂停'"></button>
+    </div>
+  </div>
+</div>
+
+<footer class="text-center py-6 text-xs text-muted">
+  AI-SMC Dashboard · 每 5 秒自动刷新 · <a href="https://github.com/ChristopherCC-Liu" class="hover:text-text underline">GitHub</a>
+</footer>
+
+<script>
+  // ======== 翻译表（措辞严格契约，不可改）========
+  const TRANSLATION_TABLE = [
+    { match: (s) => s.reason === "price_mid_range",
+      text: "价格在区间中段，等靠近上下边界再说" },
+    { match: (s) => s.reason === "no_m15_choch_at_lower",
+      text: "价格到了支撑位，但 M15 还没出现反转信号，再等 15 分钟" },
+    { match: (s) => s.reason === "no_m15_choch_at_upper",
+      text: "价格到了阻力位，但 M15 还没出现反转信号，再等 15 分钟" },
+    { match: (s) => s.range_diagnostic?.guards?.rr_pass === false,
+      text: "找到机会了，但风险回报比 < 1.2:1，划不来" },
+    { match: (s) => s.range_diagnostic?.guards?.width_pass === false,
+      text: "区间太窄（< 400 点），等市场扩大波动" },
+    { match: (s) => s.range_diagnostic?.guards?.touches_pass === false,
+      text: "上下边界还没被确认碰过 2 次，等再摸一次" },
+    { match: (s) => s.trading_mode === "v1_passthrough",
+      text: "AI 看不清方向，交给趋势策略判断" },
+    { match: (s) => s.range_diagnostic?.detect?.method == null,
+      text: "找不到可交易区间，市场可能在单边趋势中" },
+  ];
+  const SOURCE_LABEL = { orderblock: "订单块", swing: "摆动高低", donchian: "Donchian 通道" };
+  const AI_DIR_LABEL = { bullish: "看多", bearish: "看空", neutral: "中性", "?": "N/A" };
+
+  const DEFAULT_CONFIG = {
+    risk: { boundary_band_pct: 0.30, min_rr_ratio: 1.2, asian_daily_quota: 2 },
+    sessions: { asian_enabled: true, london_enabled: true, ny_enabled: true, ai_filter_neutral_block: true },
+  };
+
+  const sessionToggleDefs = [
+    { key: "asian_enabled", label: "亚盘交易 (北京 8-16 点)", desc: "关闭后亚盘不开新仓" },
+    { key: "london_enabled", label: "伦敦盘交易 (北京 16-24 点)", desc: "关闭后伦敦不开新仓" },
+    { key: "ny_enabled", label: "纽约盘交易 (北京 21 点至次日)", desc: "关闭后纽约不开新仓" },
+    { key: "ai_filter_neutral_block", label: "AI 中性时暂停", desc: "AI 看不清方向时不开单" },
+  ];
+
+  function dashboard() {
+    return {
+      tab: "monitor",
+      state: null,
+      ai: null,
+      freshness: { fresh: false, age_sec: null, stale: true },
+      tradingPaused: false,
+      trades: [],
+      config: structuredClone(DEFAULT_CONFIG),
+      loading: false,
+      error: null,
+      saving: false,
+      saveMessage: "",
+      saveError: false,
+      confirmKillSwitch: false,
+      sessionToggles: sessionToggleDefs,
+
+      accountLabel: "TMGM-60078709",
+
+      start() {
+        this.fetchAll();
+        this.loadConfigFromServer();
+        setInterval(() => this.fetchAll(), 5000);
+      },
+
+      async fetchAll() {
+        try {
+          const [sRes, jRes] = await Promise.all([
+            fetch("/api/state"),
+            fetch("/api/journal?limit=50"),
+          ]);
+          if (sRes.ok) {
+            const s = await sRes.json();
+            this.state = s.state;
+            this.ai = s.ai;
+            this.freshness = s.freshness || { fresh: false, stale: true };
+            this.tradingPaused = !!s.trading_paused;
+          }
+          if (jRes.ok) {
+            const j = await jRes.json();
+            this.trades = j.trades || [];
+          }
+          this.error = null;
+        } catch (e) {
+          this.error = String(e);
+        }
+      },
+
+      async loadConfigFromServer() {
+        try {
+          const r = await fetch("/api/config");
+          if (r.ok) {
+            const c = await r.json();
+            if (c && Object.keys(c).length) {
+              this.config = {
+                ...structuredClone(DEFAULT_CONFIG),
+                ...c,
+                risk: { ...DEFAULT_CONFIG.risk, ...(c.risk || {}) },
+                sessions: { ...DEFAULT_CONFIG.sessions, ...(c.sessions || {}) },
+              };
+            }
+          }
+        } catch (e) { /* use defaults */ }
+      },
+
+      setRisk(k, v) { this.config.risk = { ...(this.config.risk || {}), [k]: v }; },
+      setSession(k, v) { this.config.sessions = { ...(this.config.sessions || {}), [k]: v }; },
+
+      async saveConfig() {
+        this.saving = true;
+        this.saveMessage = "";
+        try {
+          const r = await fetch("/api/config", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(this.config),
+          });
+          const j = await r.json();
+          if (r.ok) {
+            this.saveMessage = "已保存，下个 cycle 生效";
+            this.saveError = false;
+            this.loadConfigFromServer();
+          } else {
+            this.saveMessage = "保存失败: " + (j.detail || r.statusText);
+            this.saveError = true;
+          }
+        } catch (e) {
+          this.saveMessage = "保存失败: " + String(e);
+          this.saveError = true;
+        } finally {
+          this.saving = false;
+          setTimeout(() => { this.saveMessage = ""; }, 4000);
+        }
+      },
+
+      async toggleTrading() {
+        this.confirmKillSwitch = false;
+        try {
+          await fetch("/api/toggle_trading", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ paused: !this.tradingPaused }),
+          });
+          this.fetchAll();
+        } catch (e) { /* show error via fetchAll */ }
+      },
+
+      // ======== 计算属性 ========
+      get globalStatus() {
+        if (this.error || !this.state) return { color: "#EF4444", label: "已断线" };
+        if (this.freshness.stale) return { color: "#F59E0B", label: "数据陈旧" };
+        if (this.tradingPaused) return { color: "#F59E0B", label: "已暂停" };
+        return { color: "#10B981", label: "运行中" };
+      },
+
+      get livePosition() {
+        // MVP 简化: 最近一笔 trade 在 30min 内且 action != HOLD 视为仍在持仓
+        if (!this.trades.length) return null;
+        const last = this.trades[this.trades.length - 1];
+        if (!last || !last.time) return null;
+        const act = (last.action || last.direction || "").toUpperCase();
+        if (act === "HOLD" || act === "") return null;
+        const tradeTs = new Date(last.time).getTime();
+        if (Number.isNaN(tradeTs)) return null;
+        if (Date.now() - tradeTs > 30 * 60 * 1000) return null;
+        return last;
+      },
+
+      get positionSummary() {
+        const p = this.livePosition;
+        if (p) {
+          const isLong = (p.direction || p.action || "").toUpperCase().includes("BUY");
+          return {
+            label: isLong ? "多单 @ $" + this.formatNum(p.entry) : "空单 @ $" + this.formatNum(p.entry),
+            color: isLong ? "#10B981" : "#EF4444",
+            sub: (isLong ? "买入开仓 · " : "卖出开仓 · ") + (p.session || "") + " 时段",
+          };
+        }
+        return { label: "空仓中", color: "#94A3B8", sub: "系统在等候入场机会" };
+      },
+
+      get pnlSummary() {
+        // MVP: 无实时 MT5 positions, 用今日 trades 数量 + "待结算" 提示
+        const todays = this.todayTrades.length;
+        if (todays === 0) return { label: "—", color: "#94A3B8", sub: "今日暂无交易" };
+        return { label: todays + " 笔", color: "#F1F5F9", sub: "今日开仓次数（实时 P&L 需 MT5 连接）" };
+      },
+
+      get priceSummary() {
+        const price = this.state?.price;
+        if (price == null) return { label: "—", color: "#94A3B8", sub: "等待行情" };
+        return {
+          label: "$" + this.formatNum(price),
+          color: "#94A3B8",
+          sub: this.freshness.fresh
+            ? "最新行情 " + (this.freshness.age_sec ?? 0) + " 秒前"
+            : "行情陈旧 " + (this.freshness.age_sec ?? "?") + " 秒前",
+        };
+      },
+
+      get healthBadges() {
+        const age = this.freshness.age_sec;
+        const nextInSec = Math.max(0, 15 * 60 - (age ?? 0));
+        return [
+          {
+            key: "mt5",
+            color: this.state ? "#10B981" : "#EF4444",
+            title: "MT5 连接",
+            detail: this.state ? "live_state 已读取 · cycle " + (this.state.cycle ?? "?") : "未收到状态文件",
+          },
+          {
+            key: "fresh",
+            color: this.freshness.fresh ? "#10B981" : "#F59E0B",
+            title: "数据新鲜度",
+            detail: age == null ? "未知" : (this.freshness.fresh
+              ? "最新行情 " + age + " 秒前"
+              : "已陈旧 " + age + " 秒（>5 分钟）"),
+          },
+          {
+            key: "next",
+            color: "#A78BFA",
+            title: "下次检查",
+            detail: this.formatCountdown(nextInSec),
+          },
+        ];
+      },
+
+      get showReasonCard() {
+        if (!this.state) return false;
+        return (this.state.action || "").toUpperCase() === "HOLD";
+      },
+
+      get reasonTranslation() {
+        const s = this.state;
+        if (!s) return "—";
+        for (const rule of TRANSLATION_TABLE) {
+          try { if (rule.match(s)) return rule.text; } catch (e) { /* next rule */ }
+        }
+        return "系统在等待信号（" + (s.reason || "未指明原因") + "）";
+      },
+
+      get rawDiagnostic() {
+        if (!this.state?.range_diagnostic) return "（本 cycle 无 range_diagnostic）";
+        return JSON.stringify(this.state.range_diagnostic, null, 2);
+      },
+
+      get rangeBounds() { return this.state?.range_bounds || null; },
+
+      get rangeDotPct() {
+        const rb = this.rangeBounds;
+        if (!rb || rb.width == null || rb.width <= 0 || this.state?.price == null) return 50;
+        const pct = ((this.state.price - rb.lower) / rb.width) * 100;
+        return Math.max(2, Math.min(98, pct));
+      },
+
+      get sourceLabel() {
+        const src = this.state?.range_diagnostic?.detect?.source || this.state?.range_diagnostic?.detect?.method;
+        return SOURCE_LABEL[src] || "未检测到";
+      },
+
+      get todayTrades() {
+        const today = new Date().toISOString().slice(0, 10);
+        return this.trades.filter((t) => (t.time || "").startsWith(today));
+      },
+
+      get aiSummary() {
+        const dir = this.ai?.ai_direction || this.state?.ai_direction || "?";
+        const conf = this.ai?.ai_confidence ?? this.state?.ai_confidence ?? null;
+        const colorMap = { bullish: "#10B981", bearish: "#EF4444", neutral: "#94A3B8" };
+        return {
+          label: AI_DIR_LABEL[dir] || "N/A",
+          color: colorMap[dir] || "#94A3B8",
+          sub: conf == null ? "" : "置信度 " + Math.round(conf * 100) + "%",
+        };
+      },
+
+      get aiReasoning() { return this.ai?.reasoning || "（暂无 AI 文字理由）"; },
+      get aiFactors() { return Array.isArray(this.ai?.key_factors) ? this.ai.key_factors : []; },
+      get aiLastUpdate() { return this.formatTime(this.ai?.assessed_at); },
+
+      // ======== 工具方法 ========
+      formatNum(n) {
+        if (n == null || Number.isNaN(n)) return "—";
+        return Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      },
+      formatTime(ts) {
+        if (!ts) return "—";
+        try {
+          const d = new Date(ts);
+          return d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+        } catch (e) { return "—"; }
+      },
+      formatCountdown(sec) {
+        if (sec == null || sec < 0) return "—";
+        const m = Math.floor(sec / 60);
+        const s = sec % 60;
+        return m + " 分 " + String(s).padStart(2, "0") + " 秒后";
+      },
+      translateTrigger(trig) {
+        if (!trig) return "未知";
+        if (trig.includes("orderblock")) return trig.includes("bull") ? "订单块·多" : "订单块·空";
+        if (trig.includes("swing")) return (trig.includes("bull") || trig.includes("buy")) ? "摆动·多" : "摆动·空";
+        if (trig.includes("donchian")) return "Donchian 突破";
+        return trig;
+      },
+      tradeDirLabel(t) {
+        const d = (t.direction || t.action || "").toUpperCase();
+        return d.includes("BUY") ? "多" : d.includes("SELL") ? "空" : "—";
+      },
+      tradeDirStyle(t) {
+        const d = (t.direction || t.action || "").toUpperCase();
+        if (d.includes("BUY")) return "background: rgba(16,185,129,0.18); color: #10B981;";
+        if (d.includes("SELL")) return "background: rgba(239,68,68,0.18); color: #EF4444;";
+        return "background: rgba(148,163,184,0.15); color: #94A3B8;";
+      },
+      aiAgreeLabel(t) {
+        const dir = (t.ai_direction || "").toLowerCase();
+        const tradeDir = (t.direction || t.action || "").toUpperCase();
+        if (!dir || dir === "neutral") return "中性";
+        const agree = (dir === "bullish" && tradeDir.includes("BUY")) || (dir === "bearish" && tradeDir.includes("SELL"));
+        return agree ? "同意" : "分歧";
+      },
+    };
+  }
+</script>
+</body>
+</html>
