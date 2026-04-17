@@ -34,7 +34,10 @@ _SWING_LOOKBACK_BARS = 50
 _OB_BOUNDARY_CONFIDENCE = 0.8
 _SWING_EXTREME_CONFIDENCE = 0.6
 _DONCHIAN_CONFIDENCE = 0.5  # Round 4.5: lowest trust — pure statistical fallback
-_DONCHIAN_LOOKBACK_BARS = 24  # 24 H1 bars = 1 trading day
+# Round 4.6-A: lookback 24 → 48 (2 trading days). Asian single-session window
+# too narrow to form detectable channel on low-volatility days — widen to span
+# Asian + prior London/NY session for more stable upper/lower bounds.
+_DONCHIAN_LOOKBACK_BARS = 48
 _SECONDS_PER_H1_BAR = 3600
 
 
@@ -121,7 +124,7 @@ class RangeTrader:
 
     def __init__(
         self,
-        min_range_width: float = 300.0,
+        min_range_width: float = 200.0,  # Round 4.6-A: 300 → 200 (Asian 低波动接受更窄 range)
         max_range_width: float = 3000.0,
         boundary_pct: float = 0.15,
     ) -> None:

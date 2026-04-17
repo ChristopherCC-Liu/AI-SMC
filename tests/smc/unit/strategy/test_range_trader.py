@@ -526,37 +526,39 @@ def _empty_snapshot() -> SMCSnapshot:
     return _make_snapshot(swing_points=(), order_blocks=())
 
 
-def _h1_df_wide_channel(bars: int = 24) -> pl.DataFrame:
-    """H1 DataFrame with high-low channel wider than 800 points ($8)."""
-    # Width ~$10 = 1000 points > 800 guard
+def _h1_df_wide_channel(bars: int = 48) -> pl.DataFrame:
+    """H1 DataFrame with high-low channel wider than min_range_width (Round 4.6-A: 200)."""
+    # Width ~$10 = 1000 points > any min_range_width
     highs = [2370.0] * bars
     lows = [2360.0] * bars
     closes = [2365.0] * bars
     return pl.DataFrame({"high": highs, "low": lows, "close": closes})
 
 
-def _h1_df_narrow_channel(bars: int = 24) -> pl.DataFrame:
-    """H1 DataFrame with channel narrower than 800 points."""
-    # Width ~$5 = 500 points < 800 guard (also under min_range_width=300 is false)
-    # We set width to 200 points ($2) to ensure rejection by _min_range_width
-    highs = [2362.0] * bars
+def _h1_df_narrow_channel(bars: int = 48) -> pl.DataFrame:
+    """H1 DataFrame with channel narrower than min_range_width=200 (Round 4.6-A)."""
+    # Width ~$1 = 100 points < min_range_width=200 → rejection by _validate_bounds
+    highs = [2361.0] * bars
     lows = [2360.0] * bars
-    closes = [2361.0] * bars
+    closes = [2360.5] * bars
     return pl.DataFrame({"high": highs, "low": lows, "close": closes})
 
 
 class TestMethodDDonchian:
-    """Method D: Donchian channel fallback (Round 4.5 Asian core hotfix)."""
+    """Method D: Donchian channel fallback (Round 4.5 Asian core hotfix).
+
+    Round 4.6-A: lookback widened 24 → 48, min_range_width dropped 300 → 200.
+    """
 
     def test_donchian_low_volatility_asian_core_detects_range(
         self, trader: RangeTrader
     ) -> None:
-        """Asian core scenario: no OB, no swings, but 24-bar channel wide enough.
+        """Asian core scenario: no OB, no swings, but 48-bar channel wide enough.
 
         Method A fails (no OB) → Method B fails (no swings) → Method D
-        (Donchian) detects the range from H1 high/low over 24 bars.
+        (Donchian) detects the range from H1 high/low over 48 bars.
         """
-        h1_df = _h1_df_wide_channel(bars=24)
+        h1_df = _h1_df_wide_channel(bars=48)
         snapshot = _empty_snapshot()
 
         bounds = trader.detect_range(h1_df, snapshot)
@@ -566,13 +568,13 @@ class TestMethodDDonchian:
         assert bounds.upper == 2370.0
         assert bounds.lower == 2360.0
         assert bounds.width_points == 1000.0  # $10 / 0.01 = 1000 points
-        assert bounds.duration_bars == 24  # Method D reports its lookback
+        assert bounds.duration_bars == 48  # Method D reports its lookback (Round 4.6-A)
 
     def test_donchian_insufficient_bars_returns_none(
         self, trader: RangeTrader
     ) -> None:
-        """Fewer than 24 H1 bars → Method D returns None."""
-        h1_df = _h1_df_wide_channel(bars=10)
+        """Fewer than 48 H1 bars → Method D returns None (Round 4.6-A)."""
+        h1_df = _h1_df_wide_channel(bars=24)
         snapshot = _empty_snapshot()
 
         bounds = trader.detect_range(h1_df, snapshot)
@@ -582,20 +584,40 @@ class TestMethodDDonchian:
     def test_donchian_width_below_min_range_returns_none(
         self, trader: RangeTrader
     ) -> None:
-        """Channel narrower than _min_range_width → validate_bounds rejects."""
-        h1_df = _h1_df_narrow_channel(bars=24)
+        """Channel narrower than min_range_width=200 → validate_bounds rejects."""
+        h1_df = _h1_df_narrow_channel(bars=48)
         snapshot = _empty_snapshot()
 
         bounds = trader.detect_range(h1_df, snapshot)
 
-        # Width = 200 points < _min_range_width=300 → None
+        # Width = 100 points < min_range_width=200 → None
         assert bounds is None
+
+    def test_donchian_accepts_asian_width_200_to_800(
+        self, trader: RangeTrader
+    ) -> None:
+        """Round 4.6-A: Asian-range width (e.g. $3 = 300 points) now detects.
+
+        Before 4.6-A: width 300 barely passes min=300 but Guard 1 (>=800) rejects.
+        After 4.6-A: detection succeeds; Guard 1 still filters at application time.
+        """
+        highs = [2363.0] * 48
+        lows = [2360.0] * 48
+        closes = [2361.5] * 48
+        h1_df = pl.DataFrame({"high": highs, "low": lows, "close": closes})
+        snapshot = _empty_snapshot()
+
+        bounds = trader.detect_range(h1_df, snapshot)
+
+        assert bounds is not None
+        assert bounds.source == "donchian_channel"
+        assert bounds.width_points == 300.0  # $3 / 0.01 = 300 pts, >= min 200
 
     def test_donchian_only_runs_after_a_and_b_fail(
         self, trader: RangeTrader, h1_with_obs: SMCSnapshot
     ) -> None:
         """Method A (OB) succeeds → Method D should NOT run (short-circuit)."""
-        h1_df = _h1_df_wide_channel(bars=24)
+        h1_df = _h1_df_wide_channel(bars=48)
 
         bounds = trader.detect_range(h1_df, h1_with_obs)
 
