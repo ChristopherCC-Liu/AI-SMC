@@ -773,3 +773,66 @@ class TestDetectRangeDiagnostic:
         assert diag["final_source"] == "ob_boundaries"
         assert diag["n_bearish_ob"] >= 1
         assert diag["n_bullish_ob"] >= 1
+
+
+class TestSetupsDiagnostic:
+    """Round 4.6-C2 extended: generate_range_setups exposes per-cycle reason."""
+
+    def test_diagnostic_price_mid_range(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_lower: SMCSnapshot,
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+        # Price at midpoint (far from both boundaries)
+        mid_price = (bounds.upper + bounds.lower) / 2.0
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_lower, mid_price, bounds
+        )
+        assert len(setups) == 0
+        diag = trader._last_setups_diagnostic
+        assert diag["setup_count"] == 0
+        assert diag["near_lower"] is False
+        assert diag["near_upper"] is False
+        assert diag["reason_if_zero"] == "price_mid_range"
+
+    def test_diagnostic_no_choch_at_lower(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_no_choch: SMCSnapshot,
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+        # Price near lower
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_no_choch, 2349.00, bounds
+        )
+        assert len(setups) == 0
+        diag = trader._last_setups_diagnostic
+        assert diag["setup_count"] == 0
+        assert diag["near_lower"] is True
+        assert diag["long_setup_built"] is False
+        assert diag["reason_if_zero"] in (
+            "no_m15_choch_at_lower", "no_m15_choch_any_boundary"
+        )
+
+    def test_diagnostic_long_built(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_lower: SMCSnapshot,
+    ) -> None:
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_lower, 2349.00, bounds
+        )
+        assert len(setups) >= 1
+        diag = trader._last_setups_diagnostic
+        assert diag["setup_count"] >= 1
+        assert diag["near_lower"] is True
+        assert diag["long_setup_built"] is True
+        assert diag["reason_if_zero"] is None

@@ -11,7 +11,11 @@ from datetime import datetime, timezone
 
 import polars as pl
 
-from smc.strategy.range_trader import _count_boundary_touches, check_range_guards
+from smc.strategy.range_trader import (
+    _count_boundary_touches,
+    check_range_guards,
+    get_last_guards_diagnostic,
+)
 from smc.strategy.range_types import RangeBounds, RangeSetup
 
 # ---------------------------------------------------------------------------
@@ -399,3 +403,48 @@ class TestAsianSessionGuardProfile:
         setup = _asian_setup(bounds, rr=1.0)
         df = _make_touching_df(bounds, n_upper=2, n_lower=2, n_mid=5)
         assert check_range_guards(bounds, setup, "ASIAN_CORE", df) is False
+
+
+class TestGuardsDiagnostic:
+    """Round 4.6-C2: check_range_guards exposes per-call decision trace."""
+
+    def test_diagnostic_on_pass(self) -> None:
+        df = _make_touching_df(_PASSING_BOUNDS, n_upper=2, n_lower=2, n_mid=5)
+        assert check_range_guards(_PASSING_BOUNDS, _PASSING_SETUP, "LONDON", df) is True
+        diag = get_last_guards_diagnostic()
+        assert diag["all_passed"] is True
+        assert diag["session"] == "LONDON"
+        assert diag["is_asian_profile"] is False
+        assert diag["min_width_required"] == 800.0
+        assert diag["width_pass"] is True
+        assert diag["rr_pass"] is True
+        assert diag["touches_pass"] is True
+        assert diag["duration_pass"] is True
+
+    def test_diagnostic_on_width_fail(self) -> None:
+        narrow = RangeBounds(
+            upper=2380.0,
+            lower=2378.0,
+            width_points=200.0,
+            midpoint=2379.0,
+            detected_at=_DETECTED_AT,
+            source="ob_boundaries",
+            confidence=0.85,
+            duration_bars=20,
+        )
+        df = _make_touching_df(narrow, n_upper=2, n_lower=2, n_mid=5)
+        assert check_range_guards(narrow, _PASSING_SETUP, "LONDON", df) is False
+        diag = get_last_guards_diagnostic()
+        assert diag["all_passed"] is False
+        assert diag["width_pass"] is False
+        assert diag["width_points"] == 200.0
+
+    def test_diagnostic_asian_profile_flag(self) -> None:
+        bounds = _asian_bounds(width_points=500.0, duration_bars=20)
+        setup = _asian_setup(bounds)
+        df = _make_touching_df(bounds, n_upper=2, n_lower=2, n_mid=5)
+        check_range_guards(bounds, setup, "ASIAN_CORE", df)
+        diag = get_last_guards_diagnostic()
+        assert diag["is_asian_profile"] is True
+        assert diag["min_width_required"] == 400.0
+        assert diag["min_duration_required"] == 8

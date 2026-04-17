@@ -23,7 +23,7 @@ from smc.strategy.entry_trigger import _compute_sl_buffer, _find_choch_in_zone
 from smc.strategy.range_types import RangeBounds, RangeSetup
 from smc.strategy.types import TradeZone
 
-__all__ = ["RangeTrader", "check_range_guards"]
+__all__ = ["RangeTrader", "check_range_guards", "get_last_guards_diagnostic"]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -73,6 +73,16 @@ def _h1_bars_between(earlier: datetime, later: datetime) -> int:
 # Range guard functions (module-level)
 # ---------------------------------------------------------------------------
 
+# Round 4.6-C2 extended: module-level latest-call diagnostic.
+# check_range_guards is a pure function without self, so we stash its
+# per-call decision trace here for live_demo to harvest each cycle.
+_LAST_GUARDS_CHECK: dict[str, object] = {}
+
+
+def get_last_guards_diagnostic() -> dict[str, object]:
+    """Return a copy of the most recent check_range_guards trace."""
+    return dict(_LAST_GUARDS_CHECK)
+
 
 def check_range_guards(
     bounds: RangeBounds,
@@ -87,28 +97,44 @@ def check_range_guards(
     Asian low-volatility ranges rarely reach London/NY-calibrated 800/12.
     Guards 2 (RR>=1.2), 3 (touches>=2), 5 (lot) stay uniform to preserve
     quality floor.
+
+    Round 4.6-C2: records per-call diagnostic in module _LAST_GUARDS_CHECK
+    so live_demo can surface why a given setup was rejected.
     """
+    global _LAST_GUARDS_CHECK
+
     is_asian = session in _ASIAN_SESSIONS
     min_width = _GUARD_WIDTH_MIN_ASIAN if is_asian else _GUARD_WIDTH_MIN_DEFAULT
     min_duration = (
         _GUARD_DURATION_MIN_ASIAN if is_asian else _GUARD_DURATION_MIN_DEFAULT
     )
 
-    # Guard 1: width — session-aware
-    if bounds.width_points < min_width:
-        return False
-    # Guard 2: RR >= 1.2
-    if setup.rr_ratio < 1.2:
-        return False
-    # Guard 3: >= 2 boundary touches, tolerance = width * 5%
+    width_pass = bounds.width_points >= min_width
+    rr_pass = setup.rr_ratio >= 1.2
     touches = _count_boundary_touches(h1_df, bounds, tolerance_ratio=0.05)
-    if touches < 2:
-        return False
-    # Guard 4: range_duration_h1_bars — session-aware
-    if bounds.duration_bars < min_duration:
-        return False
-    # Guard 5: lot_multiplier is applied downstream — no direct check here
-    return True
+    touches_pass = touches >= 2
+    duration_pass = bounds.duration_bars >= min_duration
+
+    all_passed = width_pass and rr_pass and touches_pass and duration_pass
+
+    _LAST_GUARDS_CHECK = {
+        "session": session,
+        "is_asian_profile": is_asian,
+        "min_width_required": min_width,
+        "min_duration_required": min_duration,
+        "width_points": bounds.width_points,
+        "width_pass": width_pass,
+        "rr_ratio": setup.rr_ratio,
+        "rr_pass": rr_pass,
+        "touches_count": touches,
+        "touches_pass": touches_pass,
+        "duration_bars": bounds.duration_bars,
+        "duration_pass": duration_pass,
+        # Guard 5 (lot_multiplier) enforced downstream (live_demo); logged separately.
+        "all_passed": all_passed,
+    }
+
+    return all_passed
 
 
 def _count_boundary_touches(
@@ -160,6 +186,7 @@ class RangeTrader:
         # live_demo writes this into journal['range_diagnostic'] each cycle
         # so we can see which method/condition caused range_bounds=None.
         self._last_diagnostic: dict[str, object] = {}
+        self._last_setups_diagnostic: dict[str, object] = {}
 
     # ------------------------------------------------------------------
     # Range detection
@@ -247,13 +274,22 @@ class RangeTrader:
 
         Returns at most 2 setups (one long at lower boundary, one short at
         upper boundary).  Each requires M15 CHoCH confirmation.
+
+        Round 4.6-C2: populates self._last_setups_diagnostic for live_demo to
+        surface reasons when no setups are generated (price away from boundary
+        / no M15 CHoCH / ...).
         """
         setups: list[RangeSetup] = []
-        boundary_width = bounds.width_points * XAUUSD_POINT_SIZE * self._boundary_pct
+        boundary_width_price = bounds.width_points * XAUUSD_POINT_SIZE * self._boundary_pct
+
+        near_lower = current_price <= bounds.lower + boundary_width_price
+        near_upper = current_price >= bounds.upper - boundary_width_price
+        long_setup: RangeSetup | None = None
+        short_setup: RangeSetup | None = None
 
         # --- Lower boundary: support bounce (long) ---
-        if current_price <= bounds.lower + boundary_width:
-            setup = self._build_setup(
+        if near_lower:
+            long_setup = self._build_setup(
                 direction="long",
                 trigger="support_bounce",
                 current_price=current_price,
@@ -261,12 +297,12 @@ class RangeTrader:
                 m15_snapshot=m15_snapshot,
                 h1_atr=h1_atr,
             )
-            if setup is not None:
-                setups.append(setup)
+            if long_setup is not None:
+                setups.append(long_setup)
 
         # --- Upper boundary: resistance rejection (short) ---
-        if current_price >= bounds.upper - boundary_width:
-            setup = self._build_setup(
+        if near_upper:
+            short_setup = self._build_setup(
                 direction="short",
                 trigger="resistance_rejection",
                 current_price=current_price,
@@ -274,8 +310,32 @@ class RangeTrader:
                 m15_snapshot=m15_snapshot,
                 h1_atr=h1_atr,
             )
-            if setup is not None:
-                setups.append(setup)
+            if short_setup is not None:
+                setups.append(short_setup)
+
+        reason_if_zero: str | None = None
+        if not setups:
+            if not near_lower and not near_upper:
+                reason_if_zero = "price_mid_range"
+            elif near_lower and long_setup is None and not near_upper:
+                reason_if_zero = "no_m15_choch_at_lower"
+            elif near_upper and short_setup is None and not near_lower:
+                reason_if_zero = "no_m15_choch_at_upper"
+            else:
+                reason_if_zero = "no_m15_choch_any_boundary"
+
+        self._last_setups_diagnostic = {
+            "current_price": current_price,
+            "lower_boundary": bounds.lower,
+            "upper_boundary": bounds.upper,
+            "boundary_band_price": boundary_width_price,
+            "near_lower": near_lower,
+            "near_upper": near_upper,
+            "long_setup_built": long_setup is not None,
+            "short_setup_built": short_setup is not None,
+            "setup_count": len(setups),
+            "reason_if_zero": reason_if_zero,
+        }
 
         return tuple(setups[:2])
 

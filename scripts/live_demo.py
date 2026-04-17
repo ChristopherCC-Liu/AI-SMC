@@ -322,11 +322,16 @@ def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
     else:
         state["range_bounds"] = None
 
-    # Round 4.6-C2 (measure-first): per-cycle range detection diagnostic.
-    # Writes why range_bounds is None so we can locate the failing branch
-    # without blind hotfixes. See range_trader.RangeTrader._last_diagnostic.
+    # Round 4.6-C2 (measure-first): end-to-end 3-stage diagnostic
+    # (detect / guards / setups) so we can locate the failing branch
+    # without blind hotfixes.
     if range_trader is not None:
-        state["range_diagnostic"] = dict(range_trader._last_diagnostic or {})
+        from smc.strategy.range_trader import get_last_guards_diagnostic
+        state["range_diagnostic"] = {
+            "detect": dict(range_trader._last_diagnostic or {}),
+            "guards": get_last_guards_diagnostic(),
+            "setups": dict(range_trader._last_setups_diagnostic or {}),
+        }
 
     if best_setup:
         # Range setups use .direction/.trigger/.confidence directly (RangeSetup)
