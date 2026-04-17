@@ -267,6 +267,12 @@ class MultiTimeframeAggregator:
         # Sprint 5: Intra-call zone dedup
         zones_used_this_call: set[tuple[float, float, str]] = set()
 
+        # Round 4.6-T: per-zone reject counter (measure-first, 指向具体 gate)
+        zone_rejects = {
+            "cooldown": 0, "active_zones": 0, "intra_call_dedup": 0,
+            "entry_none": 0, "trigger_filter": 0, "confluence_low": 0,
+        }
+
         for zone in zones:
             zone_key = (round(zone.zone_high, 2), round(zone.zone_low, 2), zone.direction)
 
@@ -274,12 +280,15 @@ class MultiTimeframeAggregator:
             if zone_key in self._zone_cooldowns:
                 cooldown_until = self._zone_cooldowns[zone_key]
                 if now < cooldown_until:
+                    zone_rejects["cooldown"] += 1
                     continue
 
             # Sprint 5: Zone anti-clustering
             if zone_key in self._active_zones:
+                zone_rejects["active_zones"] += 1
                 continue
             if zone_key in zones_used_this_call:
+                zone_rejects["intra_call_dedup"] += 1
                 continue
 
             # Sprint 6: Pass regime-aware SL/TP params to entry trigger
@@ -290,16 +299,19 @@ class MultiTimeframeAggregator:
                 tp1_rr=regime_params.tp1_rr,
             )
             if entry is None:
+                zone_rejects["entry_none"] += 1
                 continue
 
             # Sprint 6: Trigger type filter — only regime-permitted triggers
             if entry.trigger_type not in regime_params.allowed_triggers:
+                zone_rejects["trigger_filter"] += 1
                 continue
 
             # Step 5: Score confluence
             conf_score = score_confluence(bias, zone, entry)
 
             if conf_score < min_confluence:
+                zone_rejects["confluence_low"] += 1
                 continue
 
             setups.append(
@@ -316,6 +328,8 @@ class MultiTimeframeAggregator:
         # Step 6: Sort by confluence score descending, cap by regime max_concurrent
         sorted_setups = sorted(setups, key=lambda s: s.confluence_score, reverse=True)
         capped = sorted_setups[:regime_params.max_concurrent]
+        self._last_setup_diagnostic["zone_rejects"] = zone_rejects
+        self._last_setup_diagnostic["min_confluence"] = round(min_confluence, 3)
         if not capped:
             self._last_setup_diagnostic["stage_reject"] = (
                 f"all_entries_failed (zones={len(zones)}, min_conf={min_confluence:.2f})"
