@@ -412,7 +412,8 @@ def main():
     cycle = 0
     ai_analysis = {}
     last_ai_update = 0
-    asian_range_quota = AsianRangeQuota()
+    # Round 4.6-H2: load persisted quota across restarts (防进程重启静默重复开仓)
+    asian_range_quota = AsianRangeQuota.load()
     phase1a_breaker = Phase1aCircuitBreaker()
 
     while running:
@@ -524,26 +525,56 @@ def main():
                 print(f"  Entry: ${best.entry_price:.2f} | SL: ${best.stop_loss:.2f} | TP: ${best.take_profit:.2f}")
 
             # 7. Journal
-            for s in setups:
-                e = s.entry_signal
+            #    Round 4.6-H1: range ENTER 也要写 journal. 原代码只遍历 trending
+            #    `setups` (TradeSetup tuple) 通过 s.entry_signal 取字段, 但 range
+            #    path 的 `best` 是 RangeSetup 不在 setups 里 → journal 漏记.
+            if action.startswith("RANGE") and best is not None:
                 log_entry = {
                     "time": now.isoformat(),
                     "cycle": cycle,
                     "price": price,
                     "action": action,
-                    "direction": e.direction,
-                    "entry": e.entry_price,
-                    "sl": e.stop_loss,
-                    "tp1": e.take_profit_1,
-                    "trigger": e.trigger_type,
-                    "confluence": round(s.confluence_score, 3),
+                    "direction": best.direction,
+                    "entry": best.entry_price,
+                    "sl": best.stop_loss,
+                    "tp1": best.take_profit,
+                    "tp_ext": best.take_profit_ext,
+                    "trigger": best.trigger,
+                    "rr_ratio": best.rr_ratio,
+                    "grade": best.grade,
+                    "range_source": best.range_bounds.source,
+                    "range_lower": best.range_bounds.lower,
+                    "range_upper": best.range_bounds.upper,
                     "regime": regime,
                     "ai_direction": ai_analysis.get("ai_direction", ai_analysis.get("direction", "?")),
                     "mode": "PAPER",
                     "trading_mode": mode.mode,
+                    "session": session,
                 }
                 with open(JOURNAL_PATH, "a") as f:
                     f.write(json.dumps(log_entry) + "\n")
+            else:
+                # Trending (v1 5-gate) path: iterate setups as before
+                for s in setups:
+                    e = s.entry_signal
+                    log_entry = {
+                        "time": now.isoformat(),
+                        "cycle": cycle,
+                        "price": price,
+                        "action": action,
+                        "direction": e.direction,
+                        "entry": e.entry_price,
+                        "sl": e.stop_loss,
+                        "tp1": e.take_profit_1,
+                        "trigger": e.trigger_type,
+                        "confluence": round(s.confluence_score, 3),
+                        "regime": regime,
+                        "ai_direction": ai_analysis.get("ai_direction", ai_analysis.get("direction", "?")),
+                        "mode": "PAPER",
+                        "trading_mode": mode.mode,
+                    }
+                    with open(JOURNAL_PATH, "a") as f:
+                        f.write(json.dumps(log_entry) + "\n")
 
             # 8. Save state for dashboard (dual-mode aware)
             save_state(cycle, price, action, reason, ai_analysis, regime, setups,
