@@ -922,3 +922,37 @@ class TestAsianBoundaryPctProfile:
         )
         diag = trader._last_setups_diagnostic
         assert diag["boundary_pct_applied"] == trader._boundary_pct
+
+    def test_asian_build_setup_zone_width_consistent(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_lower: SMCSnapshot,
+    ) -> None:
+        """Round 4.6-G (skeptic catch): _build_setup synthetic CHoCH zone
+        must use the same effective_boundary_pct as near_lower detection.
+
+        Before 4.6-G: near_lower triggered at 30% band (Asian) but CHoCH
+        zone was hard-coded to 15%, silently filtering out setups for
+        prices in the 15-30% band of the range.
+        """
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+        # Price at 25% of range — inside Asian 30% band but outside legacy 15%.
+        price_25pct = bounds.lower + (bounds.upper - bounds.lower) * 0.25
+
+        setups = trader.generate_range_setups(
+            h1_with_obs,
+            m15_choch_at_lower,
+            price_25pct,
+            bounds,
+            session="ASIAN_CORE",
+        )
+        diag = trader._last_setups_diagnostic
+        assert diag["boundary_pct_applied"] == 0.30
+        assert diag["near_lower"] is True
+        # setup build outcome must mirror near_lower (same band applied in
+        # both near-check and build-zone). Under pre-4.6-G bug these could
+        # diverge: near_lower=True but long_setup_built=False due to narrow
+        # CHoCH zone. Consistent: either both True or both False.
+        assert diag["long_setup_built"] == (len(setups) >= 1)

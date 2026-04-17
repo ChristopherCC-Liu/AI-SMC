@@ -376,6 +376,7 @@ class RangeTrader:
                 bounds=bounds,
                 m15_snapshot=m15_snapshot,
                 h1_atr=h1_atr,
+                boundary_pct=effective_boundary_pct,
             )
             if long_setup is not None:
                 setups.append(long_setup)
@@ -389,6 +390,7 @@ class RangeTrader:
                 bounds=bounds,
                 m15_snapshot=m15_snapshot,
                 h1_atr=h1_atr,
+                boundary_pct=effective_boundary_pct,
             )
             if short_setup is not None:
                 setups.append(short_setup)
@@ -578,11 +580,21 @@ class RangeTrader:
         bounds: RangeBounds,
         m15_snapshot: SMCSnapshot,
         h1_atr: float,
+        boundary_pct: float | None = None,
     ) -> RangeSetup | None:
-        """Build a single mean-reversion setup with M15 CHoCH confirmation."""
+        """Build a single mean-reversion setup with M15 CHoCH confirmation.
+
+        Round 4.6-G (skeptic catch): boundary_pct now passed from caller so
+        the synthetic M15 CHoCH search zone matches the Asian-wide band
+        (30%) used in generate_range_setups. Previously hard-coded
+        self._boundary_pct (15%) silently truncated the CHoCH search
+        window for prices in the 15-30% region — setup builds never fired.
+        """
+        bp = boundary_pct if boundary_pct is not None else self._boundary_pct
+
         # Create a synthetic TradeZone at the boundary for CHoCH check
         if direction == "long":
-            boundary_width = bounds.width_points * XAUUSD_POINT_SIZE * self._boundary_pct
+            boundary_width = bounds.width_points * XAUUSD_POINT_SIZE * bp
             zone = TradeZone(
                 zone_high=round(bounds.lower + boundary_width, 2),
                 zone_low=round(bounds.lower, 2),
@@ -592,7 +604,7 @@ class RangeTrader:
                 confidence=bounds.confidence,
             )
         else:
-            boundary_width = bounds.width_points * XAUUSD_POINT_SIZE * self._boundary_pct
+            boundary_width = bounds.width_points * XAUUSD_POINT_SIZE * bp
             zone = TradeZone(
                 zone_high=round(bounds.upper, 2),
                 zone_low=round(bounds.upper - boundary_width, 2),
