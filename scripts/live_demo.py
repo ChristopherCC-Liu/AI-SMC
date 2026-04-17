@@ -25,8 +25,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 # Round 4.6-L: single-instance guard (VPS found 2 live_demo.py processes running
 # concurrently, causing journal append race and quota state file clobber).
 # Atomic PID file — O_CREAT|O_EXCL fails if another instance already started.
-_PID_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "live_demo.pid")
-_PID_FILE = os.path.abspath(_PID_FILE)
+# Round 4.6-M (skeptic H4 defense): realpath(__file__) independent of cwd, so
+# rel-path vs abs-path invocations resolve to the same PID file path.
+_PID_FILE = os.path.realpath(
+    os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "data", "live_demo.pid")
+)
 
 
 def _ensure_single_instance():
