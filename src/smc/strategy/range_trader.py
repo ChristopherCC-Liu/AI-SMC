@@ -38,6 +38,18 @@ _DONCHIAN_CONFIDENCE = 0.5  # Round 4.5: lowest trust — pure statistical fallb
 # too narrow to form detectable channel on low-volatility days — widen to span
 # Asian + prior London/NY session for more stable upper/lower bounds.
 _DONCHIAN_LOOKBACK_BARS = 48
+
+# Round 4.6-B: session-aware Guard 1 (width) & Guard 4 (duration) thresholds.
+# Asian core market 低波动 — H1 48-bar channel 实测 400-700 pts 居多,
+# 旧 800/12 threshold 把 Asian 全 reject. Downstream CircuitBreaker +
+# RangeQuotaTracker 仍作 risk 兜底.
+_ASIAN_SESSIONS: frozenset[str] = frozenset(
+    {"ASIAN_CORE", "ASIAN_LONDON_TRANSITION"}
+)
+_GUARD_WIDTH_MIN_DEFAULT = 800.0
+_GUARD_WIDTH_MIN_ASIAN = 400.0
+_GUARD_DURATION_MIN_DEFAULT = 12
+_GUARD_DURATION_MIN_ASIAN = 8
 _SECONDS_PER_H1_BAR = 3600
 
 
@@ -68,9 +80,22 @@ def check_range_guards(
     session: str,
     h1_df: pl.DataFrame,
 ) -> bool:
-    """Return True if all 5 guards pass. See v3.0 plan."""
-    # Guard 1: width >= 800 points
-    if bounds.width_points < 800:
+    """Return True if all 5 guards pass. See v3.0 plan.
+
+    Round 4.6-B: Guard 1 (width) and Guard 4 (duration) are session-aware.
+    Asian sessions use relaxed thresholds (width 400/duration 8) because
+    Asian low-volatility ranges rarely reach London/NY-calibrated 800/12.
+    Guards 2 (RR>=1.2), 3 (touches>=2), 5 (lot) stay uniform to preserve
+    quality floor.
+    """
+    is_asian = session in _ASIAN_SESSIONS
+    min_width = _GUARD_WIDTH_MIN_ASIAN if is_asian else _GUARD_WIDTH_MIN_DEFAULT
+    min_duration = (
+        _GUARD_DURATION_MIN_ASIAN if is_asian else _GUARD_DURATION_MIN_DEFAULT
+    )
+
+    # Guard 1: width — session-aware
+    if bounds.width_points < min_width:
         return False
     # Guard 2: RR >= 1.2
     if setup.rr_ratio < 1.2:
@@ -79,8 +104,8 @@ def check_range_guards(
     touches = _count_boundary_touches(h1_df, bounds, tolerance_ratio=0.05)
     if touches < 2:
         return False
-    # Guard 4: range_duration_h1_bars >= 12
-    if bounds.duration_bars < 12:
+    # Guard 4: range_duration_h1_bars — session-aware
+    if bounds.duration_bars < min_duration:
         return False
     # Guard 5: lot_multiplier is applied downstream — no direct check here
     return True

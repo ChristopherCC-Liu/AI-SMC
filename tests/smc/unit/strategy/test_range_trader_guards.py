@@ -304,3 +304,98 @@ class TestCountBoundaryTouches:
         })
         # Counted as 1 bar (OR logic in loop)
         assert _count_boundary_touches(df, _PASSING_BOUNDS, tolerance_ratio=0.05) == 1
+
+
+# ---------------------------------------------------------------------------
+# Round 4.6-B: Session-aware Guard 1 (width) + Guard 4 (duration)
+# ---------------------------------------------------------------------------
+
+
+def _asian_bounds(width_points: float, duration_bars: int) -> RangeBounds:
+    price_width = width_points * 0.01  # XAUUSD_POINT_SIZE
+    lower = 4800.0
+    upper = lower + price_width
+    return RangeBounds(
+        upper=round(upper, 2),
+        lower=round(lower, 2),
+        width_points=width_points,
+        midpoint=round((upper + lower) / 2.0, 2),
+        detected_at=_DETECTED_AT,
+        source="donchian_channel",
+        confidence=0.5,
+        duration_bars=duration_bars,
+    )
+
+
+def _asian_setup(bounds: RangeBounds, rr: float = 2.0) -> RangeSetup:
+    return RangeSetup(
+        direction="long",
+        entry_price=bounds.lower + 0.5,
+        stop_loss=bounds.lower - 0.5,
+        take_profit=bounds.midpoint,
+        take_profit_ext=bounds.upper - 0.5,
+        risk_points=100.0,
+        reward_points=100.0 * rr,
+        rr_ratio=rr,
+        range_bounds=bounds,
+        confidence=0.5,
+        trigger="support_bounce",
+        grade="B",
+    )
+
+
+class TestAsianSessionGuardProfile:
+    """Round 4.6-B: ASIAN_CORE / ASIAN_LONDON_TRANSITION relax width & duration."""
+
+    def test_asian_width_500_passes_london_fails(self) -> None:
+        bounds = _asian_bounds(width_points=500.0, duration_bars=20)
+        setup = _asian_setup(bounds)
+        df = _make_touching_df(bounds, n_upper=2, n_lower=2, n_mid=5)
+        assert check_range_guards(bounds, setup, "ASIAN_CORE", df) is True
+        assert check_range_guards(bounds, setup, "LONDON", df) is False
+
+    def test_asian_width_400_edge_passes(self) -> None:
+        bounds = _asian_bounds(width_points=400.0, duration_bars=20)
+        setup = _asian_setup(bounds)
+        df = _make_touching_df(bounds, n_upper=2, n_lower=2, n_mid=5)
+        assert check_range_guards(bounds, setup, "ASIAN_CORE", df) is True
+
+    def test_asian_width_399_below_edge_fails(self) -> None:
+        bounds = _asian_bounds(width_points=399.0, duration_bars=20)
+        setup = _asian_setup(bounds)
+        df = _make_touching_df(bounds, n_upper=2, n_lower=2, n_mid=5)
+        assert check_range_guards(bounds, setup, "ASIAN_CORE", df) is False
+
+    def test_asian_duration_8_edge_passes(self) -> None:
+        bounds = _asian_bounds(width_points=500.0, duration_bars=8)
+        setup = _asian_setup(bounds)
+        df = _make_touching_df(bounds, n_upper=2, n_lower=2, n_mid=5)
+        assert check_range_guards(bounds, setup, "ASIAN_CORE", df) is True
+
+    def test_asian_duration_7_below_edge_fails(self) -> None:
+        bounds = _asian_bounds(width_points=500.0, duration_bars=7)
+        setup = _asian_setup(bounds)
+        df = _make_touching_df(bounds, n_upper=2, n_lower=2, n_mid=5)
+        assert check_range_guards(bounds, setup, "ASIAN_CORE", df) is False
+
+    def test_asian_london_transition_also_relaxed(self) -> None:
+        bounds = _asian_bounds(width_points=500.0, duration_bars=8)
+        setup = _asian_setup(bounds)
+        df = _make_touching_df(bounds, n_upper=2, n_lower=2, n_mid=5)
+        assert (
+            check_range_guards(bounds, setup, "ASIAN_LONDON_TRANSITION", df) is True
+        )
+
+    def test_unknown_session_uses_default(self) -> None:
+        """Session name not in _ASIAN_SESSIONS falls back to 800/12 defaults."""
+        bounds = _asian_bounds(width_points=500.0, duration_bars=20)
+        setup = _asian_setup(bounds)
+        df = _make_touching_df(bounds, n_upper=2, n_lower=2, n_mid=5)
+        assert check_range_guards(bounds, setup, "FOO_SESSION", df) is False
+
+    def test_asian_rr_still_enforced(self) -> None:
+        """Asian profile relaxes width/duration but RR>=1.2 still required."""
+        bounds = _asian_bounds(width_points=500.0, duration_bars=20)
+        setup = _asian_setup(bounds, rr=1.0)
+        df = _make_touching_df(bounds, n_upper=2, n_lower=2, n_mid=5)
+        assert check_range_guards(bounds, setup, "ASIAN_CORE", df) is False
