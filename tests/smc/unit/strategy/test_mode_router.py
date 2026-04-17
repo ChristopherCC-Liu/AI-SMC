@@ -31,7 +31,7 @@ def sample_range_bounds() -> RangeBounds:
 
 
 # ---------------------------------------------------------------------------
-# ASIAN_CORE session: blocks both trending and ranging → always v1_passthrough
+# ASIAN_CORE session: Round 4.5 — ranging ALLOWED, trending still blocked
 # ---------------------------------------------------------------------------
 
 
@@ -46,10 +46,10 @@ class TestAsianCoreSession:
         )
         assert result.mode == "v1_passthrough"
 
-    def test_asian_core_with_range_and_guards_still_v1_passthrough(
+    def test_asian_core_with_range_and_guards_enters_ranging(
         self, sample_range_bounds: RangeBounds
     ) -> None:
-        """ASIAN_CORE blocks ranging even when range + guards pass."""
+        """Round 4.5: ASIAN_CORE now allows ranging when range + guards pass."""
         result = route_trading_mode(
             ai_direction="neutral",
             ai_confidence=0.2,
@@ -58,10 +58,10 @@ class TestAsianCoreSession:
             range_bounds=sample_range_bounds,
             guards_passed=True,
         )
-        assert result.mode == "v1_passthrough"
+        assert result.mode == "ranging"
 
     def test_asian_core_bullish_high_conf_still_v1_passthrough(self) -> None:
-        """session != ASIAN_CORE gate blocks trending too."""
+        """ASIAN_CORE continues to block trending even at high confidence."""
         result = route_trading_mode(
             ai_direction="bullish",
             ai_confidence=0.9,

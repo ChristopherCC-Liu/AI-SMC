@@ -4,6 +4,12 @@ Priority logic:
   1. AI bullish/bearish + confidence >= 0.5 + session != ASIAN_CORE → trending (v1 5-gate)
   2. range_bounds exists + 5 guards pass + session in active sessions → ranging
   3. Fallback → v1_passthrough (allowed in ALL sessions including ASIAN_CORE)
+
+Round 4.5 hotfix (用户指令 UTC 03:30):
+  ASIAN_CORE 加入 _RANGING_SESSIONS (推翻 Phase 1a/1b 切分)
+  用户原话: "现在就应该使用亚洲盘套利的策略"
+  风险已知接受: Phase 1b backtest n=16 PF=0.69 (skeptic 历史数据)
+  风控完整保留: 5 guards + CircuitBreaker + RangeQuotaTracker 不变
 """
 
 from __future__ import annotations
@@ -13,11 +19,12 @@ from smc.strategy.range_types import RangeBounds, TradingMode
 __all__ = ["route_trading_mode"]
 
 _RANGING_SESSIONS: frozenset[str] = frozenset({
+    "ASIAN_CORE",  # Round 4.5: 用户指令激活 (UTC 03:30)
+    "ASIAN_LONDON_TRANSITION",
     "LONDON",
     "LONDON/NY OVERLAP",
     "NEW YORK",
     "LATE NY",
-    "ASIAN_LONDON_TRANSITION",
 })
 
 

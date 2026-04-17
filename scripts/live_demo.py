@@ -270,10 +270,11 @@ def determine_action(setups, ai_analysis, regime, *,
         return action, reason, best, mode
 
     if mode.mode == "ranging" and mode.range_bounds is not None:
-        if session == "ASIAN_LONDON_TRANSITION" and asian_range_quota is not None:
-            if phase1a_breaker is not None and phase1a_breaker.is_tripped():
-                return "HOLD", f"[PHASE1A_BREAKER_TRIPPED] Asian-London ranging disabled | {session}", None, mode
+        # Round 4.5 hotfix: CircuitBreaker 扩展到全 Asian (UTC 0-8)
+        # 用户激活 ASIAN_CORE ranging 但接受风险 → 需要 breaker 保险
         if session in ("ASIAN_CORE", "ASIAN_LONDON_TRANSITION") and asian_range_quota is not None:
+            if phase1a_breaker is not None and phase1a_breaker.is_tripped():
+                return "HOLD", f"[ASIAN_BREAKER_TRIPPED] Asian ranging disabled | {session}", None, mode
             if asian_range_quota.is_exhausted_today(datetime.now(tz=timezone.utc)):
                 return "HOLD", f"[COOLDOWN] Asian ranging already used today | {session}", None, mode
         action, reason, best = _determine_ranging(

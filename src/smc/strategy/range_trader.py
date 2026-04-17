@@ -33,6 +33,8 @@ _MIN_SWING_POINTS_FOR_RANGE = 2
 _SWING_LOOKBACK_BARS = 50
 _OB_BOUNDARY_CONFIDENCE = 0.8
 _SWING_EXTREME_CONFIDENCE = 0.6
+_DONCHIAN_CONFIDENCE = 0.5  # Round 4.5: lowest trust — pure statistical fallback
+_DONCHIAN_LOOKBACK_BARS = 24  # 24 H1 bars = 1 trading day
 
 
 # ---------------------------------------------------------------------------
@@ -121,8 +123,9 @@ class RangeTrader:
     ) -> RangeBounds | None:
         """Detect a horizontal range from H1 data.
 
-        Tries Method A (OB boundaries) first, then falls back to Method B
-        (swing extremes).  Returns None if no valid range is found.
+        Tries Method A (OB boundaries), then Method B (swing extremes),
+        then Method D (Donchian channel — Round 4.5 hotfix for Asian core
+        low-volatility fallback). Returns None if no valid range is found.
         """
         now = datetime.now(tz=timezone.utc)
 
@@ -132,7 +135,14 @@ class RangeTrader:
             return bounds
 
         # Method B: Swing extreme fallback
-        return self._detect_from_swing_extremes(h1_snapshot, now)
+        bounds = self._detect_from_swing_extremes(h1_snapshot, now)
+        if bounds is not None:
+            return bounds
+
+        # Method D: Donchian channel fallback (Round 4.5)
+        # Asian core 低波动场景下 OB/swing 稀疏 → 用 N-bar high/low channel
+        # Guard 1 (width >= 800) 自然过滤过窄 channel
+        return self._detect_from_donchian_channel(h1_df, now)
 
     # ------------------------------------------------------------------
     # Setup generation
@@ -251,6 +261,40 @@ class RangeTrader:
             now=now,
         )
 
+    def _detect_from_donchian_channel(
+        self,
+        h1_df: pl.DataFrame,
+        now: datetime,
+    ) -> RangeBounds | None:
+        """Method D (Round 4.5): N-bar high/low channel (Donchian).
+
+        Pure statistical fallback when Method A/B fail (Asian core low
+        volatility → OB/swing sparse). Uses last _DONCHIAN_LOOKBACK_BARS
+        (24 H1 bars = 1 trading day) to define upper/lower channel.
+
+        Width must exceed _min_range_width (inline equivalent of Guard 1).
+        Downstream 5 guards (width/RR/touches/duration/lot) still enforce
+        full quality gate — this only opens candidate detection.
+        """
+        if h1_df.is_empty() or h1_df.height < _DONCHIAN_LOOKBACK_BARS:
+            return None
+
+        recent = h1_df.tail(_DONCHIAN_LOOKBACK_BARS)
+        upper = float(recent["high"].max())
+        lower = float(recent["low"].min())
+
+        if upper <= lower:
+            return None
+
+        return self._validate_bounds(
+            upper=upper,
+            lower=lower,
+            source="donchian_channel",
+            confidence=_DONCHIAN_CONFIDENCE,
+            now=now,
+            duration_bars=_DONCHIAN_LOOKBACK_BARS,
+        )
+
     def _validate_bounds(
         self,
         *,
@@ -259,6 +303,7 @@ class RangeTrader:
         source: str,
         confidence: float,
         now: datetime,
+        duration_bars: int = 0,
     ) -> RangeBounds | None:
         """Shared width validation for both detection methods."""
         width_points = (upper - lower) / XAUUSD_POINT_SIZE
@@ -276,6 +321,7 @@ class RangeTrader:
             detected_at=now,
             source=source,  # type: ignore[arg-type]
             confidence=confidence,
+            duration_bars=duration_bars,
         )
 
     # ------------------------------------------------------------------

@@ -1,12 +1,17 @@
-"""Phase 1a circuit breaker for ASIAN_LONDON_TRANSITION ranging.
+"""Asian circuit breaker for ASIAN_CORE + ASIAN_LONDON_TRANSITION ranging.
 
-Tracks ranging trades opened in the UTC 6-8 session. Trips when:
+Round 4.5 hotfix (用户指令 UTC 03:30):
+  扩展到全 Asian 覆盖（UTC 0-8）— 原仅 UTC 6-8 ASIAN_LONDON_TRANSITION。
+  类名保留 Phase1aCircuitBreaker 避免 import 波及。
+  live_demo.py 调用点已扩展 session in ("ASIAN_CORE", "ASIAN_LONDON_TRANSITION").
+
+Tracks ranging trades opened in the UTC 0-8 Asian session. Trips when:
 - cumulative_losses >= 3 (lose>2), OR
 - cumulative_pnl_usd <= -20.0 (PnL<-$20)
 
-Once tripped, mode_router / live_demo must treat
-ASIAN_LONDON_TRANSITION as if ranging is disabled (fall through to
-v1_passthrough). Reset requires explicit operator action (state file wipe).
+Once tripped, live_demo treats both ASIAN_CORE and ASIAN_LONDON_TRANSITION
+as if ranging is disabled (fall through to v1_passthrough). Reset requires
+explicit operator action (state file wipe).
 
 State is persisted to `data/phase1a_breaker_state.json` so the breaker
 survives process restarts.
