@@ -176,7 +176,11 @@ class RangeTrader:
     def __init__(
         self,
         min_range_width: float = 200.0,  # Round 4.6-A: 300 → 200 (Asian 低波动接受更窄 range)
-        max_range_width: float = 3000.0,
+        # Round 4.6-D: 3000 → 20000. Measure-first (UTC 06:00 cycle) showed
+        # Asian + London/NY 48-bar Donchian window legitimately spans ~7000 pts
+        # ($70) on active days. Keeping 3000 silently rejected every Donchian
+        # candidate via _validate_bounds. 5 guards still filter downstream.
+        max_range_width: float = 20000.0,
         boundary_pct: float = 0.15,
     ) -> None:
         self._min_range_width = min_range_width
@@ -251,6 +255,7 @@ class RangeTrader:
             "n_swing_low": n_swing_low,
             "donchian_width_pts": donchian_width_pts,
             "min_range_width_required": self._min_range_width,
+            "max_range_width_required": self._max_range_width,
             "method_a_hit": method_a is not None,
             "method_b_hit": method_b is not None,
             "method_d_hit": method_d is not None,

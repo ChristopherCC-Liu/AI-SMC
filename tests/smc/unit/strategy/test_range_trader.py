@@ -264,6 +264,27 @@ class TestWidthRejection:
         )
         assert trader.detect_range(_empty_h1_df(), snapshot) is None
 
+    def test_default_max_width_accepts_7000_pts(self) -> None:
+        """Round 4.6-D: default max 20000 accepts ~$70 ranges (measured UTC 06:00)."""
+        trader = RangeTrader()  # defaults: min=200, max=20000
+        highs = [2400.0] * 48
+        lows = [2330.0] * 48  # $70 gap = 7000 pts
+        closes = [2365.0] * 48
+        h1_df = pl.DataFrame({"high": highs, "low": lows, "close": closes})
+        bounds = trader.detect_range(h1_df, _empty_snapshot())
+        assert bounds is not None
+        assert bounds.source == "donchian_channel"
+        assert bounds.width_points == 7000.0
+
+    def test_default_max_width_rejects_25000_pts(self) -> None:
+        """Default max 20000 still hard-caps egregious 'ranges' (>$200)."""
+        trader = RangeTrader()
+        highs = [2500.0] * 48
+        lows = [2250.0] * 48  # $250 = 25000 pts > 20000 max
+        closes = [2375.0] * 48
+        h1_df = pl.DataFrame({"high": highs, "low": lows, "close": closes})
+        assert trader.detect_range(h1_df, _empty_snapshot()) is None
+
 
 # ---------------------------------------------------------------------------
 # Setup generation: lower boundary → long
