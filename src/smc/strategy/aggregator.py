@@ -272,9 +272,26 @@ class MultiTimeframeAggregator:
             "cooldown": 0, "active_zones": 0, "intra_call_dedup": 0,
             "entry_none": 0, "trigger_filter": 0, "confluence_low": 0,
         }
+        # Round 4.6-T-v2 (USER "解决到开仓"): record zone coordinates + price distance
+        # 以辨析 entry_none 是 "price 距 zone 太远" 还是 "trigger 没形成".
+        zone_details: list[dict] = []
 
         for zone in zones:
             zone_key = (round(zone.zone_high, 2), round(zone.zone_low, 2), zone.direction)
+            zone_details.append({
+                "high": round(zone.zone_high, 2),
+                "low": round(zone.zone_low, 2),
+                "direction": zone.direction,
+                "dist_from_price": round(
+                    min(abs(current_price - zone.zone_high), abs(current_price - zone.zone_low)),
+                    2,
+                ),
+                "in_expanded_zone": bool(
+                    (zone.zone_low - (zone.zone_high - zone.zone_low) * 0.25)
+                    <= current_price
+                    <= (zone.zone_high + (zone.zone_high - zone.zone_low) * 0.25)
+                ),
+            })
 
             # Zone cooldown: skip zones that recently produced a loss
             if zone_key in self._zone_cooldowns:
@@ -329,6 +346,8 @@ class MultiTimeframeAggregator:
         sorted_setups = sorted(setups, key=lambda s: s.confluence_score, reverse=True)
         capped = sorted_setups[:regime_params.max_concurrent]
         self._last_setup_diagnostic["zone_rejects"] = zone_rejects
+        self._last_setup_diagnostic["zone_details"] = zone_details
+        self._last_setup_diagnostic["current_price"] = round(current_price, 2)
         self._last_setup_diagnostic["min_confluence"] = round(min_confluence, 3)
         if not capped:
             self._last_setup_diagnostic["stage_reject"] = (
