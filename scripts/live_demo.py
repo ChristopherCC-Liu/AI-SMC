@@ -583,7 +583,14 @@ def main():
             #    `setups` (TradeSetup tuple) 通过 s.entry_signal 取字段, 但 range
             #    path 的 `best` 是 RangeSetup 不在 setups 里 → journal 漏记.
             if action.startswith("RANGE") and best is not None:
-                # Round 4.6-J (USER CATCH) + 4.6-J-fix: journal lot size 字段.
+                # Round 4.6-X (USER CRITICAL CATCH): MT5 order_send execution layer.
+                # 之前 Lead 严重失职 — journal 只写 "PAPER" 日志, 没 call MT5 API.
+                # 用户期望 "装 MT5 = 真实交易", 实际 MT5 0 positions. Fix:
+                # SMC_MT5_EXECUTE=1 env var 开启真实 order_send (TMGM Demo 安全).
+                _mt5_execute = os.environ.get("SMC_MT5_EXECUTE", "0") == "1"
+                _mt5_ticket: int | None = None
+                _mt5_send_retcode: int | None = None
+                _mt5_mode_tag = "PAPER"
                 # Asian ranging 用 0.3x multiplier (Phase1a 降档协议), 其他 1.0x.
                 # base_lot=0.01 XAUUSD minimum. margin 公式分两步避免 bug:
                 #   notional_usd = entry × contract_size × lots  (1 XAUUSD lot = 100 oz)
@@ -602,6 +609,39 @@ def main():
                 margin_used_estimate_usd = round(
                     notional_value_usd / PAPER_LEVERAGE_RATIO, 2
                 )
+
+                # Round 4.6-X: actual MT5 order_send when SMC_MT5_EXECUTE=1
+                if _mt5_execute:
+                    try:
+                        tick = mt5.symbol_info_tick("XAUUSD")
+                        current_tick_price = tick.ask if best.direction == "long" else tick.bid
+                        request = {
+                            "action": mt5.TRADE_ACTION_DEAL,
+                            "symbol": "XAUUSD",
+                            "volume": position_size_lots,
+                            "type": mt5.ORDER_TYPE_BUY if best.direction == "long" else mt5.ORDER_TYPE_SELL,
+                            "price": current_tick_price,
+                            "sl": best.stop_loss,
+                            "tp": best.take_profit,
+                            "deviation": 20,
+                            "magic": 19760418,
+                            "comment": f"AI-SMC {best.trigger[:15]}",
+                            "type_time": mt5.ORDER_TIME_GTC,
+                            "type_filling": mt5.ORDER_FILLING_IOC,
+                        }
+                        result = mt5.order_send(request)
+                        _mt5_send_retcode = result.retcode if result else None
+                        _mt5_ticket = result.order if result else None
+                        if _mt5_send_retcode == mt5.TRADE_RETCODE_DONE:
+                            _mt5_mode_tag = "LIVE_EXEC"
+                            print(f"  [MT5] Order sent ✓ ticket={_mt5_ticket}")
+                        else:
+                            _mt5_mode_tag = f"MT5_FAIL_{_mt5_send_retcode}"
+                            print(f"  [MT5] Order FAIL retcode={_mt5_send_retcode}")
+                    except Exception as exc:
+                        _mt5_mode_tag = f"MT5_EXC_{type(exc).__name__}"
+                        print(f"  [MT5] Exception: {exc}")
+
                 log_entry = {
                     "time": now.isoformat(),
                     "cycle": cycle,
@@ -623,7 +663,9 @@ def main():
                     "range_upper": best.range_bounds.upper,
                     "regime": regime,
                     "ai_direction": ai_analysis.get("ai_direction", ai_analysis.get("direction", "?")),
-                    "mode": "PAPER",
+                    "mode": _mt5_mode_tag,  # 4.6-X: PAPER / LIVE_EXEC / MT5_FAIL_xxx
+                    "mt5_ticket": _mt5_ticket,
+                    "mt5_retcode": _mt5_send_retcode,
                     "trading_mode": mode.mode,
                     "session": session,
                     # Round 4.6-J position sizing fields (4.6-J-fix: notional separated)
