@@ -529,6 +529,21 @@ def main():
             #    `setups` (TradeSetup tuple) 通过 s.entry_signal 取字段, 但 range
             #    path 的 `best` 是 RangeSetup 不在 setups 里 → journal 漏记.
             if action.startswith("RANGE") and best is not None:
+                # Round 4.6-J (USER CATCH): journal 缺 lot size. Asian ranging
+                # 用 0.3x lot multiplier (风险降档 Phase1a 协议), 其他 session
+                # ranging 用 1.0x. base_lot=0.01 XAUUSD minimum. margin 估算用
+                # 100:1 leverage. 这些字段是 PAPER mode 记录, 实际 execution
+                # 时 MT5 会按账户参数重算.
+                lot_multiplier = (
+                    0.3
+                    if session in ("ASIAN_CORE", "ASIAN_LONDON_TRANSITION")
+                    else 1.0
+                )
+                base_lot = 0.01
+                position_size_lots = round(base_lot * lot_multiplier, 4)
+                margin_used_estimate_usd = round(
+                    best.entry_price * position_size_lots * 100 / 100.0, 2
+                )
                 log_entry = {
                     "time": now.isoformat(),
                     "cycle": cycle,
@@ -553,6 +568,10 @@ def main():
                     "mode": "PAPER",
                     "trading_mode": mode.mode,
                     "session": session,
+                    # Round 4.6-J position sizing fields
+                    "lot_multiplier": lot_multiplier,
+                    "position_size_lots": position_size_lots,
+                    "margin_used_estimate_usd": margin_used_estimate_usd,
                 }
                 with open(JOURNAL_PATH, "a") as f:
                     f.write(json.dumps(log_entry) + "\n")
