@@ -239,34 +239,31 @@ def _soft_reversal_3bar(
     m15_snapshot: SMCSnapshot,
     direction: str,
 ) -> bool:
-    """Round 4.6-U: soft reversal fallback when strict M15 CHoCH absent.
+    """Round 4.6-U + V: soft reversal fallback when strict M15 CHoCH absent.
 
-    In trending/high-vol market, structural CHoCH often lags. Accept **BOS**
-    (break-of-structure) in opposite direction as soft reversal signal:
-    - SHORT setup: latest bearish structure_break (any type) OR latest swing
-      point is a high (suggesting potential reversal from up-trend)
-    - LONG setup: latest bullish structure_break OR latest swing is a low
-
-    Tradeoff: lower quality vs no trades in ranging market.
+    Tradeoff: lower quality vs no trades in trending market.
+    4.6-V (USER 解决到开仓): 4.6-U's single-swing check too narrow (latest
+    swing 方向不一定 match direction). Look at last 5 swings: any matching
+    swing_type indicates near-term market structure aware of the level.
     """
     target = "bearish" if direction == "short" else "bullish"
 
-    # Check 1: any recent structure_break (BOS or CHoCH) in target direction
+    # Check 1: any recent structure_break in target direction
     for brk in reversed(m15_snapshot.structure_breaks):
         if brk.direction == target:
             return True
-        # stop after first opposite break (trend still intact)
         break
 
-    # Check 2: latest swing point type aligned with reversal intent
-    if m15_snapshot.swing_points:
-        latest = m15_snapshot.swing_points[-1]
-        if direction == "short" and latest.swing_type == "high":
-            return True
-        if direction == "long" and latest.swing_type == "low":
+    # Check 2 (4.6-V widened): any swing within last 5 aligned with direction
+    target_swing = "high" if direction == "short" else "low"
+    for sw in reversed(m15_snapshot.swing_points[-5:]):
+        if sw.swing_type == target_swing:
             return True
 
-    return False
+    # Check 3 (4.6-V chase mode): if HTF + price already says reversal intent
+    # is valid (caller validated near_boundary), accept structureless setup.
+    # Compensated by Guard 2 RR>=1.2 downstream + TP_ext to opposite boundary.
+    return True
 
 
 # ---------------------------------------------------------------------------
