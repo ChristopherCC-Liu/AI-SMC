@@ -192,13 +192,12 @@ class TestDualModeRouting:
         )
         assert mode.mode == "ranging"
 
-    # --- Case 15 (4.6-R USER CATCH): LONDON + trending regime → v1_passthrough ---
-    # Reversed from prior "range priority over trending regime" contract.
-    # 4/17 14:00+ rally real-world miss: ranging mode 在 sustained trending
-    # breakout 里等 M15 CHoCH 反转 = 逆势死等. v1_passthrough 让 HTF bias +
-    # confluence 主导可 follow trend. ASIAN_CORE 保留 ranging 优先 (Asian 反转
-    # 力强, regime trending 多假信号).
-    def test_london_trending_regime_yields_to_v1_passthrough(self):
+    # --- Case 15 (4.6-T-v3): LONDON + trending regime + price IN range → ranging ---
+    # 4.6-R over-corrected (suppressed all trending regime ranging). 4.6-T-v3
+    # revises: only suppress ranging when price has BROKEN OUT of range.
+    # Without current_price, defaults to price_in_range=True → ranging valid
+    # (mean-reversion assumption holds within range).
+    def test_london_trending_regime_price_in_range_yields_ranging(self):
         mode = route_trading_mode(
             ai_direction="neutral",
             ai_confidence=0.3,
@@ -207,4 +206,4 @@ class TestDualModeRouting:
             range_bounds=make_bounds(),
             guards_passed=True,
         )
-        assert mode.mode == "v1_passthrough"
+        assert mode.mode == "ranging"

@@ -320,6 +320,7 @@ def determine_action(setups, ai_analysis, regime, *,
         session=session,
         range_bounds=range_bounds,
         guards_passed=guards_passed,
+        current_price=price,
     )
 
     if mode.mode == "trending":

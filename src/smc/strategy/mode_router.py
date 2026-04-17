@@ -35,6 +35,7 @@ def route_trading_mode(
     session: str,
     range_bounds: RangeBounds | None,
     guards_passed: bool = False,
+    current_price: float | None = None,
 ) -> TradingMode:
     """Decide between trending, ranging, and v1-passthrough trading mode.
 
@@ -77,15 +78,26 @@ def route_trading_mode(
         )
 
     # Priority 2: range detected + 5 guards pass + active session → ranging
-    # Round 4.6-R (USER CATCH 4/17 14:00+ rally miss): regime=trending 时 ranging
-    # mode 会抓顶/抓底逆势 (等 M15 CHoCH 反转信号 = 逆 trend 死等). 退回 v1_passthrough
-    # 让 HTF bias + confluence 主导 (v1 path 能 follow trend direction).
-    # ASIAN_CORE 保留例外 (Asian 低波反转力强, regime trending 可能假信号).
+    # Round 4.6-R: regime=trending + breakout OUT of range → v1_passthrough (trend-following)
+    # Round 4.6-T-v3 (USER "解决到开仓"): 4.6-R 过度 — only suppress ranging when
+    # price has actually BROKEN OUT of range. 若 price 仍在 range 内, mean-reversion
+    # 依然有效（price 往中点回归概率高于继续 trend out of range）.
+    # ASIAN_CORE 保留例外 (Asian 低波反转力强, regime trending 多假信号).
+    price_in_range = (
+        current_price is None
+        or range_bounds is None
+        or (range_bounds.lower <= current_price <= range_bounds.upper)
+    )
+    trending_suppress = (
+        regime == "trending"
+        and session != "ASIAN_CORE"
+        and not price_in_range  # only suppress when price OUT of range
+    )
     if (
         range_bounds is not None
         and guards_passed
         and session in _RANGING_SESSIONS
-        and (regime != "trending" or session == "ASIAN_CORE")
+        and not trending_suppress
     ):
         return TradingMode(
             mode="ranging",
