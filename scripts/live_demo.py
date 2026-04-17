@@ -32,6 +32,8 @@ from smc.strategy.regime import classify_regime
 from smc.strategy.range_trader import RangeTrader
 from smc.strategy.breakout_detector import BreakoutDetector
 from smc.strategy.mode_router import route_trading_mode
+from smc.strategy.range_quota import AsianRangeQuota
+from smc.strategy.phase1a_circuit_breaker import Phase1aCircuitBreaker
 from smc.monitor.timing import next_bar_close
 
 JOURNAL_PATH = Path("data/journal/live_trades.jsonl")
@@ -128,7 +130,11 @@ def run_ai_analysis(data):
 def get_session_info():
     """Return (session_name, confidence_penalty) based on current UTC hour."""
     hour = datetime.now(timezone.utc).hour
-    if 8 <= hour < 13:
+    if 0 <= hour < 6:
+        return "ASIAN_CORE", 0.2
+    elif 6 <= hour < 8:
+        return "ASIAN_LONDON_TRANSITION", 0.15  # Asian-London transition, gentler penalty
+    elif 8 <= hour < 13:
         return "LONDON", 0.0
     elif 13 <= hour < 16:
         return "LONDON/NY OVERLAP", 0.0
@@ -136,8 +142,8 @@ def get_session_info():
         return "NEW YORK", 0.0
     elif 21 <= hour < 24:
         return "LATE NY", 0.1
-    else:
-        return "ASIAN", 0.2
+    else:  # defensive, should not reach
+        return "ASIAN_CORE", 0.2
 
 
 def _determine_trending(setups, ai_dir, ai_conf, effective_conf, session):
@@ -145,11 +151,7 @@ def _determine_trending(setups, ai_dir, ai_conf, effective_conf, session):
 
     Returns (action, reason, best_setup).
     """
-    # GATE 1: Session filter (HARD — Asian session proven PF 0.69)
-    if session == "ASIAN":
-        return "HOLD", f"SESSION BLOCKED: {session} (PF 0.69 historically) | AI conf {ai_conf:.0%} = {effective_conf:.0%}", None
-
-    # GATE 2: AI confidence after session penalty
+    # GATE 1: AI confidence after session penalty
     if effective_conf < 0.5:
         return "HOLD", f"LOW CONFIDENCE: AI {ai_dir.upper()} {ai_conf:.0%} → {effective_conf:.0%} (need 50%+)", None
 
@@ -191,17 +193,13 @@ def _determine_v1_passthrough(setups, session):
 
     Returns (action, reason, best_setup).
     """
-    if session == "ASIAN":
-        return "HOLD", f"SESSION BLOCKED: {session} (PF 0.69 historically) | v1 passthrough", None
-
     if not setups:
-        return "HOLD", "V1 PASSTHROUGH: AI unsure, no SMC setups from HTF bias", None
+        return "HOLD", "[AI_NEUTRAL_FALLBACK] V1 PASSTHROUGH: no SMC setups from HTF bias", None
 
     best = max(setups, key=lambda s: s.confluence_score)
     e = best.entry_signal
     action = "BUY" if e.direction == "long" else "SELL"
-    # Conservative lot sizing — AI is unsure, so use reduced position
-    reason = (f"V1 PASSTHROUGH: AI unsure → HTF bias {e.direction.upper()} "
+    reason = (f"[AI_NEUTRAL_FALLBACK] V1 PASSTHROUGH: AI unsure → HTF bias {e.direction.upper()} "
               f"| {e.trigger_type} | conf {best.confluence_score:.2f} "
               f"| lot 0.0025 (reduced) | {session}")
     return action, reason, best
@@ -239,7 +237,8 @@ def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
 def determine_action(setups, ai_analysis, regime, *,
                      h1_df=None, h1_snapshot=None, m15_snapshot=None,
                      h1_atr=0.0, price=0.0,
-                     range_trader=None, breakout_detector=None):
+                     range_trader=None, breakout_detector=None,
+                     asian_range_quota=None, phase1a_breaker=None):
     """Dual-mode action router: trending (v1 5-gate) or ranging (mean-reversion).
 
     Always detects range for display. Mode router decides which path runs.
@@ -271,6 +270,12 @@ def determine_action(setups, ai_analysis, regime, *,
         return action, reason, best, mode
 
     if mode.mode == "ranging" and mode.range_bounds is not None:
+        if session == "ASIAN_LONDON_TRANSITION" and asian_range_quota is not None:
+            if phase1a_breaker is not None and phase1a_breaker.is_tripped():
+                return "HOLD", f"[PHASE1A_BREAKER_TRIPPED] Asian-London ranging disabled | {session}", None, mode
+        if session in ("ASIAN_CORE", "ASIAN_LONDON_TRANSITION") and asian_range_quota is not None:
+            if asian_range_quota.is_exhausted_today(datetime.now(tz=timezone.utc)):
+                return "HOLD", f"[COOLDOWN] Asian ranging already used today | {session}", None, mode
         action, reason, best = _determine_ranging(
             price, mode.range_bounds, h1_snapshot, m15_snapshot, h1_atr,
             range_trader, breakout_detector,
@@ -384,6 +389,8 @@ def main():
     cycle = 0
     ai_analysis = {}
     last_ai_update = 0
+    asian_range_quota = AsianRangeQuota()
+    phase1a_breaker = Phase1aCircuitBreaker()
 
     while running:
         cycle += 1
@@ -453,6 +460,7 @@ def main():
             print(f"  SMC Setups: {len(setups)}")
 
             # 6. Dual-mode action routing
+            session, _ = get_session_info()
             action, reason, best, mode = determine_action(
                 setups, ai_analysis, regime,
                 h1_df=h1_df,
@@ -462,7 +470,14 @@ def main():
                 price=price,
                 range_trader=range_trader,
                 breakout_detector=breakout_det,
+                asian_range_quota=asian_range_quota,
+                phase1a_breaker=phase1a_breaker,
             )
+            if action.startswith("RANGE") and session in ("ASIAN_CORE", "ASIAN_LONDON_TRANSITION"):
+                asian_range_quota = asian_range_quota.record_open(datetime.now(tz=timezone.utc))
+            # TODO: When paper/live trade-close tracking is implemented, call
+            # phase1a_breaker.record_trade_close(pnl_usd) after each
+            # ASIAN_LONDON_TRANSITION ranging trade closes.
 
             # Display action prominently
             action_colors = {

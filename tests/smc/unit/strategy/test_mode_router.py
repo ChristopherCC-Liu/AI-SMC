@@ -1,4 +1,4 @@
-"""Unit tests for smc.strategy.mode_router — pure-function mode routing."""
+"""Unit tests for smc.strategy.mode_router — priority-based mode routing."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from smc.strategy.hysteresis import HysteresisState
 from smc.strategy.mode_router import route_trading_mode
 from smc.strategy.range_types import RangeBounds
 
@@ -13,6 +14,7 @@ from smc.strategy.range_types import RangeBounds
 # ---------------------------------------------------------------------------
 # Shared fixture
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def sample_range_bounds() -> RangeBounds:
@@ -24,57 +26,62 @@ def sample_range_bounds() -> RangeBounds:
         detected_at=datetime(2024, 6, 10, 12, 0, tzinfo=timezone.utc),
         source="ob_boundaries",
         confidence=0.85,
+        duration_bars=20,
     )
 
 
 # ---------------------------------------------------------------------------
-# Priority 1: Asian session → hold regardless of AI
+# ASIAN_CORE session: blocks both trending and ranging → always v1_passthrough
 # ---------------------------------------------------------------------------
 
-class TestAsianSessionHold:
-    def test_asian_bullish_high_conf(self, sample_range_bounds: RangeBounds) -> None:
+
+class TestAsianCoreSession:
+    def test_asian_core_neutral_no_range(self) -> None:
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.2,
+            regime="ranging",
+            session="ASIAN_CORE",
+            range_bounds=None,
+        )
+        assert result.mode == "v1_passthrough"
+
+    def test_asian_core_with_range_and_guards_still_v1_passthrough(
+        self, sample_range_bounds: RangeBounds
+    ) -> None:
+        """ASIAN_CORE blocks ranging even when range + guards pass."""
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.2,
+            regime="ranging",
+            session="ASIAN_CORE",
+            range_bounds=sample_range_bounds,
+            guards_passed=True,
+        )
+        assert result.mode == "v1_passthrough"
+
+    def test_asian_core_bullish_high_conf_still_v1_passthrough(self) -> None:
+        """session != ASIAN_CORE gate blocks trending too."""
         result = route_trading_mode(
             ai_direction="bullish",
             ai_confidence=0.9,
             regime="trending",
-            session="ASIAN",
-            range_bounds=sample_range_bounds,
-        )
-        assert result.mode == "trending"
-        assert "Asian" in result.reason
-
-    def test_asian_neutral_with_range(self, sample_range_bounds: RangeBounds) -> None:
-        result = route_trading_mode(
-            ai_direction="neutral",
-            ai_confidence=0.3,
-            regime="ranging",
-            session="ASIAN",
-            range_bounds=sample_range_bounds,
-        )
-        assert result.mode == "trending"
-        assert "Asian" in result.reason
-
-    def test_asian_bearish_no_range(self) -> None:
-        result = route_trading_mode(
-            ai_direction="bearish",
-            ai_confidence=0.7,
-            regime="transitional",
-            session="ASIAN",
+            session="ASIAN_CORE",
             range_bounds=None,
         )
-        assert result.mode == "trending"
-        assert "Asian" in result.reason
+        assert result.mode == "v1_passthrough"
 
 
 # ---------------------------------------------------------------------------
-# Priority 2: AI bullish/bearish + high confidence → trending
+# Priority 1: AI strong directional + confidence >= 0.5 + NOT ASIAN_CORE
 # ---------------------------------------------------------------------------
 
-class TestHighConfTrending:
-    def test_bullish_high_conf(self) -> None:
+
+class TestPriority1Trending:
+    def test_london_bullish_0_6(self) -> None:
         result = route_trading_mode(
             ai_direction="bullish",
-            ai_confidence=0.8,
+            ai_confidence=0.6,
             regime="trending",
             session="LONDON",
             range_bounds=None,
@@ -82,38 +89,85 @@ class TestHighConfTrending:
         assert result.mode == "trending"
         assert "bullish" in result.reason
 
-    def test_bearish_exactly_threshold(self) -> None:
+    def test_bullish_exactly_threshold(self) -> None:
         result = route_trading_mode(
-            ai_direction="bearish",
+            ai_direction="bullish",
             ai_confidence=0.5,
             regime="transitional",
-            session="NEW_YORK",
+            session="LONDON",
+            range_bounds=None,
+        )
+        assert result.mode == "trending"
+
+    def test_bearish_high_conf_new_york(self) -> None:
+        result = route_trading_mode(
+            ai_direction="bearish",
+            ai_confidence=0.8,
+            regime="trending",
+            session="NEW YORK",
             range_bounds=None,
         )
         assert result.mode == "trending"
         assert "bearish" in result.reason
 
-    def test_bullish_high_conf_ignores_range(
-        self, sample_range_bounds: RangeBounds,
+    def test_asian_non_core_bullish_allowed(self) -> None:
+        """'ASIAN' session (not 'ASIAN_CORE') is permitted for trending."""
+        result = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.7,
+            regime="trending",
+            session="ASIAN",
+            range_bounds=None,
+        )
+        assert result.mode == "trending"
+
+    def test_trending_priority_over_range_and_guards(
+        self, sample_range_bounds: RangeBounds
     ) -> None:
-        """Even with range_bounds present, high AI conviction → trending."""
+        """Even with range_bounds + guards_passed, high AI confidence wins."""
         result = route_trading_mode(
             ai_direction="bullish",
             ai_confidence=0.7,
             regime="ranging",
             session="LONDON",
             range_bounds=sample_range_bounds,
+            guards_passed=True,
         )
         assert result.mode == "trending"
 
+    def test_below_conf_threshold_does_not_trend(self) -> None:
+        result = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.49,
+            regime="trending",
+            session="LONDON",
+            range_bounds=None,
+        )
+        assert result.mode != "trending"
+
 
 # ---------------------------------------------------------------------------
-# Priority 3a: Neutral + range exists + regime != trending → ranging
+# Priority 2: range + 5 guards pass + active session → ranging
 # ---------------------------------------------------------------------------
 
-class TestNeutralWithRangeRanging:
-    def test_neutral_range_ranging_regime(
-        self, sample_range_bounds: RangeBounds,
+
+class TestPriority2Ranging:
+    def test_asian_london_transition_with_range_and_guards(
+        self, sample_range_bounds: RangeBounds
+    ) -> None:
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.2,
+            regime="ranging",
+            session="ASIAN_LONDON_TRANSITION",
+            range_bounds=sample_range_bounds,
+            guards_passed=True,
+        )
+        assert result.mode == "ranging"
+        assert result.range_bounds is not None
+
+    def test_london_with_range_and_guards(
+        self, sample_range_bounds: RangeBounds
     ) -> None:
         result = route_trading_mode(
             ai_direction="neutral",
@@ -121,64 +175,68 @@ class TestNeutralWithRangeRanging:
             regime="ranging",
             session="LONDON",
             range_bounds=sample_range_bounds,
+            guards_passed=True,
         )
         assert result.mode == "ranging"
-        assert result.range_bounds is not None
 
-    def test_neutral_range_transitional_regime(
-        self, sample_range_bounds: RangeBounds,
+    def test_new_york_with_range_and_guards(
+        self, sample_range_bounds: RangeBounds
+    ) -> None:
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.1,
+            regime="transitional",
+            session="NEW YORK",
+            range_bounds=sample_range_bounds,
+            guards_passed=True,
+        )
+        assert result.mode == "ranging"
+
+    def test_guards_failed_gives_v1_passthrough(
+        self, sample_range_bounds: RangeBounds
     ) -> None:
         result = route_trading_mode(
             ai_direction="neutral",
             ai_confidence=0.2,
-            regime="transitional",
-            session="NEW_YORK",
+            regime="ranging",
+            session="LONDON",
             range_bounds=sample_range_bounds,
+            guards_passed=False,
         )
-        assert result.mode == "ranging"
+        assert result.mode == "v1_passthrough"
 
-    def test_low_conf_bullish_with_range(
-        self, sample_range_bounds: RangeBounds,
+    def test_no_range_bounds_gives_v1_passthrough(self) -> None:
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.2,
+            regime="ranging",
+            session="LONDON",
+            range_bounds=None,
+            guards_passed=True,
+        )
+        assert result.mode == "v1_passthrough"
+
+    def test_low_conf_bullish_with_range_and_guards(
+        self, sample_range_bounds: RangeBounds
     ) -> None:
-        """Bullish direction but low confidence → falls to priority 3."""
+        """Bullish but below threshold → falls to Priority 2 ranging."""
         result = route_trading_mode(
             ai_direction="bullish",
             ai_confidence=0.3,
             regime="ranging",
             session="LONDON",
             range_bounds=sample_range_bounds,
+            guards_passed=True,
         )
         assert result.mode == "ranging"
 
 
 # ---------------------------------------------------------------------------
-# Regime trending + neutral → still trending (don't range in a trend)
+# Fallback: v1_passthrough
 # ---------------------------------------------------------------------------
 
-class TestRegimeTrendingBlocksRanging:
-    def test_neutral_range_trending_regime(
-        self, sample_range_bounds: RangeBounds,
-    ) -> None:
-        """Even with range_bounds, regime='trending' prevents ranging mode.
-        Falls through to v1_passthrough instead."""
-        result = route_trading_mode(
-            ai_direction="neutral",
-            ai_confidence=0.2,
-            regime="trending",
-            session="LONDON",
-            range_bounds=sample_range_bounds,
-        )
-        assert result.mode == "v1_passthrough"
-        assert "v1 pipeline" in result.reason
-
-
-# ---------------------------------------------------------------------------
-# Fallback: neutral + no range → trending (hold)
-# ---------------------------------------------------------------------------
 
 class TestV1Passthrough:
-    """When AI is unsure and no range exists, v1 pipeline runs autonomously."""
-
     def test_neutral_no_range(self) -> None:
         result = route_trading_mode(
             ai_direction="neutral",
@@ -195,14 +253,13 @@ class TestV1Passthrough:
             ai_direction="bearish",
             ai_confidence=0.2,
             regime="transitional",
-            session="NEW_YORK",
+            session="NEW YORK",
             range_bounds=None,
         )
         assert result.mode == "v1_passthrough"
         assert "v1 pipeline" in result.reason
 
     def test_neutral_trending_regime_no_range(self) -> None:
-        """The key fix: neutral AI + trending regime + no range used to deadlock."""
         result = route_trading_mode(
             ai_direction="neutral",
             ai_confidence=0.3,
@@ -217,6 +274,7 @@ class TestV1Passthrough:
 # ---------------------------------------------------------------------------
 # Context passthrough
 # ---------------------------------------------------------------------------
+
 
 class TestContextFields:
     def test_fields_preserved(self, sample_range_bounds: RangeBounds) -> None:
@@ -242,3 +300,78 @@ class TestContextFields:
         )
         with pytest.raises(Exception):
             result.mode = "trending"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Hysteresis integration: route_trading_mode output fed through HysteresisState
+# ---------------------------------------------------------------------------
+
+
+class TestModeRouterWithHysteresis:
+    def test_bar1_ranging_bar2_break_no_flip(
+        self, sample_range_bounds: RangeBounds
+    ) -> None:
+        """bar1 proposes ranging, bar2 breaks → committed mode stays v1_passthrough."""
+        state = HysteresisState()
+
+        mode1 = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.2,
+            regime="ranging",
+            session="LONDON",
+            range_bounds=sample_range_bounds,
+            guards_passed=True,
+        )
+        committed1 = state.update(mode1.mode)
+        assert committed1 == "v1_passthrough"  # pending, not committed yet
+
+        mode2 = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.2,
+            regime="ranging",
+            session="LONDON",
+            range_bounds=sample_range_bounds,
+            guards_passed=False,  # guards fail → break
+        )
+        committed2 = state.update(mode2.mode)
+        assert committed2 == "v1_passthrough"  # no flip
+
+    def test_bar1_bar2_ranging_flips(
+        self, sample_range_bounds: RangeBounds
+    ) -> None:
+        """Two consecutive ranging proposals commit to ranging."""
+        state = HysteresisState()
+        committed = "v1_passthrough"
+
+        for _ in range(2):
+            mode = route_trading_mode(
+                ai_direction="neutral",
+                ai_confidence=0.2,
+                regime="ranging",
+                session="LONDON",
+                range_bounds=sample_range_bounds,
+                guards_passed=True,
+            )
+            committed = state.update(mode.mode)
+
+        assert committed == "ranging"
+
+    def test_flipped_ranging_bar1_bar2_break_flips_back(
+        self, sample_range_bounds: RangeBounds
+    ) -> None:
+        """Flipped to ranging; two consecutive break bars flip back to v1_passthrough."""
+        state = HysteresisState(current_mode="ranging")
+        committed = "ranging"
+
+        for _ in range(2):
+            mode = route_trading_mode(
+                ai_direction="neutral",
+                ai_confidence=0.2,
+                regime="ranging",
+                session="LONDON",
+                range_bounds=sample_range_bounds,
+                guards_passed=False,  # guards fail
+            )
+            committed = state.update(mode.mode)
+
+        assert committed == "v1_passthrough"

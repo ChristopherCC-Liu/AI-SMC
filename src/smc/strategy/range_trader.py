@@ -23,7 +23,7 @@ from smc.strategy.entry_trigger import _compute_sl_buffer, _find_choch_in_zone
 from smc.strategy.range_types import RangeBounds, RangeSetup
 from smc.strategy.types import TradeZone
 
-__all__ = ["RangeTrader"]
+__all__ = ["RangeTrader", "check_range_guards"]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -33,6 +33,58 @@ _MIN_SWING_POINTS_FOR_RANGE = 2
 _SWING_LOOKBACK_BARS = 50
 _OB_BOUNDARY_CONFIDENCE = 0.8
 _SWING_EXTREME_CONFIDENCE = 0.6
+
+
+# ---------------------------------------------------------------------------
+# Range guard functions (module-level)
+# ---------------------------------------------------------------------------
+
+
+def check_range_guards(
+    bounds: RangeBounds,
+    setup: RangeSetup,
+    session: str,
+    h1_df: pl.DataFrame,
+) -> bool:
+    """Return True if all 5 guards pass. See v3.0 plan."""
+    # Guard 1: width >= 800 points
+    if bounds.width_points < 800:
+        return False
+    # Guard 2: RR >= 1.2
+    if setup.rr_ratio < 1.2:
+        return False
+    # Guard 3: >= 2 boundary touches, tolerance = width * 5%
+    touches = _count_boundary_touches(h1_df, bounds, tolerance_ratio=0.05)
+    if touches < 2:
+        return False
+    # Guard 4: range_duration_h1_bars >= 12
+    if bounds.duration_bars < 12:
+        return False
+    # Guard 5: lot_multiplier is applied downstream — no direct check here
+    return True
+
+
+def _count_boundary_touches(
+    h1_df: pl.DataFrame,
+    bounds: RangeBounds,
+    tolerance_ratio: float = 0.05,
+) -> int:
+    """Count bars that touched either upper or lower boundary within tolerance."""
+    tolerance_pts = bounds.width_points * tolerance_ratio
+    tol_price = tolerance_pts * XAUUSD_POINT_SIZE
+
+    highs = h1_df["high"].to_list()
+    lows = h1_df["low"].to_list()
+    touches = 0
+    for h, l in zip(highs, lows):
+        if abs(h - bounds.upper) <= tol_price or abs(l - bounds.lower) <= tol_price:
+            touches += 1
+    return touches
+
+
+# ---------------------------------------------------------------------------
+# RangeTrader class
+# ---------------------------------------------------------------------------
 
 
 class RangeTrader:

@@ -1,11 +1,9 @@
 """Pure-function mode router: decides trending vs ranging vs v1-passthrough.
 
 Priority logic:
-  1. Asian session → HOLD (mode="trending", reason explains session block)
-  2. AI bullish/bearish + confidence >= 0.5 → trending (AI-gated 5-gate)
-  3. AI neutral OR confidence < 0.5:
-     a. range_bounds exists AND regime != "trending" → ranging
-     b. else → v1_passthrough (v1 pipeline runs without AI direction gate)
+  1. AI bullish/bearish + confidence >= 0.5 + session != ASIAN_CORE → trending (v1 5-gate)
+  2. range_bounds exists + 5 guards pass + session in active sessions → ranging
+  3. Fallback → v1_passthrough (allowed in ALL sessions including ASIAN_CORE)
 """
 
 from __future__ import annotations
@@ -14,6 +12,14 @@ from smc.strategy.range_types import RangeBounds, TradingMode
 
 __all__ = ["route_trading_mode"]
 
+_RANGING_SESSIONS: frozenset[str] = frozenset({
+    "LONDON",
+    "LONDON/NY OVERLAP",
+    "NEW YORK",
+    "LATE NY",
+    "ASIAN_LONDON_TRANSITION",
+})
+
 
 def route_trading_mode(
     ai_direction: str,
@@ -21,8 +27,9 @@ def route_trading_mode(
     regime: str,
     session: str,
     range_bounds: RangeBounds | None,
+    guards_passed: bool = False,
 ) -> TradingMode:
-    """Decide between trending and ranging trading mode.
+    """Decide between trending, ranging, and v1-passthrough trading mode.
 
     Parameters
     ----------
@@ -34,30 +41,25 @@ def route_trading_mode(
         Market regime from ``classify_regime()``: "trending", "transitional",
         or "ranging".
     session:
-        Trading session from ``get_session_info()``: "ASIAN", "LONDON",
-        "NEW_YORK", "LONDON_CLOSE", etc.
+        Trading session from ``get_session_info()``.
     range_bounds:
         Detected range boundaries from ``RangeTrader.detect_range()``, or
         None if no range was detected.
+    guards_passed:
+        True if all 5 range guards pass (computed by caller via
+        ``check_range_guards()``).
 
     Returns
     -------
     TradingMode
         Frozen model with mode, reason, and context fields.
     """
-    # Priority 1: Asian session → hold (no trading)
-    if session == "ASIAN":
-        return TradingMode(
-            mode="trending",
-            reason="Asian session — no setups generated",
-            ai_direction=ai_direction,
-            ai_confidence=ai_confidence,
-            regime=regime,
-            range_bounds=range_bounds,
-        )
-
-    # Priority 2: AI has directional conviction
-    if ai_direction in ("bullish", "bearish") and ai_confidence >= 0.5:
+    # Priority 1: AI strong directional + NOT ASIAN_CORE → trending (v1 5-gate)
+    if (
+        ai_direction in ("bullish", "bearish")
+        and ai_confidence >= 0.5
+        and session != "ASIAN_CORE"
+    ):
         return TradingMode(
             mode="trending",
             reason=f"AI {ai_direction} (conf={ai_confidence:.2f}) — trend-following mode",
@@ -67,25 +69,26 @@ def route_trading_mode(
             range_bounds=range_bounds,
         )
 
-    # Priority 3: Low conviction — check for ranging opportunity
-    if range_bounds is not None and regime != "trending":
+    # Priority 2: range detected + 5 guards pass + active session → ranging
+    if range_bounds is not None and guards_passed and session in _RANGING_SESSIONS:
         return TradingMode(
             mode="ranging",
-            reason=f"Low AI conviction (dir={ai_direction}, conf={ai_confidence:.2f}), "
-            f"range detected, regime={regime} — mean-reversion mode",
+            reason=(
+                f"Range detected (guards passed), session={session} — mean-reversion mode"
+            ),
             ai_direction=ai_direction,
             ai_confidence=ai_confidence,
             regime=regime,
             range_bounds=range_bounds,
         )
 
-    # Fallback: v1 passthrough — AI unsure, no range detected.
-    # v1 pipeline has its own HTF bias (D1+H4 BOS/CHoCH) for direction,
-    # so it can operate without the AI direction gate.
+    # Priority 3: fallback — v1 pipeline runs in all sessions including ASIAN_CORE
     return TradingMode(
         mode="v1_passthrough",
-        reason=f"AI unsure (dir={ai_direction}, conf={ai_confidence:.2f}), "
-        f"no range — v1 pipeline runs with HTF bias only",
+        reason=(
+            f"AI unsure (dir={ai_direction}, conf={ai_confidence:.2f}) "
+            f"— v1 pipeline runs with HTF bias only"
+        ),
         ai_direction=ai_direction,
         ai_confidence=ai_confidence,
         regime=regime,

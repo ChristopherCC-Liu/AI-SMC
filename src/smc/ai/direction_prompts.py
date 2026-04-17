@@ -93,7 +93,11 @@ Rules:
 - If both analysts agree: follow them, confidence = average + 0.1
 - If they disagree: weight macro heavier (fundamental > sentiment)
   because fundamentals persist longer than news sentiment
-- If both neutral: return neutral with confidence 0.3
+- If both neutral: use H4 Technical Context to break the tie:
+  * sma50_direction=up + higher_highs > lower_lows → bullish, confidence MAX 0.55
+  * sma50_direction=down + lower_lows > higher_highs → bearish, confidence MAX 0.55
+  * sma50_direction=flat AND higher_highs ≈ lower_lows → neutral, confidence 0.3
+  Only return neutral when H4 structure is also genuinely flat.
 - H4 technical confirms direction = +0.1 confidence bonus
   (SMA50 direction matches, higher_highs > lower_lows for bullish, etc.)
 - H4 technical contradicts direction = -0.1 confidence penalty

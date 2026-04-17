@@ -211,3 +211,4 @@ class AIDirection(BaseModel):
     assessed_at: datetime
     source: Literal["ai_debate", "sma_fallback", "cache", "neutral_default"]
     cost_usd: float = 0.0
+    reasoning_tag: str | None = None  # e.g. "macro_free_capped", "analyst_disagreement"

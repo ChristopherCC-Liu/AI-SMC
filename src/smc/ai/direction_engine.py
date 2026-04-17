@@ -216,14 +216,35 @@ def _parse_direction_json(content: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _format_macro_context(external_ctx: ExternalContext | None) -> str:
+def _format_macro_context(
+    external_ctx: ExternalContext | None,
+    h4_ctx: H4TechnicalContext | None = None,
+) -> str:
     """Build user-message context for the Macro Analyst."""
     if external_ctx is None:
-        return (
-            "=== MACRO DATA ===\n"
-            "  (all macro data unavailable)\n"
-            "  source_quality: unavailable"
-        )
+        if h4_ctx is None:
+            return (
+                "=== MACRO DATA ===\n"
+                "  (all macro data unavailable)\n"
+                "  source_quality: unavailable"
+            )
+        return "\n".join([
+            "=== MACRO DATA ===",
+            "  (all macro data unavailable — macro-free mode)",
+            "  source_quality: unavailable",
+            "",
+            "=== H4 TECHNICAL FALLBACK ===",
+            f"  sma50_direction: {h4_ctx.sma50_direction}",
+            f"  sma50_slope: {h4_ctx.sma50_slope:+.4f}%",
+            f"  higher_highs: {h4_ctx.higher_highs}",
+            f"  lower_lows: {h4_ctx.lower_lows}",
+            f"  bar_count: {h4_ctx.bar_count}",
+            "",
+            "Instructions: In macro-free mode, derive a provisional directional read",
+            "from H4 technical structure. You MAY return neutral if H4 is also flat,",
+            "but default must be an evidence-based directional call from the technicals.",
+            "Confidence: 0.3-0.45 if only technicals available; ≥0.5 only with 2+ signals aligned.",
+        ])
     lines = [
         "=== MACRO DATA ===",
         f"  dxy_direction: {external_ctx.dxy_direction}",
@@ -238,18 +259,38 @@ def _format_macro_context(external_ctx: ExternalContext | None) -> str:
     return "\n".join(lines)
 
 
-def _format_news_context(external_ctx: ExternalContext | None) -> str:
+def _format_news_context(
+    external_ctx: ExternalContext | None,
+    h4_ctx: H4TechnicalContext | None = None,
+) -> str:
     """Build user-message context for the News Analyst.
 
     In Sprint 7 MVP, news context is derived from the same ExternalContext.
     A dedicated news feed integration is planned for Sprint 8.
     """
     if external_ctx is None:
-        return (
-            "=== NEWS / SENTIMENT CONTEXT ===\n"
-            "  (no recent events or sentiment data available)\n"
-            "  Respond with neutral, confidence 0.3."
-        )
+        if h4_ctx is None:
+            return (
+                "=== NEWS / SENTIMENT CONTEXT ===\n"
+                "  (no recent events or sentiment data available)\n"
+                "  Respond with neutral, confidence 0.3."
+            )
+        return "\n".join([
+            "=== NEWS / SENTIMENT CONTEXT ===",
+            "  (no recent events or sentiment data available — macro-free mode)",
+            "",
+            "=== H4 TECHNICAL FALLBACK ===",
+            f"  sma50_direction: {h4_ctx.sma50_direction}",
+            f"  sma50_slope: {h4_ctx.sma50_slope:+.4f}%",
+            f"  higher_highs: {h4_ctx.higher_highs}",
+            f"  lower_lows: {h4_ctx.lower_lows}",
+            f"  bar_count: {h4_ctx.bar_count}",
+            "",
+            "Instructions: In macro-free mode, derive a provisional directional read",
+            "from H4 technical structure. You MAY return neutral if H4 is also flat,",
+            "but default must be an evidence-based directional call from the technicals.",
+            "Confidence: 0.3-0.45 if only technicals available; ≥0.5 only with 2+ signals aligned.",
+        ])
     lines = [
         "=== NEWS / SENTIMENT CONTEXT ===",
         f"  vix_level: {external_ctx.vix_level} ({external_ctx.vix_regime})",
@@ -388,15 +429,23 @@ class DirectionEngine:
 
         h4_ctx = extract_h4_context(h4_df)
 
+        direction = None
         try:
             direction = self._run_direction_debate(external_ctx, h4_ctx)
-            self._mem_cache[cache_key] = (direction, now)
-            return direction
         except Exception:
             logger.warning("AI direction debate failed, using SMA fallback", exc_info=True)
 
-        # Step 4: SMA + DXY fallback
-        direction = self._sma_dxy_fallback(h4_ctx, external_ctx)
+        if direction is None:
+            # Step 4: SMA + DXY fallback
+            direction = self._sma_dxy_fallback(h4_ctx, external_ctx)
+
+        # Macro-free guardrail: cap confidence when no macro evidence available
+        if external_ctx is None or not self._has_any_evidence(external_ctx):
+            direction = direction.model_copy(update={
+                "confidence": min(direction.confidence, 0.5),
+                "reasoning_tag": "macro_free_capped",
+            })
+
         self._mem_cache[cache_key] = (direction, now)
         return direction
 
@@ -423,7 +472,7 @@ class DirectionEngine:
             raise RuntimeError("No LLM backend available for direction debate")
 
         # Phase 1: Macro Analyst
-        macro_user = _format_macro_context(external_ctx)
+        macro_user = _format_macro_context(external_ctx, h4_ctx)
         try:
             macro_raw = _claude_cli_chat(
                 DIRECTION_MACRO_ANALYST_SYSTEM, macro_user, _FAST_MODEL_CLI,
@@ -437,7 +486,7 @@ class DirectionEngine:
             }
 
         # Phase 2: News Analyst
-        news_user = _format_news_context(external_ctx)
+        news_user = _format_news_context(external_ctx, h4_ctx)
         try:
             news_raw = _claude_cli_chat(
                 DIRECTION_NEWS_ANALYST_SYSTEM, news_user, _FAST_MODEL_CLI,
@@ -477,6 +526,24 @@ class DirectionEngine:
             source="ai_debate",
             cost_usd=0.0,  # pipe mode doesn't report cost
         )
+
+    # ------------------------------------------------------------------
+    # Evidence check
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _has_any_evidence(ctx: ExternalContext) -> bool:
+        """Return True iff at least one evidence field is non-null/non-unknown."""
+        if ctx is None:
+            return False
+        checks = [
+            ctx.dxy_direction not in (None, "flat", "unknown"),
+            ctx.vix_level is not None and ctx.vix_level > 0,
+            ctx.real_rate_10y is not None,
+            ctx.cot_net_spec is not None,
+            ctx.central_bank_stance not in (None, "neutral", "unknown"),
+        ]
+        return any(checks)
 
     # ------------------------------------------------------------------
     # SMA + DXY Fallback

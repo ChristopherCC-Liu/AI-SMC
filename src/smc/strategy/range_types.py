@@ -37,6 +37,7 @@ class RangeBounds(BaseModel):
     detected_at: datetime
     source: Literal["ob_boundaries", "swing_extremes"]
     confidence: float  # 0.0 – 1.0
+    duration_bars: int = 0  # H1 bars the range has been active; 0 = unknown
 
 
 # ---------------------------------------------------------------------------

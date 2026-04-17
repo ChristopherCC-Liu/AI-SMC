@@ -534,8 +534,7 @@ class TestGetDirectionIntegration:
     @patch("smc.ai.direction_engine._has_claude_cli", return_value=True)
     @patch("smc.ai.direction_engine._claude_cli_chat")
     def test_ai_debate_success(self, mock_cli: MagicMock, mock_has: MagicMock) -> None:
-        """Test successful AI debate with mocked Claude CLI."""
-        # Mock responses for macro, news, judge
+        """Test successful AI debate with mocked Claude CLI and macro evidence present."""
         macro_resp = json.dumps({
             "direction": "bullish", "confidence": 0.7,
             "key_factors": ["dxy_weakening"], "reasoning": "DXY down",
@@ -551,7 +550,9 @@ class TestGetDirectionIntegration:
         })
         mock_cli.side_effect = [macro_resp, news_resp, judge_resp]
 
-        engine = DirectionEngine()
+        # Provide macro evidence so guardrail doesn't cap confidence
+        ext_ctx = _make_external_ctx(dxy_direction="weakening")
+        engine = DirectionEngine(external_fetcher=lambda: ext_ctx)
         h4_df = _make_h4_df(n_bars=100, trend=2.0)
         result = engine.get_direction(h4_df=h4_df)
 
@@ -600,3 +601,227 @@ class TestAIDirectionModel:
         )
         with pytest.raises(Exception):
             d.confidence = 0.9  # type: ignore[misc]
+
+    def test_reasoning_tag_defaults_none(self) -> None:
+        d = AIDirection(
+            direction="bullish",
+            confidence=0.6,
+            key_drivers=("sma50_up",),
+            reasoning="test",
+            assessed_at=datetime.now(tz=timezone.utc),
+            source="sma_fallback",
+        )
+        assert d.reasoning_tag is None
+
+    def test_reasoning_tag_set(self) -> None:
+        d = AIDirection(
+            direction="bullish",
+            confidence=0.5,
+            key_drivers=("sma50_up",),
+            reasoning="test",
+            assessed_at=datetime.now(tz=timezone.utc),
+            source="sma_fallback",
+            reasoning_tag="macro_free_capped",
+        )
+        assert d.reasoning_tag == "macro_free_capped"
+
+
+# ---------------------------------------------------------------------------
+# Macro-free formatting (H4 fallback)
+# ---------------------------------------------------------------------------
+
+
+class TestMacroFreeFormatting:
+    """Tests for _format_macro_context and _format_news_context with h4_ctx."""
+
+    def _make_h4_ctx(
+        self,
+        direction: str = "up",
+        hh: int = 3,
+        ll: int = 1,
+    ) -> H4TechnicalContext:
+        return H4TechnicalContext(
+            sma50_direction=direction,  # type: ignore[arg-type]
+            sma50_slope=0.05,
+            higher_highs=hh,
+            lower_lows=ll,
+            bar_count=100,
+        )
+
+    def test_format_macro_none_none_backward_compat(self) -> None:
+        """(ctx=None, h4_ctx=None) → old unavailable block."""
+        text = _format_macro_context(None, None)
+        assert "unavailable" in text
+        assert "H4 TECHNICAL FALLBACK" not in text
+
+    def test_format_macro_none_with_h4_ctx(self) -> None:
+        """(ctx=None, h4_ctx=<data>) → H4 TECHNICAL FALLBACK block."""
+        h4 = self._make_h4_ctx(direction="up", hh=3, ll=1)
+        text = _format_macro_context(None, h4)
+        assert "H4 TECHNICAL FALLBACK" in text
+        assert "sma50_direction: up" in text
+        assert "higher_highs: 3" in text
+        assert "macro-free mode" in text
+
+    def test_format_macro_default_arg_still_works(self) -> None:
+        """_format_macro_context(ctx) with no h4_ctx arg still works."""
+        text = _format_macro_context(None)
+        assert "unavailable" in text
+        assert "H4 TECHNICAL FALLBACK" not in text
+
+    def test_format_news_none_none_backward_compat(self) -> None:
+        """(ctx=None, h4_ctx=None) → keeps 'Respond with neutral, confidence 0.3.'"""
+        text = _format_news_context(None, None)
+        assert "neutral" in text
+        assert "H4 TECHNICAL FALLBACK" not in text
+
+    def test_format_news_none_with_h4_ctx(self) -> None:
+        """(ctx=None, h4_ctx=<data>) → H4 TECHNICAL FALLBACK block."""
+        h4 = self._make_h4_ctx(direction="down", hh=1, ll=3)
+        text = _format_news_context(None, h4)
+        assert "H4 TECHNICAL FALLBACK" in text
+        assert "sma50_direction: down" in text
+        assert "macro-free mode" in text
+
+    def test_format_news_default_arg_backward_compat(self) -> None:
+        """_format_news_context(ctx) with no h4_ctx arg still works."""
+        text = _format_news_context(None)
+        assert "neutral" in text
+
+
+# ---------------------------------------------------------------------------
+# _has_any_evidence
+# ---------------------------------------------------------------------------
+
+
+class TestHasAnyEvidence:
+    """Tests for DirectionEngine._has_any_evidence()."""
+
+    def _make_ctx(self, **kwargs: object) -> ExternalContext:
+        defaults: dict[str, object] = {
+            "dxy_direction": "flat",
+            "dxy_value": None,
+            "vix_level": None,
+            "vix_regime": None,
+            "real_rate_10y": None,
+            "cot_net_spec": None,
+            "central_bank_stance": None,
+            "fetched_at": datetime.now(tz=timezone.utc),
+            "source_quality": "unavailable",
+        }
+        defaults.update(kwargs)
+        return ExternalContext(**defaults)  # type: ignore[arg-type]
+
+    def test_all_flat_no_evidence(self) -> None:
+        ctx = self._make_ctx(dxy_direction="flat")
+        assert DirectionEngine._has_any_evidence(ctx) is False
+
+    def test_dxy_weakening_has_evidence(self) -> None:
+        ctx = self._make_ctx(dxy_direction="weakening")
+        assert DirectionEngine._has_any_evidence(ctx) is True
+
+    def test_dxy_strengthening_has_evidence(self) -> None:
+        ctx = self._make_ctx(dxy_direction="strengthening")
+        assert DirectionEngine._has_any_evidence(ctx) is True
+
+    def test_vix_level_has_evidence(self) -> None:
+        ctx = self._make_ctx(vix_level=18.5)
+        assert DirectionEngine._has_any_evidence(ctx) is True
+
+    def test_real_rate_has_evidence(self) -> None:
+        ctx = self._make_ctx(real_rate_10y=1.5)
+        assert DirectionEngine._has_any_evidence(ctx) is True
+
+    def test_cot_has_evidence(self) -> None:
+        ctx = self._make_ctx(cot_net_spec=50000.0)
+        assert DirectionEngine._has_any_evidence(ctx) is True
+
+    def test_hawkish_cb_has_evidence(self) -> None:
+        ctx = self._make_ctx(central_bank_stance="hawkish")
+        assert DirectionEngine._has_any_evidence(ctx) is True
+
+    def test_neutral_cb_no_evidence(self) -> None:
+        ctx = self._make_ctx(central_bank_stance="neutral")
+        assert DirectionEngine._has_any_evidence(ctx) is False
+
+    def test_none_returns_false(self) -> None:
+        assert DirectionEngine._has_any_evidence(None) is False  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Macro-free guardrail integration
+# ---------------------------------------------------------------------------
+
+
+class TestMacroFreeGuardrail:
+    """Tests for the macro-free confidence cap in get_direction."""
+
+    @patch("smc.ai.direction_engine._has_claude_cli", return_value=True)
+    @patch("smc.ai.direction_engine._claude_cli_chat")
+    def test_guardrail_caps_confidence_when_no_macro(
+        self, mock_cli: MagicMock, mock_has: MagicMock
+    ) -> None:
+        """AI debate returns bullish 0.6 with no macro data → capped to ≤0.5."""
+        macro_resp = json.dumps({
+            "direction": "bullish", "confidence": 0.65,
+            "key_factors": ["sma50_up"], "reasoning": "H4 bullish",
+        })
+        news_resp = json.dumps({
+            "direction": "bullish", "confidence": 0.55,
+            "key_factors": ["sma50_up"], "reasoning": "H4 bullish",
+        })
+        judge_resp = json.dumps({
+            "direction": "bullish", "confidence": 0.6,
+            "key_drivers": ["sma50_up"],
+            "reasoning": "Both bullish from H4 technicals",
+        })
+        mock_cli.side_effect = [macro_resp, news_resp, judge_resp]
+
+        engine = DirectionEngine()  # no external_fetcher → external_ctx is None
+        h4_df = _make_h4_df(n_bars=100, trend=2.0)
+        result = engine.get_direction(h4_df=h4_df)
+
+        assert result.confidence <= 0.5
+        assert result.reasoning_tag == "macro_free_capped"
+        assert result.source == "ai_debate"
+
+    @patch("smc.ai.direction_engine._has_claude_cli", return_value=False)
+    def test_guardrail_caps_sma_fallback_when_no_macro(
+        self, mock_has: MagicMock
+    ) -> None:
+        """SMA fallback bullish 0.5 with no macro → capped to ≤0.5, tagged."""
+        engine = DirectionEngine()
+        h4_df = _make_h4_df(n_bars=100, trend=2.0)
+        result = engine.get_direction(h4_df=h4_df)
+
+        assert result.confidence <= 0.5
+        assert result.reasoning_tag == "macro_free_capped"
+
+    @patch("smc.ai.direction_engine._has_claude_cli", return_value=True)
+    @patch("smc.ai.direction_engine._claude_cli_chat")
+    def test_guardrail_not_applied_with_macro_evidence(
+        self, mock_cli: MagicMock, mock_has: MagicMock
+    ) -> None:
+        """When macro evidence is present, high-confidence result is preserved."""
+        macro_resp = json.dumps({
+            "direction": "bullish", "confidence": 0.7,
+            "key_factors": ["dxy_weakening"], "reasoning": "DXY down",
+        })
+        news_resp = json.dumps({
+            "direction": "bullish", "confidence": 0.65,
+            "key_factors": ["dovish_cb"], "reasoning": "dovish CB",
+        })
+        judge_resp = json.dumps({
+            "direction": "bullish", "confidence": 0.75,
+            "key_drivers": ["dxy_weakening", "dovish_cb"],
+            "reasoning": "Both bullish confirmed",
+        })
+        mock_cli.side_effect = [macro_resp, news_resp, judge_resp]
+
+        ext_ctx = _make_external_ctx(dxy_direction="weakening")
+        engine = DirectionEngine(external_fetcher=lambda: ext_ctx)
+        h4_df = _make_h4_df(n_bars=100, trend=2.0)
+        result = engine.get_direction(h4_df=h4_df)
+
+        assert result.confidence == 0.75
+        assert result.reasoning_tag is None
