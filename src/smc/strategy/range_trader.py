@@ -658,16 +658,15 @@ class RangeTrader:
         else:
             take_profit_ext = bounds.lower + inset
 
-        reward_points = abs(take_profit - entry_price) / XAUUSD_POINT_SIZE
+        # Round 4.6-O [USER CATCH]: rr_ratio 用 take_profit_ext (对立边界)
+        # 而非 midpoint. 原因: midpoint TP 在 narrow range 里 reward 太小,
+        # RR 永远 < 1.2, Guard 2 reject all trades (UTC 08:30-11:30 共 12 cycle
+        # 全 HOLD). Mean reversion 经典做法 = 持仓到对立边界. TP_ext 是真实
+        # 策略目标 (TP1=midpoint 保留作 "conservative partial exit" 概念).
+        reward_points = abs(take_profit_ext - entry_price) / XAUUSD_POINT_SIZE
         rr_ratio = reward_points / risk_points if risk_points > 0 else 0.0
 
         # Round 4.6-K: enforce Guard 2 (RR >= 1.2) at setup build time.
-        # Historically live in check_range_guards but 4.6-E integration moved
-        # to check_bounds_only_guards which explicitly defers RR to "setup-level".
-        # Real deferral site was unwired — _build_setup previously only recorded
-        # RR without rejecting. VPS journal UTC 08:15/08:30 showed rr=0.73/0.78
-        # open trades, confirming dead-code gap. 1.2 threshold uniform across
-        # sessions (quality floor, per 4.6-B comment).
         _MIN_RR_RATIO = 1.2
         if rr_ratio < _MIN_RR_RATIO:
             return None
