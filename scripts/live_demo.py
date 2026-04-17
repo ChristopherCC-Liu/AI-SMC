@@ -32,6 +32,7 @@ from smc.strategy.regime import classify_regime
 from smc.strategy.range_trader import RangeTrader
 from smc.strategy.breakout_detector import BreakoutDetector
 from smc.strategy.mode_router import route_trading_mode
+from smc.strategy.range_trader import check_bounds_only_guards
 from smc.strategy.range_quota import AsianRangeQuota
 from smc.strategy.phase1a_circuit_breaker import Phase1aCircuitBreaker
 from smc.monitor.timing import next_bar_close
@@ -254,6 +255,13 @@ def determine_action(setups, ai_analysis, regime, *,
     if range_trader is not None and h1_snapshot is not None:
         range_bounds = range_trader.detect_range(h1_df, h1_snapshot)
 
+    # Round 4.6-E: bounds-level guards precheck so mode_router Priority 2
+    # (range_bounds + guards_passed + session) can actually fire.
+    # Previously guards_passed defaulted to False and ranging never activated.
+    guards_passed = False
+    if range_bounds is not None and h1_df is not None:
+        guards_passed = check_bounds_only_guards(range_bounds, session, h1_df)
+
     # Route trading mode
     mode = route_trading_mode(
         ai_direction=ai_dir,
@@ -261,6 +269,7 @@ def determine_action(setups, ai_analysis, regime, *,
         regime=regime,
         session=session,
         range_bounds=range_bounds,
+        guards_passed=guards_passed,
     )
 
     if mode.mode == "trending":

@@ -13,6 +13,7 @@ import polars as pl
 
 from smc.strategy.range_trader import (
     _count_boundary_touches,
+    check_bounds_only_guards,
     check_range_guards,
     get_last_guards_diagnostic,
 )
@@ -448,3 +449,43 @@ class TestGuardsDiagnostic:
         assert diag["is_asian_profile"] is True
         assert diag["min_width_required"] == 400.0
         assert diag["min_duration_required"] == 8
+
+
+class TestCheckBoundsOnlyGuards:
+    """Round 4.6-E: bounds-level subset used by live_demo pre mode_router."""
+
+    def test_asian_bounds_pass(self) -> None:
+        bounds = _asian_bounds(width_points=500.0, duration_bars=20)
+        df = _make_touching_df(bounds, n_upper=2, n_lower=2, n_mid=5)
+        assert check_bounds_only_guards(bounds, "ASIAN_CORE", df) is True
+
+    def test_london_width_fail(self) -> None:
+        bounds = _asian_bounds(width_points=500.0, duration_bars=20)
+        df = _make_touching_df(bounds, n_upper=2, n_lower=2, n_mid=5)
+        # width 500 < London 800
+        assert check_bounds_only_guards(bounds, "LONDON", df) is False
+
+    def test_touches_fail(self) -> None:
+        bounds = _asian_bounds(width_points=500.0, duration_bars=20)
+        df = _make_touching_df(bounds, n_upper=1, n_lower=0, n_mid=5)  # only 1 touch
+        assert check_bounds_only_guards(bounds, "ASIAN_CORE", df) is False
+
+    def test_duration_fail(self) -> None:
+        bounds = _asian_bounds(width_points=500.0, duration_bars=5)  # <8 Asian
+        df = _make_touching_df(bounds, n_upper=2, n_lower=2, n_mid=5)
+        assert check_bounds_only_guards(bounds, "ASIAN_CORE", df) is False
+
+    def test_ignores_rr_setup_level_gate(self) -> None:
+        """Unlike check_range_guards, no setup/rr required — fires on bounds alone."""
+        bounds = _asian_bounds(width_points=500.0, duration_bars=20)
+        df = _make_touching_df(bounds, n_upper=2, n_lower=2, n_mid=5)
+        # No setup arg at all, must not crash or demand one
+        assert check_bounds_only_guards(bounds, "ASIAN_CORE", df) is True
+
+    def test_diagnostic_stage_flag(self) -> None:
+        bounds = _asian_bounds(width_points=500.0, duration_bars=20)
+        df = _make_touching_df(bounds, n_upper=2, n_lower=2, n_mid=5)
+        check_bounds_only_guards(bounds, "ASIAN_CORE", df)
+        diag = get_last_guards_diagnostic()
+        assert diag["stage"] == "bounds_only"
+        assert diag["rr_pass"] is None  # deferred to setup-level check

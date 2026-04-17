@@ -23,7 +23,12 @@ from smc.strategy.entry_trigger import _compute_sl_buffer, _find_choch_in_zone
 from smc.strategy.range_types import RangeBounds, RangeSetup
 from smc.strategy.types import TradeZone
 
-__all__ = ["RangeTrader", "check_range_guards", "get_last_guards_diagnostic"]
+__all__ = [
+    "RangeTrader",
+    "check_range_guards",
+    "check_bounds_only_guards",
+    "get_last_guards_diagnostic",
+]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -82,6 +87,58 @@ _LAST_GUARDS_CHECK: dict[str, object] = {}
 def get_last_guards_diagnostic() -> dict[str, object]:
     """Return a copy of the most recent check_range_guards trace."""
     return dict(_LAST_GUARDS_CHECK)
+
+
+def check_bounds_only_guards(
+    bounds: RangeBounds,
+    session: str,
+    h1_df: pl.DataFrame,
+) -> bool:
+    """Round 4.6-E: bounds-level subset of check_range_guards (no setup yet).
+
+    Used in live_demo BEFORE route_trading_mode so `guards_passed` can be
+    supplied to mode_router without having generated setups. Covers Guards
+    1 (width), 3 (touches), 4 (duration) — the bounds-dependent checks.
+    Guard 2 (RR) and Guard 5 (lot) are setup/execution-level and remain
+    enforced downstream in _build_setup / _determine_ranging.
+
+    Same session-aware thresholds as check_range_guards (Round 4.6-B).
+    Writes its own trace into _LAST_GUARDS_CHECK so the existing diagnostic
+    surface keeps working even before a setup exists.
+    """
+    global _LAST_GUARDS_CHECK
+
+    is_asian = session in _ASIAN_SESSIONS
+    min_width = _GUARD_WIDTH_MIN_ASIAN if is_asian else _GUARD_WIDTH_MIN_DEFAULT
+    min_duration = (
+        _GUARD_DURATION_MIN_ASIAN if is_asian else _GUARD_DURATION_MIN_DEFAULT
+    )
+
+    width_pass = bounds.width_points >= min_width
+    touches = _count_boundary_touches(h1_df, bounds, tolerance_ratio=0.05)
+    touches_pass = touches >= 2
+    duration_pass = bounds.duration_bars >= min_duration
+
+    all_passed = width_pass and touches_pass and duration_pass
+
+    _LAST_GUARDS_CHECK = {
+        "stage": "bounds_only",
+        "session": session,
+        "is_asian_profile": is_asian,
+        "min_width_required": min_width,
+        "min_duration_required": min_duration,
+        "width_points": bounds.width_points,
+        "width_pass": width_pass,
+        "touches_count": touches,
+        "touches_pass": touches_pass,
+        "duration_bars": bounds.duration_bars,
+        "duration_pass": duration_pass,
+        # rr + lot deferred to setup-level check_range_guards
+        "rr_pass": None,
+        "all_passed": all_passed,
+    }
+
+    return all_passed
 
 
 def check_range_guards(
