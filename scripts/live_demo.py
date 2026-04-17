@@ -16,10 +16,40 @@ import os
 import time
 import signal
 import json
+import atexit
 
 os.environ["PYTHONUTF8"] = "1"
 os.environ["PYTHONIOENCODING"] = "utf-8"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+# Round 4.6-L: single-instance guard (VPS found 2 live_demo.py processes running
+# concurrently, causing journal append race and quota state file clobber).
+# Atomic PID file — O_CREAT|O_EXCL fails if another instance already started.
+_PID_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "live_demo.pid")
+_PID_FILE = os.path.abspath(_PID_FILE)
+
+
+def _ensure_single_instance():
+    os.makedirs(os.path.dirname(_PID_FILE), exist_ok=True)
+    try:
+        fd = os.open(_PID_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode("utf-8"))
+        os.close(fd)
+        atexit.register(lambda: os.path.exists(_PID_FILE) and os.remove(_PID_FILE))
+    except FileExistsError:
+        try:
+            with open(_PID_FILE, "r", encoding="utf-8") as f:
+                existing = f.read().strip()
+        except OSError:
+            existing = "unknown"
+        sys.stderr.write(
+            f"[4.6-L] live_demo.py already running (PID {existing}). "
+            f"If stale, delete {_PID_FILE} and restart. Exiting.\n"
+        )
+        sys.exit(1)
+
+
+_ensure_single_instance()
 
 import MetaTrader5 as mt5
 import polars as pl
