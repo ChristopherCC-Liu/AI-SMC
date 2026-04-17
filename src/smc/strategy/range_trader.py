@@ -235,6 +235,40 @@ def _count_boundary_touches(
     return touches
 
 
+def _soft_reversal_3bar(
+    m15_snapshot: SMCSnapshot,
+    direction: str,
+) -> bool:
+    """Round 4.6-U: soft reversal fallback when strict M15 CHoCH absent.
+
+    In trending/high-vol market, structural CHoCH often lags. Accept **BOS**
+    (break-of-structure) in opposite direction as soft reversal signal:
+    - SHORT setup: latest bearish structure_break (any type) OR latest swing
+      point is a high (suggesting potential reversal from up-trend)
+    - LONG setup: latest bullish structure_break OR latest swing is a low
+
+    Tradeoff: lower quality vs no trades in ranging market.
+    """
+    target = "bearish" if direction == "short" else "bullish"
+
+    # Check 1: any recent structure_break (BOS or CHoCH) in target direction
+    for brk in reversed(m15_snapshot.structure_breaks):
+        if brk.direction == target:
+            return True
+        # stop after first opposite break (trend still intact)
+        break
+
+    # Check 2: latest swing point type aligned with reversal intent
+    if m15_snapshot.swing_points:
+        latest = m15_snapshot.swing_points[-1]
+        if direction == "short" and latest.swing_type == "high":
+            return True
+        if direction == "long" and latest.swing_type == "low":
+            return True
+
+    return False
+
+
 # ---------------------------------------------------------------------------
 # RangeTrader class
 # ---------------------------------------------------------------------------
@@ -632,8 +666,12 @@ class RangeTrader:
             )
 
         # Require M15 CHoCH confirmation in the synthetic zone
+        # Round 4.6-U (USER 解决到开仓): fallback "3-bar soft reversal" when
+        # strict CHoCH missing. In high-volatility / trending market 结构性
+        # CHoCH 常缺, but 3-bar momentum reversal 可近似表达 reversal intent.
         if not _find_choch_in_zone(m15_snapshot, zone):
-            return None
+            if not _soft_reversal_3bar(m15_snapshot, direction):
+                return None
 
         # SL: boundary +/- ATR-adaptive buffer
         sl_buffer = _compute_sl_buffer(h1_atr) * XAUUSD_POINT_SIZE
