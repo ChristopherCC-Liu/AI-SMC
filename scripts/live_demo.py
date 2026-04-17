@@ -130,7 +130,7 @@ def run_ai_analysis(data):
     # Try AI debate (Claude CLI)
     try:
         from smc.ai.direction_engine import DirectionEngine
-        engine = DirectionEngine()
+        engine = DirectionEngine(cache_ttl_hours=1)  # Round 4.6-Q (USER): 4h→1h
         h4_df = data.get(Timeframe.H4)
         ai_dir = engine.get_direction(h4_df=h4_df)
         if ai_dir.source != "neutral_default":
