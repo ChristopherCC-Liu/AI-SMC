@@ -283,7 +283,7 @@ def determine_action(setups, ai_analysis, regime, *,
     if mode.mode == "ranging" and mode.range_bounds is not None:
         # Round 4.5 hotfix: CircuitBreaker 扩展到全 Asian (UTC 0-8)
         # 用户激活 ASIAN_CORE ranging 但接受风险 → 需要 breaker 保险
-        if session in ("ASIAN_CORE", "ASIAN_LONDON_TRANSITION") and asian_range_quota is not None:
+        if session in _ASIAN_SESSIONS and asian_range_quota is not None:
             if phase1a_breaker is not None and phase1a_breaker.is_tripped():
                 return "HOLD", f"[ASIAN_BREAKER_TRIPPED] Asian ranging disabled | {session}", None, mode
             if asian_range_quota.is_exhausted_today(datetime.now(tz=timezone.utc)):
@@ -497,7 +497,7 @@ def main():
                 asian_range_quota=asian_range_quota,
                 phase1a_breaker=phase1a_breaker,
             )
-            if action.startswith("RANGE") and session in ("ASIAN_CORE", "ASIAN_LONDON_TRANSITION"):
+            if action.startswith("RANGE") and session in _ASIAN_SESSIONS:
                 asian_range_quota = asian_range_quota.record_open(datetime.now(tz=timezone.utc))
             # TODO: When paper/live trade-close tracking is implemented, call
             # phase1a_breaker.record_trade_close(pnl_usd) after each
