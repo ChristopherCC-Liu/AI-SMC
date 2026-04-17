@@ -77,7 +77,16 @@ def route_trading_mode(
         )
 
     # Priority 2: range detected + 5 guards pass + active session → ranging
-    if range_bounds is not None and guards_passed and session in _RANGING_SESSIONS:
+    # Round 4.6-R (USER CATCH 4/17 14:00+ rally miss): regime=trending 时 ranging
+    # mode 会抓顶/抓底逆势 (等 M15 CHoCH 反转信号 = 逆 trend 死等). 退回 v1_passthrough
+    # 让 HTF bias + confluence 主导 (v1 path 能 follow trend direction).
+    # ASIAN_CORE 保留例外 (Asian 低波反转力强, regime trending 可能假信号).
+    if (
+        range_bounds is not None
+        and guards_passed
+        and session in _RANGING_SESSIONS
+        and (regime != "trending" or session == "ASIAN_CORE")
+    ):
         return TradingMode(
             mode="ranging",
             reason=(
