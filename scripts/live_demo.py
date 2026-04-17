@@ -32,7 +32,11 @@ from smc.strategy.regime import classify_regime
 from smc.strategy.range_trader import RangeTrader
 from smc.strategy.breakout_detector import BreakoutDetector
 from smc.strategy.mode_router import route_trading_mode
-from smc.strategy.range_trader import _ASIAN_SESSIONS, check_bounds_only_guards
+from smc.strategy.range_trader import (
+    _ASIAN_SESSIONS,
+    check_bounds_only_guards,
+    check_range_guards,
+)
 from smc.strategy.range_quota import AsianRangeQuota
 from smc.strategy.phase1a_circuit_breaker import Phase1aCircuitBreaker
 from smc.monitor.timing import next_bar_close
@@ -207,11 +211,13 @@ def _determine_v1_passthrough(setups, session):
 
 
 def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
-                       range_trader, breakout_detector, session=""):
+                       range_trader, breakout_detector, session="", h1_df=None):
     """Ranging mode: breakout guard + mean-reversion setups at range boundaries.
 
     Returns (action, reason, best_setup). Round 4.6-F: session kwarg so
     generate_range_setups can apply Asian-wide boundary_pct (30%).
+    Round 4.6-K: h1_df enables setup-level check_range_guards enforcement
+    (RR>=1.2, touches>=2) — closing the 4.6-E "deferred" TODO.
     """
     # Breakout invalidation — if price breaks the range, hold and wait
     breakout = breakout_detector.check_breakout(price, range_bounds, h1_atr)
@@ -222,6 +228,15 @@ def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
         h1_snapshot, m15_snapshot, price, range_bounds, h1_atr,
         session=session,
     )
+
+    # Round 4.6-K: setup-level guards (RR>=1.2, touches>=2) enforcement.
+    # Was "deferred" in 4.6-E but never wired into production path.
+    if range_setups and h1_df is not None:
+        range_setups = tuple(
+            s for s in range_setups
+            if check_range_guards(range_bounds, s, session, h1_df)
+        )
+
     if range_setups:
         best = max(range_setups, key=lambda s: s.confidence)
         action = "RANGE BUY" if best.direction == "long" else "RANGE SELL"
@@ -290,7 +305,7 @@ def determine_action(setups, ai_analysis, regime, *,
                 return "HOLD", f"[COOLDOWN] Asian ranging already used today | {session}", None, mode
         action, reason, best = _determine_ranging(
             price, mode.range_bounds, h1_snapshot, m15_snapshot, h1_atr,
-            range_trader, breakout_detector, session=session,
+            range_trader, breakout_detector, session=session, h1_df=h1_df,
         )
         return action, reason, best, mode
 
