@@ -12,7 +12,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import polars as pl
 import pytest
@@ -183,6 +183,8 @@ class TestDetectRangeOBBoundaries:
         expected_width = (2370.00 - 2348.00) / XAUUSD_POINT_SIZE
         assert bounds.width_points == pytest.approx(expected_width, rel=1e-3)
         assert bounds.midpoint == pytest.approx((2370.00 + 2348.00) / 2.0, rel=1e-3)
+        # Round 4.5.1: duration_bars must be populated from OB ts_start, not 0
+        assert bounds.duration_bars > 0
 
     def test_no_range_without_bearish_ob(self, trader: RangeTrader) -> None:
         """Only bullish OBs present — no upper boundary → None."""
@@ -219,6 +221,8 @@ class TestDetectRangeSwingExtremes:
         assert bounds.upper == 2368.00
         assert bounds.lower == 2348.00
         assert bounds.confidence == 0.6
+        # Round 4.5.1: duration_bars must be populated from swing ts, not 0
+        assert bounds.duration_bars > 0
 
     def test_no_range_with_one_swing(self, trader: RangeTrader) -> None:
         """Fewer than 2 swing points → None."""
@@ -610,3 +614,77 @@ class TestMethodDDonchian:
         bounds = trader.detect_range(h1_df, snapshot)
 
         assert bounds is None
+
+
+# ---------------------------------------------------------------------------
+# Round 4.5.1: Method A/B duration_bars now computed from earliest boundary ts
+# ---------------------------------------------------------------------------
+
+
+class TestMethodABDurationBars:
+    """Regression: before Round 4.5.1, Method A/B duration_bars defaulted to 0,
+    causing Guard 4 (>=12) to silently reject every A/B-sourced range.
+    """
+
+    def test_method_a_recent_obs_yield_low_duration(
+        self, trader: RangeTrader
+    ) -> None:
+        """OBs formed <12h before now → duration_bars < 12 (would fail Guard 4)."""
+        now = datetime.now(tz=timezone.utc)
+        recent = now - timedelta(hours=5)
+        snapshot = _make_snapshot(
+            order_blocks=(
+                OrderBlock(
+                    ts_start=recent, ts_end=recent, high=2370.00, low=2365.00,
+                    ob_type="bearish", timeframe=Timeframe.H1,
+                ),
+                OrderBlock(
+                    ts_start=recent, ts_end=recent, high=2352.00, low=2348.00,
+                    ob_type="bullish", timeframe=Timeframe.H1,
+                ),
+            ),
+        )
+        bounds = trader.detect_range(_empty_h1_df(), snapshot)
+        assert bounds is not None
+        assert bounds.source == "ob_boundaries"
+        assert bounds.duration_bars < 12  # would fail Guard 4
+
+    def test_method_a_old_obs_yield_high_duration(
+        self, trader: RangeTrader
+    ) -> None:
+        """OBs formed 24h before now → duration_bars >= 12 (passes Guard 4)."""
+        now = datetime.now(tz=timezone.utc)
+        old = now - timedelta(hours=24)
+        snapshot = _make_snapshot(
+            order_blocks=(
+                OrderBlock(
+                    ts_start=old, ts_end=old, high=2370.00, low=2365.00,
+                    ob_type="bearish", timeframe=Timeframe.H1,
+                ),
+                OrderBlock(
+                    ts_start=old, ts_end=old, high=2352.00, low=2348.00,
+                    ob_type="bullish", timeframe=Timeframe.H1,
+                ),
+            ),
+        )
+        bounds = trader.detect_range(_empty_h1_df(), snapshot)
+        assert bounds is not None
+        assert bounds.source == "ob_boundaries"
+        assert bounds.duration_bars >= 12  # passes Guard 4
+
+    def test_method_b_swing_duration_bars_populated(
+        self, trader: RangeTrader
+    ) -> None:
+        """Swing-sourced bounds populate duration_bars from earliest swing ts."""
+        now = datetime.now(tz=timezone.utc)
+        old = now - timedelta(hours=20)
+        snapshot = _make_snapshot(
+            swing_points=(
+                SwingPoint(ts=old, price=2368.00, swing_type="high", strength=5),
+                SwingPoint(ts=old, price=2348.00, swing_type="low", strength=5),
+            ),
+        )
+        bounds = trader.detect_range(_empty_h1_df(), snapshot)
+        assert bounds is not None
+        assert bounds.source == "swing_extremes"
+        assert bounds.duration_bars >= 12

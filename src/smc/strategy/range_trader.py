@@ -35,6 +35,23 @@ _OB_BOUNDARY_CONFIDENCE = 0.8
 _SWING_EXTREME_CONFIDENCE = 0.6
 _DONCHIAN_CONFIDENCE = 0.5  # Round 4.5: lowest trust — pure statistical fallback
 _DONCHIAN_LOOKBACK_BARS = 24  # 24 H1 bars = 1 trading day
+_SECONDS_PER_H1_BAR = 3600
+
+
+def _h1_bars_between(earlier: datetime, later: datetime) -> int:
+    """Round 4.5.1: approximate H1 bars elapsed between two timestamps.
+
+    Used by Method A/B to populate RangeBounds.duration_bars so Guard 4 (>=12)
+    can evaluate actual range age instead of seeing 0 (silent reject).
+    """
+    if earlier.tzinfo is None:
+        earlier = earlier.replace(tzinfo=timezone.utc)
+    if later.tzinfo is None:
+        later = later.replace(tzinfo=timezone.utc)
+    delta_seconds = (later - earlier).total_seconds()
+    if delta_seconds <= 0:
+        return 0
+    return int(delta_seconds // _SECONDS_PER_H1_BAR)
 
 
 # ---------------------------------------------------------------------------
@@ -220,12 +237,18 @@ class RangeTrader:
         if upper <= lower:
             return None
 
+        # Round 4.5.1 fix: compute duration from earliest boundary-defining OB.
+        # Previously defaulted to 0 → Guard 4 (>=12) silently rejected Method A.
+        earliest_ts = min(ob.ts_start for ob in (*bearish_obs, *bullish_obs))
+        duration_bars = _h1_bars_between(earliest_ts, now)
+
         return self._validate_bounds(
             upper=upper,
             lower=lower,
             source="ob_boundaries",
             confidence=_OB_BOUNDARY_CONFIDENCE,
             now=now,
+            duration_bars=duration_bars,
         )
 
     def _detect_from_swing_extremes(
@@ -253,12 +276,18 @@ class RangeTrader:
         if upper <= lower:
             return None
 
+        # Round 4.5.1 fix: compute duration from earliest swing defining bounds.
+        # Previously defaulted to 0 → Guard 4 (>=12) silently rejected Method B.
+        earliest_ts = min(s.ts for s in (*highs, *lows))
+        duration_bars = _h1_bars_between(earliest_ts, now)
+
         return self._validate_bounds(
             upper=upper,
             lower=lower,
             source="swing_extremes",
             confidence=_SWING_EXTREME_CONFIDENCE,
             now=now,
+            duration_bars=duration_bars,
         )
 
     def _detect_from_donchian_channel(
