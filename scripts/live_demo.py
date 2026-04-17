@@ -354,7 +354,7 @@ def determine_action(setups, ai_analysis, regime, *,
 
 
 def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
-               best_setup, *, mode_decision=None, range_trader=None):
+               best_setup, *, mode_decision=None, range_trader=None, aggregator=None):
     """Save live state for dashboard display (dual-mode aware)."""
     state = {
         "cycle": cycle,
@@ -391,6 +391,11 @@ def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
             "guards": get_last_guards_diagnostic(),
             "setups": dict(range_trader._last_setups_diagnostic or {}),
         }
+
+    # Round 4.6-S-diag: expose aggregator (v1 pipeline) stage-by-stage rejection
+    # so dashboard/live_state 能 surface "为什么 v1_passthrough 0 setups".
+    if aggregator is not None and hasattr(aggregator, "_last_setup_diagnostic"):
+        state["smc_diagnostic"] = dict(aggregator._last_setup_diagnostic or {})
 
     if best_setup:
         # Range setups use .direction/.trigger/.confidence directly (RangeSetup)
@@ -654,7 +659,8 @@ def main():
 
             # 8. Save state for dashboard (dual-mode aware)
             save_state(cycle, price, action, reason, ai_analysis, regime, setups,
-                       best, mode_decision=mode, range_trader=range_trader)
+                       best, mode_decision=mode, range_trader=range_trader,
+                       aggregator=aggregator)
 
         except Exception as exc:
             print(f"  ERROR: {exc}")

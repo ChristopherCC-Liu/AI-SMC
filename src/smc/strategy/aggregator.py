@@ -194,7 +194,19 @@ class MultiTimeframeAggregator:
 
         bias = compute_htf_bias(d1_snap, h4_snap)
 
+        # Round 4.6-S-diag (USER CATCH: 系统不开单): measure-first instrumentation.
+        # Records per-call diagnostic so live_demo / dashboard can surface why
+        # aggregator returned 0 setups (htf_bias neutral? regime filter? direction filter?).
+        self._last_setup_diagnostic = {
+            "htf_bias_direction": bias.direction,
+            "htf_bias_confidence": round(bias.confidence, 3),
+            "htf_bias_rationale": bias.rationale,
+            "stage_reject": None,
+            "final_count": 0,
+        }
+
         if bias.direction == "neutral":
+            self._last_setup_diagnostic["stage_reject"] = "htf_bias_neutral"
             return ()
 
         # Step 2b: Regime classification — cache → AI → ATR fallback
@@ -214,27 +226,33 @@ class MultiTimeframeAggregator:
             regime = classify_regime(data.get(Timeframe.D1))
             is_tier1 = bias.rationale.startswith("Tier 1:")
             if regime == "ranging" and not is_tier1:
+                self._last_setup_diagnostic["stage_reject"] = "legacy_ranging_gate"
                 return ()
 
         # Sprint 6: Direction filter — block counter-trend trades
         bias_dir_map = {"bullish": "long", "bearish": "short"}
         trade_direction = bias_dir_map.get(bias.direction)
         if trade_direction and trade_direction not in regime_params.allowed_directions:
+            self._last_setup_diagnostic["stage_reject"] = f"direction_filter_{trade_direction}_not_in_{regime_params.allowed_directions}"
             return ()
 
         # Step 3: Scan H1 zones
         h1_snap = snapshots.get(Timeframe.H1)
         if h1_snap is None:
+            self._last_setup_diagnostic["stage_reject"] = "h1_snapshot_missing"
             return ()
 
         zones = scan_zones(h1_snap, bias)
         if not zones:
+            self._last_setup_diagnostic["stage_reject"] = "no_h1_zones"
             return ()
 
         # Step 4: Check M15 entries for each zone
         m15_snap = snapshots.get(Timeframe.M15)
         if m15_snap is None:
+            self._last_setup_diagnostic["stage_reject"] = "m15_snapshot_missing"
             return ()
+        self._last_setup_diagnostic["h1_zones_count"] = len(zones)
 
         # Sprint 4: Compute H1 ATR(14) for adaptive SL buffer
         h1_atr = self._compute_h1_atr(data.get(Timeframe.H1))
@@ -298,6 +316,11 @@ class MultiTimeframeAggregator:
         # Step 6: Sort by confluence score descending, cap by regime max_concurrent
         sorted_setups = sorted(setups, key=lambda s: s.confluence_score, reverse=True)
         capped = sorted_setups[:regime_params.max_concurrent]
+        if not capped:
+            self._last_setup_diagnostic["stage_reject"] = (
+                f"all_entries_failed (zones={len(zones)}, min_conf={min_confluence:.2f})"
+            )
+        self._last_setup_diagnostic["final_count"] = len(capped)
         return tuple(capped)
 
     @staticmethod
