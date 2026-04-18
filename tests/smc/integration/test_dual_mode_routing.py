@@ -36,7 +36,11 @@ class TestDualModeRouting:
         )
         assert mode.mode == "v1_passthrough"
 
-    # --- Case 2: ASIAN_CORE + range + guards pass → still v1_passthrough (session blocks ranging) ---
+    # --- Case 2: ASIAN_CORE + range + guards pass → ranging (Round 4.5 hotfix)
+    # Pre-4.5 behavior: ASIAN_CORE session blocked ranging mode.
+    # Round 4.5 hotfix (commit 06868f7) added ASIAN_CORE to ranging_sessions —
+    # "Asian 低波反转力强" per user directive. This test was left stale.
+    # Audit R2 fixup: aligning assertion with shipped behavior.
     def test_asian_core_with_range_blocked(self):
         mode = route_trading_mode(
             ai_direction="neutral",
@@ -46,7 +50,7 @@ class TestDualModeRouting:
             range_bounds=make_bounds(),
             guards_passed=True,
         )
-        assert mode.mode == "v1_passthrough"
+        assert mode.mode == "ranging"
 
     # --- Case 3: ASIAN_LONDON_TRANSITION + range + guards pass → ranging ---
     def test_asian_london_transition_ranging(self):

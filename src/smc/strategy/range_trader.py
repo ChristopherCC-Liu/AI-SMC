@@ -309,34 +309,44 @@ def _count_boundary_touches(
     return touches
 
 
+_SOFT_REVERSAL_SWING_WINDOW: int = 3
+_SOFT_REVERSAL_RECENCY: timedelta = timedelta(minutes=30)
+
+
 def _soft_reversal_3bar(
     m15_snapshot: SMCSnapshot,
     direction: str,
 ) -> bool:
     """Soft reversal fallback when strict M15 CHoCH is absent.
 
-    Require structure break (Check 1) OR recent swing match (Check 2);
+    Require structure break (Check 1) OR recent + fresh swing match (Check 2);
     no structure → reject.
 
     Round 4.6-U + V: widened swing look-back to last 5 points.
     Round 5 T0 (P0-9): removed unconditional Check 3 `return True` — that
     bypass allowed structureless setups through with no market evidence.
+    Audit R2 S1: tightened Check 2 — window narrowed to last 3 swings AND
+    matching swing must land within 30 min (≤2 M15 bars) of snapshot ts.
+    The prior `[-5:]` window with no recency check was near-100% pass
+    because any "low" in recent history satisfied a long-direction soft
+    reversal regardless of freshness.
     """
     target = "bearish" if direction == "short" else "bullish"
 
-    # Check 1: any recent structure_break in target direction
+    # Check 1: most recent structure_break must match target direction.
     for brk in reversed(m15_snapshot.structure_breaks):
         if brk.direction == target:
             return True
         break
 
-    # Check 2 (4.6-V widened): any swing within last 5 aligned with direction
+    # Check 2 (R2 S1): swing must be in last N points AND fresh (ts-recency).
     target_swing = "high" if direction == "short" else "low"
-    for sw in reversed(m15_snapshot.swing_points[-5:]):
-        if sw.swing_type == target_swing:
+    recency_cutoff = m15_snapshot.ts - _SOFT_REVERSAL_RECENCY
+    for sw in reversed(m15_snapshot.swing_points[-_SOFT_REVERSAL_SWING_WINDOW:]):
+        if sw.swing_type == target_swing and sw.ts >= recency_cutoff:
             return True
 
-    # No structure break and no matching swing → reject (P0-9 fix).
+    # No structure break and no fresh matching swing → reject (P0-9 fix).
     return False
 
 

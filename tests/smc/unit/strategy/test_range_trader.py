@@ -26,7 +26,12 @@ from smc.smc_core.types import (
     StructureBreak,
     SwingPoint,
 )
-from smc.strategy.range_trader import RangeTrader
+from smc.strategy.range_trader import (
+    _SOFT_REVERSAL_RECENCY,
+    _SOFT_REVERSAL_SWING_WINDOW,
+    RangeTrader,
+    _soft_reversal_3bar,
+)
 from smc.strategy.range_types import RangeBounds, RangeSetup
 
 # ---------------------------------------------------------------------------
@@ -43,9 +48,10 @@ def _make_snapshot(
     swing_points: tuple[SwingPoint, ...] = (),
     order_blocks: tuple[OrderBlock, ...] = (),
     structure_breaks: tuple[StructureBreak, ...] = (),
+    ts: datetime = _BASE_TS,
 ) -> SMCSnapshot:
     return SMCSnapshot(
-        ts=_BASE_TS,
+        ts=ts,
         timeframe=timeframe,
         swing_points=swing_points,
         order_blocks=order_blocks,
@@ -1033,6 +1039,244 @@ class TestCheck3ReturnsFalseWithoutStructure:
         diag = trader._last_setups_diagnostic
         assert diag["near_lower"] is True
         # long_setup_built depends on RR — just assert no exception and near_lower ok
+
+
+# ---------------------------------------------------------------------------
+# Audit R2 S1: _soft_reversal_3bar Check 2 tightened
+# ---------------------------------------------------------------------------
+
+
+class TestSoftReversalCheck2Tightening:
+    """R2 S1: Check 2 must use last N swings AND ts-recency (≤30 min).
+
+    Before: `swing_points[-5:]` with no ts filter → near-100% pass because
+    any aligned swing in recent history satisfied a soft reversal intent.
+    After: window narrowed to `_SOFT_REVERSAL_SWING_WINDOW` AND matching
+    swing must fall within `_SOFT_REVERSAL_RECENCY` of snapshot.ts.
+    """
+
+    def test_constants_match_intended_bounds(self) -> None:
+        """Window and recency should match 'soft 3-bar reversal' semantics."""
+        assert _SOFT_REVERSAL_SWING_WINDOW == 3
+        # 30 min == 2 M15 bars — tight enough to mean "current", loose enough
+        # to absorb 1-bar swing-confirmation latency.
+        assert _SOFT_REVERSAL_RECENCY == timedelta(minutes=30)
+
+    def test_fresh_matching_swing_in_window_passes_long(self) -> None:
+        """Matching low within 30 min and within -3 window → pass."""
+        snap_ts = _BASE_TS + timedelta(hours=1)
+        snapshot = _make_snapshot(
+            timeframe=Timeframe.M15,
+            ts=snap_ts,
+            swing_points=(
+                SwingPoint(
+                    ts=snap_ts - timedelta(minutes=15),
+                    price=2349.00,
+                    swing_type="low",
+                    strength=3,
+                ),
+            ),
+        )
+        assert _soft_reversal_3bar(snapshot, direction="long") is True
+
+    def test_fresh_matching_swing_in_window_passes_short(self) -> None:
+        """Matching high within 30 min and within -3 window → pass."""
+        snap_ts = _BASE_TS + timedelta(hours=2)
+        snapshot = _make_snapshot(
+            timeframe=Timeframe.M15,
+            ts=snap_ts,
+            swing_points=(
+                SwingPoint(
+                    ts=snap_ts - timedelta(minutes=10),
+                    price=2369.00,
+                    swing_type="high",
+                    strength=3,
+                ),
+            ),
+        )
+        assert _soft_reversal_3bar(snapshot, direction="short") is True
+
+    def test_stale_matching_swing_rejected(self) -> None:
+        """Matching low but older than 30 min → reject despite swing match."""
+        snap_ts = _BASE_TS + timedelta(hours=5)
+        snapshot = _make_snapshot(
+            timeframe=Timeframe.M15,
+            ts=snap_ts,
+            swing_points=(
+                SwingPoint(
+                    ts=snap_ts - timedelta(minutes=45),
+                    price=2349.00,
+                    swing_type="low",
+                    strength=3,
+                ),
+            ),
+        )
+        # Only the ts-recency gate fails; type matches direction. Must reject.
+        assert _soft_reversal_3bar(snapshot, direction="long") is False
+
+    def test_matching_swing_outside_window_rejected(self) -> None:
+        """Matching low exists but sits outside last -3 swings → reject.
+
+        Even though the match is fresh (same ts as snapshot), it is the 4th
+        newest swing (position -4) and must not be considered under the
+        tightened window.
+        """
+        snap_ts = _BASE_TS + timedelta(hours=3)
+        snapshot = _make_snapshot(
+            timeframe=Timeframe.M15,
+            ts=snap_ts,
+            swing_points=(
+                # Position -4 relative to end: matching "low" (fresh ts)
+                SwingPoint(ts=snap_ts, price=2349.00, swing_type="low", strength=3),
+                # Positions -3..-1: all "high", non-matching for long direction
+                SwingPoint(ts=snap_ts, price=2360.00, swing_type="high", strength=3),
+                SwingPoint(ts=snap_ts, price=2362.00, swing_type="high", strength=3),
+                SwingPoint(ts=snap_ts, price=2364.00, swing_type="high", strength=3),
+            ),
+        )
+        assert _soft_reversal_3bar(snapshot, direction="long") is False
+
+    def test_recency_boundary_exactly_at_cutoff_passes(self) -> None:
+        """sw.ts == snapshot.ts - recency → still counted (>= cutoff)."""
+        snap_ts = _BASE_TS + timedelta(hours=4)
+        snapshot = _make_snapshot(
+            timeframe=Timeframe.M15,
+            ts=snap_ts,
+            swing_points=(
+                SwingPoint(
+                    ts=snap_ts - _SOFT_REVERSAL_RECENCY,
+                    price=2349.00,
+                    swing_type="low",
+                    strength=3,
+                ),
+            ),
+        )
+        assert _soft_reversal_3bar(snapshot, direction="long") is True
+
+    def test_check2_rejects_stale_matching_swing_31min(self) -> None:
+        """sw.ts = snapshot.ts − 31min → JUST outside 30-min window → reject.
+
+        Threshold-locking test (Lead DECISION + decision-reviewer R2 S1 REVIEW).
+        Paired with test_check2_accepts_fresh_matching_swing_29min to bracket
+        the 30-min constant at ±1 min resolution so future edits can't silently
+        drift _SOFT_REVERSAL_RECENCY without failing a test.
+        """
+        snap_ts = _BASE_TS + timedelta(hours=9)
+        snapshot = _make_snapshot(
+            timeframe=Timeframe.M15,
+            ts=snap_ts,
+            swing_points=(
+                SwingPoint(
+                    ts=snap_ts - timedelta(minutes=31),
+                    price=2349.00,
+                    swing_type="low",
+                    strength=3,
+                ),
+            ),
+        )
+        assert _soft_reversal_3bar(snapshot, direction="long") is False
+
+    def test_check2_accepts_fresh_matching_swing_29min(self) -> None:
+        """sw.ts = snapshot.ts − 29min → JUST inside 30-min window → accept.
+
+        Threshold-locking test (Lead DECISION + decision-reviewer R2 S1 REVIEW).
+        Paired with test_check2_rejects_stale_matching_swing_31min — together
+        they anchor the 30-min constant so any narrowing (<29) or widening
+        (>31) breaks at least one test.
+        """
+        snap_ts = _BASE_TS + timedelta(hours=10)
+        snapshot = _make_snapshot(
+            timeframe=Timeframe.M15,
+            ts=snap_ts,
+            swing_points=(
+                SwingPoint(
+                    ts=snap_ts - timedelta(minutes=29),
+                    price=2349.00,
+                    swing_type="low",
+                    strength=3,
+                ),
+            ),
+        )
+        assert _soft_reversal_3bar(snapshot, direction="long") is True
+
+    def test_structure_break_bypasses_check2(self) -> None:
+        """Check 1 remains authoritative: a matching break passes even with
+        no fresh swing at all.
+
+        Backward compat: tightening Check 2 must not regress the primary
+        structure-break path used by the m15_choch_at_* fixtures.
+        """
+        snap_ts = _BASE_TS + timedelta(hours=6)
+        snapshot = _make_snapshot(
+            timeframe=Timeframe.M15,
+            ts=snap_ts,
+            structure_breaks=(
+                StructureBreak(
+                    ts=snap_ts,
+                    price=2349.00,
+                    break_type="choch",
+                    direction="bullish",
+                    timeframe=Timeframe.M15,
+                ),
+            ),
+            # No swing_points at all → Check 2 can't contribute
+            swing_points=(),
+        )
+        assert _soft_reversal_3bar(snapshot, direction="long") is True
+
+    def test_wrong_direction_swing_rejected_even_when_fresh(self) -> None:
+        """Fresh + in-window swing but type mismatches direction → reject.
+
+        Guards against over-eager widening where direction gate is bypassed
+        under presence of any recent swing.
+        """
+        snap_ts = _BASE_TS + timedelta(hours=7)
+        snapshot = _make_snapshot(
+            timeframe=Timeframe.M15,
+            ts=snap_ts,
+            swing_points=(
+                SwingPoint(
+                    ts=snap_ts - timedelta(minutes=5),
+                    price=2369.00,
+                    swing_type="high",
+                    strength=3,
+                ),
+            ),
+        )
+        # Long wants "low"; only a "high" is available → reject.
+        assert _soft_reversal_3bar(snapshot, direction="long") is False
+
+    def test_latest_structure_break_wrong_direction_blocks_check1(self) -> None:
+        """Check 1 only inspects the most recent break — a wrong-direction
+        break at the tail still aborts Check 1 (`break` after first iter).
+
+        If Check 2 then succeeds on fresh+matching swing, overall still pass.
+        This documents the interaction after tightening.
+        """
+        snap_ts = _BASE_TS + timedelta(hours=8)
+        snapshot = _make_snapshot(
+            timeframe=Timeframe.M15,
+            ts=snap_ts,
+            structure_breaks=(
+                StructureBreak(
+                    ts=snap_ts,
+                    price=2349.00,
+                    break_type="choch",
+                    direction="bearish",  # wrong for long
+                    timeframe=Timeframe.M15,
+                ),
+            ),
+            swing_points=(
+                SwingPoint(
+                    ts=snap_ts - timedelta(minutes=10),
+                    price=2349.00,
+                    swing_type="low",
+                    strength=3,
+                ),
+            ),
+        )
+        # Check 1 rejects (bearish != bullish target), Check 2 accepts → True.
+        assert _soft_reversal_3bar(snapshot, direction="long") is True
 
 
 # ---------------------------------------------------------------------------
