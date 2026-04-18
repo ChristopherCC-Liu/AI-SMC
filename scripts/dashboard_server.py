@@ -168,8 +168,11 @@ def get_daily_digest(
 
     try:
         target = date_cls.fromisoformat(date_str) if date_str else datetime.now(timezone.utc).date()
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid date: {exc}")
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid date format, expected YYYY-MM-DD, got: {date_str!r}",
+        )
     root = _symbol_data_root(symbol)
     digest = build_daily_digest(symbol, target, data_root=root, log_root=ROOT / "logs")
     return JSONResponse(digest)
