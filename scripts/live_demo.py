@@ -102,7 +102,7 @@ _ensure_single_instance()
 
 import MetaTrader5 as mt5
 import polars as pl
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from smc.data.schemas import Timeframe
 from smc.smc_core.detector import SMCDetector
@@ -122,12 +122,22 @@ from smc.strategy.htf_bias import compute_htf_bias
 from smc.monitor.timing import next_bar_close
 from smc.monitor.structured_log import crit as log_crit, warn as log_warn, info as log_info
 from smc.monitor.critical_alerter import alert_critical
+from smc.monitor.state_io import atomic_write_json
 from smc.execution.mt5_send import send_with_retry, compute_dynamic_deviation
+# Round 5 T1 F2+F3: real broker reconciliation + daily halt gating.
+from smc.execution.mt5_positions_adapter import (
+    fetch_broker_positions,
+    fetch_closed_pnl_since,
+)
+from smc.risk.consec_loss_halt import ConsecLossHalt
+from smc.risk.drawdown_guard import DrawdownGuard
 
 JOURNAL_PATH = Path("data/journal/live_trades.jsonl")
 STATE_PATH = Path("data/live_state.json")
 AI_PATH = Path("data/ai_analysis.json")
 PAUSE_FLAG_PATH = Path("data/trading_paused.flag")
+# Round 5 T1 F2: dashboard consumes this atomically every cycle.
+MT5_POSITIONS_PATH = Path("data/mt5_positions.json")
 
 
 def fetch_mt5_data():
@@ -505,6 +515,17 @@ def main():
     print(f"MT5 Connected: {info.login} @ {info.server}")
     print(f"Balance: ${info.balance}")
     print()
+    # Round 5 T1 F1: Telegram startup alert. send_telegram=True pushes if env
+    # SMC_TELEGRAM_BOT_TOKEN / _CHAT_ID are set; otherwise we just get the
+    # [CRIT] stderr line for the VPS `tail -f | grep CRIT` flow.
+    alert_critical(
+        "system_startup",
+        account=info.login,
+        server=info.server,
+        balance=float(info.balance),
+        mt5_execute=os.environ.get("SMC_MT5_EXECUTE", "0"),
+        send_telegram=True,
+    )
 
     detector = SMCDetector(swing_length=10)
     aggregator = MultiTimeframeAggregator(detector=detector, ai_regime_enabled=False)
@@ -527,6 +548,20 @@ def main():
     # Round 4.6-H2: load persisted quota across restarts (防进程重启静默重复开仓)
     asian_range_quota = AsianRangeQuota.load()
     phase1a_breaker = Phase1aCircuitBreaker()
+    # Round 5 T1 F3: consecutive-loss halt (3 losses in a row → halt rest of
+    # UTC day; WIN resets streak). DrawdownGuard is a %-based backstop.
+    consec_halt = ConsecLossHalt()
+    drawdown_guard = DrawdownGuard(max_daily_loss_pct=3.0, max_drawdown_pct=10.0)
+    # peak_balance and daily_pnl are tracked across cycles from reconciled
+    # closes. Initialized from the current MT5 balance at startup so the
+    # guard reasons about post-restart P&L rather than session-zero.
+    _initial_balance = float(info.balance)
+    peak_balance = _initial_balance
+    daily_pnl = 0.0
+    # Last cycle UTC timestamp used to query newly-closed deals. On first
+    # cycle we look back 12h to pick up any closes that happened while the
+    # process was restarting — the magic-filter in the adapter makes this safe.
+    last_reconcile_ts = datetime.now(timezone.utc) - timedelta(hours=12)
 
     while running:
         cycle += 1
@@ -555,6 +590,36 @@ def main():
         if PAUSE_FLAG_PATH.exists():
             log_warn("trading_paused", cycle=cycle, flag=str(PAUSE_FLAG_PATH))
             print(f"  [PAUSED] trading_paused.flag present — skipping cycle {cycle}")
+            continue
+
+        # Round 5 T1 F3: daily-halt gating. Consecutive-loss halt is the
+        # user-visible "亏 3 单自动停" rule; DrawdownGuard is the %-based
+        # backstop (3% daily loss). Either trip blocks new opens until the
+        # next UTC 00:00 rollover (Phase1a/ConsecLoss) or a manual reset.
+        if consec_halt.is_tripped():
+            snap = consec_halt.snapshot()
+            log_warn(
+                "consec_loss_halt_active",
+                cycle=cycle,
+                consec_losses=snap.consec_losses,
+                tripped_at=snap.tripped_at,
+            )
+            print(f"  [HALT] consec-loss halt ({snap.consec_losses} losses) — skipping cycle {cycle}")
+            continue
+        budget = drawdown_guard.check_budget(
+            balance=float(info.balance),
+            peak_balance=peak_balance,
+            daily_pnl=daily_pnl,
+        )
+        if not budget.can_trade:
+            log_warn(
+                "drawdown_guard_block",
+                cycle=cycle,
+                reason=budget.rejection_reason,
+                daily_loss_pct=budget.daily_loss_pct,
+                total_drawdown_pct=budget.total_drawdown_pct,
+            )
+            print(f"  [HALT] drawdown guard: {budget.rejection_reason}")
             continue
 
         try:
@@ -734,6 +799,22 @@ def main():
                             direction=best.direction,
                             volume=position_size_lots,
                         )
+                        # Round 5 T1 F1: Telegram push on successful open so user
+                        # sees "开单" on phone without watching the dashboard.
+                        # This is the happy-path counterpart to the mt5_order_fail
+                        # alert_critical a few lines below.
+                        alert_critical(
+                            "mt5_order_opened",
+                            cycle=cycle,
+                            ticket=_mt5_ticket,
+                            direction=best.direction,
+                            entry=round(best.entry_price, 2),
+                            sl=round(best.stop_loss, 2),
+                            tp=round(best.take_profit, 2),
+                            lots=position_size_lots,
+                            session=session,
+                            send_telegram=True,
+                        )
                     else:
                         _mt5_mode_tag = f"MT5_FAIL_{_mt5_send_retcode}"
                         print(
@@ -815,6 +896,68 @@ def main():
                     }
                     with open(JOURNAL_PATH, "a") as f:
                         f.write(json.dumps(log_entry) + "\n")
+
+            # Round 5 T1 F2: reconcile with real broker state + feed halt.
+            # Writes data/mt5_positions.json for the dashboard Hero card and
+            # records closed-trade P&L into the consec-loss halt + Phase1a
+            # breaker + daily_pnl running total for DrawdownGuard backstop.
+            try:
+                broker_positions = fetch_broker_positions(mt5)
+                atomic_write_json(
+                    MT5_POSITIONS_PATH,
+                    {
+                        "ts": now.isoformat(),
+                        "positions": [p.model_dump(mode="json") for p in broker_positions],
+                    },
+                )
+                closed_deals = fetch_closed_pnl_since(mt5, last_reconcile_ts)
+                for deal in closed_deals:
+                    pnl = float(deal.get("pnl_usd", 0.0))
+                    daily_pnl += pnl
+                    consec_halt.record(pnl)
+                    phase1a_breaker.record_trade_close(pnl)
+                    log_info(
+                        "trade_reconciled",
+                        cycle=cycle,
+                        ticket=deal.get("ticket"),
+                        pnl_usd=pnl,
+                        running_daily_pnl=round(daily_pnl, 2),
+                    )
+                    # Round 5 T1 F1: Telegram on each closed trade so user sees
+                    # realised P&L without opening the dashboard.
+                    alert_critical(
+                        "trade_closed",
+                        cycle=cycle,
+                        ticket=deal.get("ticket"),
+                        pnl_usd=pnl,
+                        running_daily_pnl=round(daily_pnl, 2),
+                        send_telegram=True,
+                    )
+                # Update peak_balance from live account equity for next cycle.
+                try:
+                    info = mt5.account_info()
+                    peak_balance = max(peak_balance, float(info.balance))
+                except Exception:
+                    pass
+                last_reconcile_ts = now
+                # If the halt just tripped this cycle, fire a loud alert so the
+                # user knows the system went to sleep for the day.
+                if consec_halt.is_tripped() and closed_deals:
+                    snap = consec_halt.snapshot()
+                    alert_critical(
+                        "daily_halt_triggered",
+                        cycle=cycle,
+                        consec_losses=snap.consec_losses,
+                        tripped_at=snap.tripped_at,
+                        send_telegram=True,
+                    )
+            except Exception as rec_exc:
+                log_warn(
+                    "reconcile_failed",
+                    cycle=cycle,
+                    exception_type=type(rec_exc).__name__,
+                    exception_msg=str(rec_exc)[:200],
+                )
 
             # 8. Save state for dashboard (dual-mode aware)
             save_state(cycle, price, action, reason, ai_analysis, regime, setups,
