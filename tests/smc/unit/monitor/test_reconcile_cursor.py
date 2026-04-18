@@ -52,40 +52,40 @@ class TestRoundtrip:
 # ---------------------------------------------------------------------------
 
 class TestFallback:
-    def test_missing_file_returns_now_minus_12h(self, tmp_path: Path):
-        """First boot: no persisted cursor → 12h lookback."""
+    def test_missing_file_returns_now_minus_1h(self, tmp_path: Path):
+        """First boot: no persisted cursor → 1h lookback (ops-sustain Option D)."""
         cursor_path = tmp_path / "nonexistent.json"
         now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
         loaded = load_reconcile_cursor(cursor_path, now=now)
-        assert loaded == now - timedelta(hours=12)
+        assert loaded == now - timedelta(hours=1)
 
     def test_corrupt_json_returns_fallback(self, tmp_path: Path):
         cursor_path = tmp_path / "cursor.json"
         cursor_path.write_text("{this is not json")
         now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
         loaded = load_reconcile_cursor(cursor_path, now=now)
-        assert loaded == now - timedelta(hours=12)
+        assert loaded == now - timedelta(hours=1)
 
     def test_missing_ts_field_returns_fallback(self, tmp_path: Path):
         cursor_path = tmp_path / "cursor.json"
         cursor_path.write_text(json.dumps({"other_field": "hello"}))
         now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
         loaded = load_reconcile_cursor(cursor_path, now=now)
-        assert loaded == now - timedelta(hours=12)
+        assert loaded == now - timedelta(hours=1)
 
     def test_invalid_ts_string_returns_fallback(self, tmp_path: Path):
         cursor_path = tmp_path / "cursor.json"
         cursor_path.write_text(json.dumps({"ts": "not-a-date"}))
         now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
         loaded = load_reconcile_cursor(cursor_path, now=now)
-        assert loaded == now - timedelta(hours=12)
+        assert loaded == now - timedelta(hours=1)
 
     def test_empty_file_returns_fallback(self, tmp_path: Path):
         cursor_path = tmp_path / "cursor.json"
         cursor_path.write_text("")
         now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
         loaded = load_reconcile_cursor(cursor_path, now=now)
-        assert loaded == now - timedelta(hours=12)
+        assert loaded == now - timedelta(hours=1)
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ class TestSanityBounds:
         future_ts = now + timedelta(hours=2)
         save_reconcile_cursor(cursor_path, future_ts)
         loaded = load_reconcile_cursor(cursor_path, now=now)
-        assert loaded == now - timedelta(hours=12)
+        assert loaded == now - timedelta(hours=1)
 
     def test_very_old_ts_capped_to_7_days(self, tmp_path: Path):
         """Week-long outage → cap scan to last 7 days, not months of history."""
@@ -155,7 +155,7 @@ class TestCrashRestartScenario:
           T+0   — process running, last reconcile at T+0, cursor saved
           T+1h  — process crashed (cursor still reflects T+0)
           T+2h  — process restarts → load_reconcile_cursor reads T+0
-                   NOT "T+2h - 12h" which would replay 11h of history
+                   NOT "T+2h - 1h" which would still replay 1h of history
         """
         cursor_path = tmp_path / "cursor.json"
         start = datetime(2026, 4, 18, 10, 0, 0, tzinfo=timezone.utc)
@@ -163,13 +163,13 @@ class TestCrashRestartScenario:
         # Crash simulated by doing nothing.
         restart_time = start + timedelta(hours=2)
         loaded = load_reconcile_cursor(cursor_path, now=restart_time)
-        # Must return the saved cursor, not restart_time - 12h
+        # Must return the saved cursor, not restart_time - 1h
         assert loaded == start
-        assert loaded != restart_time - timedelta(hours=12)
+        assert loaded != restart_time - timedelta(hours=1)
 
-    def test_cold_start_still_scans_12h(self, tmp_path: Path):
-        """First deploy: no cursor yet → original 12h lookback preserved."""
+    def test_cold_start_scans_1h(self, tmp_path: Path):
+        """First deploy: no cursor yet → 1h lookback (ops-sustain Option D)."""
         cursor_path = tmp_path / "cursor.json"
         now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
         loaded = load_reconcile_cursor(cursor_path, now=now)
-        assert loaded == now - timedelta(hours=12)
+        assert loaded == now - timedelta(hours=1)

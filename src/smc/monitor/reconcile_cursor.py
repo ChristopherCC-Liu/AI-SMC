@@ -29,9 +29,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # First-boot lookback: how far to scan closed deals when no persisted
-# cursor exists.  Must be long enough to cover a typical after-hours
-# restart gap but short enough to avoid deep history scans.
-_DEFAULT_LOOKBACK = timedelta(hours=12)
+# cursor exists.
+# ops-sustain Option D (audit-r2 ops #4): 1h chosen over the original
+# 12h because:
+#   - normal cycle cadence is M15 → any real reconcile gap is << 1h
+#   - the cursor is persisted after every successful reconcile, so the
+#     fallback only runs on *first ever* boot
+#   - shorter window means even if we DO hit the fallback (fresh deploy),
+#     the blast radius of a replay is bounded to 1h of history instead
+#     of 12h.  With consec_halt / phase1a_breaker being cumulative
+#     side-effect functions, shorter-is-safer.
+_DEFAULT_LOOKBACK = timedelta(hours=1)
 
 
 def load_reconcile_cursor(
