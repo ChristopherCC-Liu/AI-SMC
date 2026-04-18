@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aismc.backup</string>
+
+    <!--
+        Runs every 30 minutes.
+        Copies VPS data directories to ~/Backups/AI-SMC/ on the Mac.
+
+        NOTE: Windows does not ship rsync natively.  We use scp (which is
+        available on all modern Windows via OpenSSH) rather than rsync to
+        avoid requiring a Cygwin install.  The scp path uses the Windows
+        OpenSSH server (pre-installed on Server 2019+).
+
+        Directories copied:
+          VPS  C:\AI-SMC\data\XAUUSD  →  Mac  ~/Backups/AI-SMC/XAUUSD/
+          VPS  C:\AI-SMC\data\BTCUSD  →  Mac  ~/Backups/AI-SMC/BTCUSD/
+
+        Prerequisites (Mac):
+          brew install sshpass
+          mkdir -p ~/Backups/AI-SMC/XAUUSD ~/Backups/AI-SMC/BTCUSD
+
+        SSH key auth (recommended — avoids password in plist):
+          ssh-keygen -t ed25519 -f ~/.ssh/id_aismc -N ""
+          ssh-copy-id -i ~/.ssh/id_aismc.pub Administrator@43.163.107.158
+          Then replace the sshpass invocations below with:
+            /usr/bin/scp -r -i ~/.ssh/id_aismc ...
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string><![CDATA[
+set -e
+VPS_HOST="Administrator@43.163.107.158"
+DEST="$HOME/Backups/AI-SMC"
+SSHPASS_BIN="/opt/homebrew/bin/sshpass"
+SCP="/usr/bin/scp"
+SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=30"
+export SSHPASS='Lcc5201314^^'
+
+mkdir -p "$DEST/XAUUSD" "$DEST/BTCUSD"
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting AI-SMC backup"
+
+# XAUUSD
+"$SSHPASS_BIN" -e "$SCP" $SSH_OPTS -r \
+    "${VPS_HOST}:C:/AI-SMC/data/XAUUSD/." \
+    "$DEST/XAUUSD/" \
+    && echo "[$(date '+%Y-%m-%d %H:%M:%S')] XAUUSD backup OK" \
+    || echo "[$(date '+%Y-%m-%d %H:%M:%S')] XAUUSD backup FAILED"
+
+# BTCUSD
+"$SSHPASS_BIN" -e "$SCP" $SSH_OPTS -r \
+    "${VPS_HOST}:C:/AI-SMC/data/BTCUSD/." \
+    "$DEST/BTCUSD/" \
+    && echo "[$(date '+%Y-%m-%d %H:%M:%S')] BTCUSD backup OK" \
+    || echo "[$(date '+%Y-%m-%d %H:%M:%S')] BTCUSD backup FAILED"
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Backup run complete"
+        ]]></string>
+    </array>
+
+    <!-- Every 30 minutes -->
+    <key>StartInterval</key>
+    <integer>1800</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/aismc_backup.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/aismc_backup.err</string>
+
+    <!-- Run even if user is not logged in -->
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

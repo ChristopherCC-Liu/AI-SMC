@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aismc.health</string>
+
+    <!--
+        Runs every 10 minutes.
+        Checks VPS /healthz via SSH (no port forwarding needed; 8080 stays
+        127.0.0.1-only on the VPS).
+
+        Logic:
+          - SSH to VPS, run  curl -s http://127.0.0.1:8080/healthz
+          - If exit code != 0 or response not {"ok":true,...}:
+              increment fail counter in /tmp/aismc_health_fails
+          - If counter reaches 3: send macOS notification + log
+          - On success: reset counter
+
+        Prerequisites (Mac):
+          brew install sshpass
+          SSH access to Administrator@43.163.107.158
+
+        SSH key auth (recommended):
+          ssh-keygen -t ed25519 -f ~/.ssh/id_aismc -N ""
+          ssh-copy-id -i ~/.ssh/id_aismc.pub Administrator@43.163.107.158
+          Then replace sshpass invocations with direct ssh -i ~/.ssh/id_aismc
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string><![CDATA[
+set -euo pipefail
+
+VPS_HOST="Administrator@43.163.107.158"
+SSHPASS_BIN="/opt/homebrew/bin/sshpass"
+SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=20 -o BatchMode=no"
+FAIL_FILE="/tmp/aismc_health_fails"
+MAX_FAILS=3
+export SSHPASS='Lcc5201314^^'
+
+timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
+
+# Read current fail count
+if [ -f "$FAIL_FILE" ]; then
+    FAILS=$(cat "$FAIL_FILE" 2>/dev/null || echo 0)
+else
+    FAILS=0
+fi
+
+# Query healthz via SSH (avoids needing port 8080 open externally)
+RESPONSE=$("$SSHPASS_BIN" -e ssh $SSH_OPTS "$VPS_HOST" \
+    "curl -s --max-time 10 http://127.0.0.1:8080/healthz" 2>/dev/null) || RESPONSE=""
+
+OK=0
+if echo "$RESPONSE" | grep -q '"ok":true'; then
+    OK=1
+fi
+
+if [ "$OK" -eq 1 ]; then
+    echo "[$(timestamp)] HEALTHY: $RESPONSE"
+    echo 0 > "$FAIL_FILE"
+else
+    FAILS=$((FAILS + 1))
+    echo "$FAILS" > "$FAIL_FILE"
+    echo "[$(timestamp)] FAIL #$FAILS: response='$RESPONSE'"
+
+    if [ "$FAILS" -ge "$MAX_FAILS" ]; then
+        MSG="AI-SMC VPS healthz failed $FAILS times in a row. Check the VPS."
+        echo "[$(timestamp)] ALERT: $MSG"
+        osascript -e "display notification \"$MSG\" with title \"AI-SMC Health Alert\" sound name \"Basso\"" \
+            2>/dev/null || true
+        # Reset counter after alert so we don't spam every 10 min forever
+        # (will alert again after another MAX_FAILS consecutive failures)
+        echo 0 > "$FAIL_FILE"
+    fi
+fi
+        ]]></string>
+    </array>
+
+    <!-- Every 10 minutes -->
+    <key>StartInterval</key>
+    <integer>600</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/aismc_health.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/aismc_health.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
