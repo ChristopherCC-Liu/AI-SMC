@@ -1,15 +1,17 @@
 """AI-SMC Live Trading Loop — dual-mode (trending + ranging).
 
 Runs every M15 bar close:
-1. Fetch XAUUSD data from MT5
+1. Fetch SYMBOL data from MT5
 2. Run AI direction analysis (Claude debate or SMA fallback)
 3. Detect range bounds on H1 (always, for display)
 4. Route trading mode: trending (v1 5-gate) or ranging (mean-reversion)
 5. Output BUY / SELL / RANGE BUY / RANGE SELL / HOLD signal
-6. Save state to data/live_state.json for dashboard
+6. Save state to data/{SYMBOL}/live_state.json for dashboard
 
 Usage:
-    python scripts/live_demo.py
+    python scripts/live_demo.py                      # XAUUSD (default)
+    python scripts/live_demo.py --symbol BTCUSD
+    python scripts/live_demo.py --paper              # paper mode, no real MT5 orders
 """
 import sys
 import os
@@ -17,6 +19,7 @@ import time
 import signal
 import json
 import atexit
+import shutil
 
 os.environ["PYTHONUTF8"] = "1"
 os.environ["PYTHONIOENCODING"] = "utf-8"
@@ -27,8 +30,27 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 # Atomic PID file — O_CREAT|O_EXCL fails if another instance already started.
 # Round 4.6-M (skeptic H4 defense): realpath(__file__) independent of cwd, so
 # rel-path vs abs-path invocations resolve to the same PID file path.
+# Round 5 T2 (BTC): PID file is per-symbol so XAU and BTC processes don't
+# deadlock each other. --symbol arg is parsed early (before heavy imports)
+# just to derive the PID path.
+def _early_symbol_arg() -> str:
+    for i, arg in enumerate(sys.argv):
+        if arg == "--symbol" and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if arg.startswith("--symbol="):
+            return arg.split("=", 1)[1]
+    return "XAUUSD"
+
+
+_SYMBOL_EARLY = _early_symbol_arg()
 _PID_FILE = os.path.realpath(
-    os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "data", "live_demo.pid")
+    os.path.join(
+        os.path.dirname(os.path.realpath(__file__)),
+        "..",
+        "data",
+        _SYMBOL_EARLY,
+        "live_demo.pid",
+    )
 )
 
 
@@ -133,16 +155,60 @@ from smc.execution.mt5_positions_adapter import (
 from smc.risk.consec_loss_halt import ConsecLossHalt
 from smc.risk.drawdown_guard import DrawdownGuard
 
-JOURNAL_PATH = Path("data/journal/live_trades.jsonl")
-STATE_PATH = Path("data/live_state.json")
-AI_PATH = Path("data/ai_analysis.json")
-PAUSE_FLAG_PATH = Path("data/trading_paused.flag")
-# Round 5 T1 F2: dashboard consumes this atomically every cycle.
-MT5_POSITIONS_PATH = Path("data/mt5_positions.json")
+# ---------------------------------------------------------------------------
+# Per-symbol data paths (populated in main() after argparse).
+# Top-level names kept as module-level vars so helper functions reference them;
+# main() assigns the real Path objects before calling any helper.
+# ---------------------------------------------------------------------------
+JOURNAL_PATH: Path = Path("data/journal/live_trades.jsonl")  # overwritten in main
+STATE_PATH: Path = Path("data/live_state.json")              # overwritten in main
+AI_PATH: Path = Path("data/ai_analysis.json")                # overwritten in main
+PAUSE_FLAG_PATH: Path = Path("data/trading_paused.flag")     # overwritten in main
+MT5_POSITIONS_PATH: Path = Path("data/mt5_positions.json")   # overwritten in main
 
 
-def fetch_mt5_data():
-    """Fetch latest XAUUSD bars from MT5 for all timeframes."""
+def _migrate_legacy_xau_paths(symbol: str) -> None:
+    """Move pre-BTC-split data/*.json from data/ to data/XAUUSD/ once. Idempotent."""
+    if symbol != "XAUUSD":
+        return
+    legacy = Path("data")
+    target = legacy / "XAUUSD"
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "journal").mkdir(parents=True, exist_ok=True)
+    # Note: live_demo.pid intentionally NOT migrated — PID files are runtime
+    # locks owned by the currently-running process. The per-symbol PID path
+    # (data/XAUUSD/live_demo.pid) is created by _ensure_single_instance() at
+    # startup; any stale legacy data/live_demo.pid is left for operator cleanup.
+    for name in [
+        "live_state.json",
+        "ai_analysis.json",
+        "asian_range_quota_state.json",
+        "consec_loss_state.json",
+        "user_config.json",
+        "paused.flag",
+        "trading_paused.flag",
+        "range_cooldown_state.json",
+        "mt5_positions.json",
+        "execution_circuit_open.flag",
+    ]:
+        src = legacy / name
+        dst = target / name
+        if src.exists() and not dst.exists():
+            shutil.move(str(src), str(dst))
+    src_jnl = legacy / "journal" / "live_trades.jsonl"
+    dst_jnl = target / "journal" / "live_trades.jsonl"
+    if src_jnl.exists() and not dst_jnl.exists():
+        shutil.move(str(src_jnl), str(dst_jnl))
+
+
+def fetch_mt5_data(mt5_path: str = "XAUUSD"):
+    """Fetch latest bars from MT5 for all timeframes.
+
+    Parameters
+    ----------
+    mt5_path:
+        MT5 symbol path, e.g. ``"XAUUSD"`` or ``"Bitcoin\\BTCUSD"``.
+    """
     data = {}
     for label, mt5_tf, smc_tf in [
         ("D1", mt5.TIMEFRAME_D1, Timeframe.D1),
@@ -150,7 +216,7 @@ def fetch_mt5_data():
         ("H1", mt5.TIMEFRAME_H1, Timeframe.H1),
         ("M15", mt5.TIMEFRAME_M15, Timeframe.M15),
     ]:
-        rates = mt5.copy_rates_from_pos("XAUUSD", mt5_tf, 0, 500)
+        rates = mt5.copy_rates_from_pos(mt5_path, mt5_tf, 0, 500)
         if rates is not None and len(rates) > 0:
             df = pl.DataFrame({
                 "ts": [datetime.fromtimestamp(r[0], tz=timezone.utc) for r in rates],
@@ -480,12 +546,57 @@ def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
 
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="AI-SMC Live Trading Loop")
+    parser.add_argument(
+        "--symbol",
+        choices=["XAUUSD", "BTCUSD"],
+        default="XAUUSD",
+        help="Trading symbol (default: XAUUSD)",
+    )
+    parser.add_argument(
+        "--paper",
+        action="store_true",
+        help="Paper mode — log signals but send no real MT5 orders",
+    )
+    args = parser.parse_args()
+    SYMBOL = args.symbol
+    PAPER_MODE = args.paper
+
+    from smc.instruments import get_instrument_config
+    cfg = get_instrument_config(SYMBOL)
+
+    # -----------------------------------------------------------------------
+    # One-time legacy migration: move pre-BTC-split flat data/ files into
+    # data/XAUUSD/ so new per-symbol layout takes effect without data loss.
+    # Idempotent — second run is a no-op.
+    # -----------------------------------------------------------------------
+    _migrate_legacy_xau_paths(SYMBOL)
+
+    # -----------------------------------------------------------------------
+    # Per-symbol data paths — must be assigned before any helper that
+    # references the module-level path vars (fetch_mt5_data, save_state, …).
+    # -----------------------------------------------------------------------
+    global JOURNAL_PATH, STATE_PATH, AI_PATH, PAUSE_FLAG_PATH, MT5_POSITIONS_PATH
+    DATA_ROOT = Path("data") / SYMBOL
+    DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    (DATA_ROOT / "journal").mkdir(parents=True, exist_ok=True)
+    JOURNAL_PATH = DATA_ROOT / "journal" / "live_trades.jsonl"
+    STATE_PATH = DATA_ROOT / "live_state.json"
+    AI_PATH = DATA_ROOT / "ai_analysis.json"
+    PAUSE_FLAG_PATH = DATA_ROOT / "paused.flag"
+    MT5_POSITIONS_PATH = DATA_ROOT / "mt5_positions.json"
+    CONSEC_LOSS_PATH = DATA_ROOT / "consec_loss_state.json"
+    ASIAN_QUOTA_PATH = DATA_ROOT / "asian_range_quota_state.json"
+
     print(f"[{datetime.now()}] AI-SMC Live Trading Loop Starting...")
     print("=" * 60)
-    print("  Mode:       DEMO (paper, log only)")
-    print("  Instrument: XAUUSD")
+    print(f"  Mode:       {'PAPER (no real orders)' if PAPER_MODE else 'LIVE'}")
+    print(f"  Instrument: {SYMBOL}")
     print("  AI:         Claude Debate + SMA Fallback")
     print("  Strategy:   DUAL-MODE (trending v1 + ranging)")
+    print(f"  Data root:  {DATA_ROOT}")
     print("=" * 60)
     print()
 
@@ -528,11 +639,15 @@ def main():
     ai_analysis = {}
     last_ai_update = 0
     # Round 4.6-H2: load persisted quota across restarts (防进程重启静默重复开仓)
-    asian_range_quota = AsianRangeQuota.load()
+    # Stage 3: pass per-symbol path so XAUUSD/BTCUSD states are isolated.
+    # cfg.use_asian_quota=False (BTC) → quota object still created but
+    # is_exhausted_today() always returns False because record_open never fires
+    # (guarded by session in _ASIAN_SESSIONS, which is empty for BTC).
+    asian_range_quota = AsianRangeQuota.load(state_path=ASIAN_QUOTA_PATH)
     phase1a_breaker = Phase1aCircuitBreaker()
     # Round 5 T1 F3: consecutive-loss halt (3 losses in a row → halt rest of
     # UTC day; WIN resets streak). DrawdownGuard is a %-based backstop.
-    consec_halt = ConsecLossHalt()
+    consec_halt = ConsecLossHalt(state_path=CONSEC_LOSS_PATH)
     drawdown_guard = DrawdownGuard(max_daily_loss_pct=3.0, max_drawdown_pct=10.0)
     # peak_balance and daily_pnl are tracked across cycles from reconciled
     # closes. Initialized from the current MT5 balance at startup so the
@@ -606,17 +721,17 @@ def main():
 
         try:
             # 1. Price
-            tick = mt5.symbol_info_tick("XAUUSD")
+            tick = mt5.symbol_info_tick(cfg.mt5_path)
             if tick is None:
                 log_warn("tick_unavailable", cycle=cycle)
                 print("  WARN: no tick data")
                 continue
             price = tick.bid
             spread = tick.ask - tick.bid
-            print(f"  XAUUSD: ${price:.2f} (spread ${spread:.2f})")
+            print(f"  {SYMBOL}: ${price:.2f} (spread ${spread:.2f})")
 
             # 2. Fetch data
-            data = fetch_mt5_data()
+            data = fetch_mt5_data(cfg.mt5_path)
             bars_info = ", ".join(f"{k}: {len(v)}" for k, v in data.items())
             print(f"  Data: {{{bars_info}}}")
 
@@ -711,35 +826,50 @@ def main():
                 # 之前 Lead 严重失职 — journal 只写 "PAPER" 日志, 没 call MT5 API.
                 # 用户期望 "装 MT5 = 真实交易", 实际 MT5 0 positions. Fix:
                 # SMC_MT5_EXECUTE=1 env var 开启真实 order_send (TMGM Demo 安全).
-                _mt5_execute = os.environ.get("SMC_MT5_EXECUTE", "0") == "1"
+                # Stage 3: PAPER_MODE CLI flag short-circuits real order_send.
+                # SMC_MT5_EXECUTE=1 env var is the legacy live-execute switch;
+                # --paper overrides it to always stay in paper mode.
+                _mt5_execute = (not PAPER_MODE) and (os.environ.get("SMC_MT5_EXECUTE", "0") == "1")
                 _mt5_ticket: int | None = None
                 _mt5_send_retcode: int | None = None
                 _mt5_mode_tag = "PAPER"
                 # Asian ranging 用 0.3x multiplier (Phase1a 降档协议), 其他 1.0x.
-                # base_lot=0.01 XAUUSD minimum. margin 公式分两步避免 bug:
-                #   notional_usd = entry × contract_size × lots  (1 XAUUSD lot = 100 oz)
-                #   margin_usd   = notional / leverage           (100:1 simplification)
-                # 旧写法 entry*lots*100/100 数值正确但语义混淆 (100 既是 contract
-                # size 又似 leverage). PAPER mode, live execution 时 MT5 按账户重算.
+                # margin 公式分两步避免 bug:
+                #   notional_usd = entry × contract_size × lots
+                #   margin_usd   = notional / leverage
+                # PAPER mode; live execution 时 MT5 按账户重算.
                 # Round 4.6-J-fix: 用 _ASIAN_SESSIONS frozenset 避免 inline tuple drift.
-                XAUUSD_CONTRACT_SIZE_OZ = 100
-                PAPER_LEVERAGE_RATIO = 100  # 100:1 typical retail XAUUSD
                 lot_multiplier = 0.3 if session in _ASIAN_SESSIONS else 1.0
-                base_lot = 0.01
+                base_lot = cfg.min_lot
                 position_size_lots = round(base_lot * lot_multiplier, 4)
-                # Round 4.6-Y (USER CATCH): MT5 min lot = 0.01 broker-wide, 0.003
-                # 会被 reject (retcode 10014 Invalid volume). Clamp Asian-reduced
-                # lot back to MT5 min. Asian risk management 改由 quota (1/day)
-                # 和 CircuitBreaker 承担, 不靠 fractional lot.
-                _MT5_MIN_LOT = 0.01
-                if position_size_lots < _MT5_MIN_LOT:
-                    position_size_lots = _MT5_MIN_LOT
+                # Round 4.6-Y (USER CATCH): MT5 min lot = cfg.min_lot broker-wide.
+                # Clamp Asian-reduced lot back to min. Asian risk management 改由
+                # quota (1/day) 和 CircuitBreaker 承担, 不靠 fractional lot.
+                if position_size_lots < cfg.min_lot:
+                    position_size_lots = cfg.min_lot
                 notional_value_usd = (
-                    best.entry_price * XAUUSD_CONTRACT_SIZE_OZ * position_size_lots
+                    best.entry_price * cfg.contract_size * position_size_lots
                 )
                 margin_used_estimate_usd = round(
-                    notional_value_usd / PAPER_LEVERAGE_RATIO, 2
+                    notional_value_usd / cfg.leverage_ratio, 2
                 )
+
+                if PAPER_MODE:
+                    log_info(
+                        "paper_mode_signal",
+                        cycle=cycle,
+                        symbol=SYMBOL,
+                        direction=best.direction,
+                        entry=round(best.entry_price, 2),
+                        sl=round(best.stop_loss, 2),
+                        tp=round(best.take_profit, 2),
+                        lots=position_size_lots,
+                        session=session,
+                    )
+                    print(
+                        f"  [PAPER] Would submit: {best.direction.upper()} {position_size_lots} lots "
+                        f"@ {best.entry_price:.2f} SL={best.stop_loss:.2f} TP={best.take_profit:.2f}"
+                    )
 
                 # Round 4.6-X + Round 5 T0 (P0-3): MT5 order_send via rugged wrapper
                 # with retry / backoff / dynamic deviation / circuit breaker.
@@ -747,17 +877,17 @@ def main():
                 # opens a persistent circuit flag after 3 consecutive REQUOTE/EXC.
                 _mt5_send_attempts = 0
                 if _mt5_execute:
-                    dyn_deviation = compute_dynamic_deviation(mt5, "XAUUSD", fallback=100)
+                    dyn_deviation = compute_dynamic_deviation(mt5, cfg.mt5_path, fallback=100)
                     request = {
                         "action": mt5.TRADE_ACTION_DEAL,
-                        "symbol": "XAUUSD",
+                        "symbol": cfg.mt5_path,
                         "volume": position_size_lots,
                         "type": mt5.ORDER_TYPE_BUY if best.direction == "long" else mt5.ORDER_TYPE_SELL,
                         "price": 0.0,  # refreshed per attempt inside send_with_retry
                         "sl": best.stop_loss,
                         "tp": best.take_profit,
                         "deviation": dyn_deviation,
-                        "magic": 19760418,
+                        "magic": cfg.magic,
                         "comment": f"AI-SMC {best.trigger[:15]}",
                         "type_time": mt5.ORDER_TIME_GTC,
                         "type_filling": mt5.ORDER_FILLING_IOC,
@@ -815,9 +945,11 @@ def main():
                 # Round 5 T0 (P0-2b): Asian quota only consumed on PAPER mode
                 # (audit trail) or successful LIVE_EXEC. MT5 failures preserve
                 # the 1/day quota so subsequent cycles can retry.
+                # Stage 3: pass per-symbol state path so XAU/BTC are isolated.
                 if session in _ASIAN_SESSIONS and _mt5_mode_tag in ("PAPER", "LIVE_EXEC"):
                     asian_range_quota = asian_range_quota.record_open(
-                        datetime.now(tz=timezone.utc)
+                        datetime.now(tz=timezone.utc),
+                        state_path=ASIAN_QUOTA_PATH,
                     )
 
                 log_entry = {
@@ -852,7 +984,7 @@ def main():
                     "position_size_lots": position_size_lots,
                     "notional_value_usd": round(notional_value_usd, 2),
                     "margin_used_estimate_usd": margin_used_estimate_usd,
-                    "paper_leverage_ratio": PAPER_LEVERAGE_RATIO,
+                    "leverage_ratio": cfg.leverage_ratio,
                 }
                 with open(JOURNAL_PATH, "a") as f:
                     f.write(json.dumps(log_entry) + "\n")
@@ -884,7 +1016,7 @@ def main():
             # records closed-trade P&L into the consec-loss halt + Phase1a
             # breaker + daily_pnl running total for DrawdownGuard backstop.
             try:
-                broker_positions = fetch_broker_positions(mt5)
+                broker_positions = fetch_broker_positions(mt5, symbol=cfg.mt5_path, magic=cfg.magic)
                 atomic_write_json(
                     MT5_POSITIONS_PATH,
                     {
