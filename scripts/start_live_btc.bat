@@ -13,8 +13,11 @@ REM Per-symbol PID file lives at data\BTCUSD\live_demo.pid (separate from XAU).
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 set PYTHONUNBUFFERED=1
-REM SMC_MT5_EXECUTE intentionally NOT set — --paper overrides it either way
-REM and Machine-level env SMC_MT5_EXECUTE=1 would be ignored by --paper flag.
+REM Override Machine-level SMC_MT5_EXECUTE=1 so startup alert + journal
+REM entries accurately reflect paper mode. --paper CLI flag is the actual
+REM order-send gate; this env override is cosmetic but avoids the
+REM misleading "mt5_execute=1" value in the system_startup Telegram alert.
+set SMC_MT5_EXECUTE=0
 REM SMC_TELEGRAM_BOT_TOKEN and SMC_TELEGRAM_CHAT_ID inherited from Machine env.
 cd /d C:\AI-SMC
 .venv\Scripts\python.exe scripts\live_demo.py --symbol BTCUSD --paper >> logs\live_btc_stdout.log 2>> logs\live_btc_stderr.log
