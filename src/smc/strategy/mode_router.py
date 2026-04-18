@@ -10,22 +10,17 @@ Round 4.5 hotfix (用户指令 UTC 03:30):
   用户原话: "现在就应该使用亚洲盘套利的策略"
   风险已知接受: Phase 1b backtest n=16 PF=0.69 (skeptic 历史数据)
   风控完整保留: 5 guards + CircuitBreaker + RangeQuotaTracker 不变
+
+Round 4.6-Z: parameterized — cfg kwarg dispatches per-instrument sessions.
+  _RANGING_SESSIONS removed; callers pass cfg=InstrumentConfig or default=XAUUSD.
 """
 
 from __future__ import annotations
 
+from smc.instruments.types import InstrumentConfig
 from smc.strategy.range_types import RangeBounds, TradingMode
 
 __all__ = ["route_trading_mode"]
-
-_RANGING_SESSIONS: frozenset[str] = frozenset({
-    "ASIAN_CORE",  # Round 4.5: 用户指令激活 (UTC 03:30)
-    "ASIAN_LONDON_TRANSITION",
-    "LONDON",
-    "LONDON/NY OVERLAP",
-    "NEW YORK",
-    "LATE NY",
-})
 
 
 def route_trading_mode(
@@ -36,6 +31,8 @@ def route_trading_mode(
     range_bounds: RangeBounds | None,
     guards_passed: bool = False,
     current_price: float | None = None,
+    *,
+    cfg: InstrumentConfig | None = None,
 ) -> TradingMode:
     """Decide between trending, ranging, and v1-passthrough trading mode.
 
@@ -62,11 +59,15 @@ def route_trading_mode(
     TradingMode
         Frozen model with mode, reason, and context fields.
     """
+    if cfg is None:
+        from smc.instruments import get_instrument_config
+        cfg = get_instrument_config("XAUUSD")
+
     # Priority 1: AI strong directional + NOT ASIAN_CORE → trending (v1 5-gate)
     if (
         ai_direction in ("bullish", "bearish")
         and ai_confidence >= 0.5
-        and session != "ASIAN_CORE"
+        and (cfg.asian_core_session_name is None or session != cfg.asian_core_session_name)
     ):
         return TradingMode(
             mode="trending",
@@ -90,13 +91,13 @@ def route_trading_mode(
     )
     trending_suppress = (
         regime == "trending"
-        and session != "ASIAN_CORE"
+        and (cfg.asian_core_session_name is None or session != cfg.asian_core_session_name)
         and not price_in_range  # only suppress when price OUT of range
     )
     if (
         range_bounds is not None
         and guards_passed
-        and session in _RANGING_SESSIONS
+        and session in cfg.ranging_sessions
         and not trending_suppress
     ):
         return TradingMode(

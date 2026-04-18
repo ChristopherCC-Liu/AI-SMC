@@ -276,9 +276,11 @@ class AggregatorV3(MultiTimeframeAggregator):
         The direction is derived from the zone's direction since zone_scanner
         already aligns zones with bias.
         """
+        from smc.instruments import get_instrument_config
+        _cfg = get_instrument_config("XAUUSD")
         entry_price = current_price
-        stop_loss = _compute_sl(zone, h1_atr, sl_atr_multiplier)
-        risk_points = abs(entry_price - stop_loss) / XAUUSD_POINT_SIZE
+        stop_loss = _compute_sl(zone, h1_atr, _cfg, price=current_price)
+        risk_points = abs(entry_price - stop_loss) / _cfg.point_size
 
         if risk_points == 0:
             return None
@@ -286,9 +288,9 @@ class AggregatorV3(MultiTimeframeAggregator):
         # TP1 at configured RR ratio
         reward_1 = risk_points * tp1_rr
         if zone.direction == "long":
-            tp1 = entry_price + reward_1 * XAUUSD_POINT_SIZE
+            tp1 = entry_price + reward_1 * _cfg.point_size
         else:
-            tp1 = entry_price - reward_1 * XAUUSD_POINT_SIZE
+            tp1 = entry_price - reward_1 * _cfg.point_size
 
         # TP2 at next liquidity level or fallback to 1:4 RR
         tp2_liq = _find_next_liquidity_level(m15_snap, zone, current_price)
@@ -297,9 +299,9 @@ class AggregatorV3(MultiTimeframeAggregator):
         else:
             reward_2_points = risk_points * _TP2_RR_RATIO
             if zone.direction == "long":
-                tp2 = entry_price + reward_2_points * XAUUSD_POINT_SIZE
+                tp2 = entry_price + reward_2_points * _cfg.point_size
             else:
-                tp2 = entry_price - reward_2_points * XAUUSD_POINT_SIZE
+                tp2 = entry_price - reward_2_points * _cfg.point_size
 
         rr_ratio = reward_1 / risk_points if risk_points > 0 else 0.0
         grade = _grade_entry("fvg_sweep_continuation", zone, rr_ratio)

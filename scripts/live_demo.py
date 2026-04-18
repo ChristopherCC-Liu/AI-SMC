@@ -123,6 +123,7 @@ from smc.monitor.timing import next_bar_close
 from smc.monitor.structured_log import crit as log_crit, warn as log_warn, info as log_info
 from smc.monitor.critical_alerter import alert_critical
 from smc.monitor.state_io import atomic_write_json
+from smc.strategy.session import get_session_info
 from smc.execution.mt5_send import send_with_retry, compute_dynamic_deviation
 # Round 5 T1 F2+F3: real broker reconciliation + daily halt gating.
 from smc.execution.mt5_positions_adapter import (
@@ -224,25 +225,6 @@ def run_ai_analysis(data):
         json.dump(analysis, f, indent=2, default=str)
 
     return analysis
-
-
-def get_session_info():
-    """Return (session_name, confidence_penalty) based on current UTC hour."""
-    hour = datetime.now(timezone.utc).hour
-    if 0 <= hour < 6:
-        return "ASIAN_CORE", 0.2
-    elif 6 <= hour < 8:
-        return "ASIAN_LONDON_TRANSITION", 0.15  # Asian-London transition, gentler penalty
-    elif 8 <= hour < 13:
-        return "LONDON", 0.0
-    elif 13 <= hour < 16:
-        return "LONDON/NY OVERLAP", 0.0
-    elif 16 <= hour < 21:
-        return "NEW YORK", 0.0
-    elif 21 <= hour < 24:
-        return "LATE NY", 0.1
-    else:  # defensive, should not reach
-        return "ASIAN_CORE", 0.2
 
 
 def _determine_trending(setups, ai_dir, ai_conf, effective_conf, session):

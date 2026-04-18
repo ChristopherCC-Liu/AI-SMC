@@ -16,9 +16,14 @@ TP1 at 1:2.5 RR, TP2 at next HTF liquidity level (fallback 1:4 RR).
 
 from __future__ import annotations
 
-from smc.smc_core.constants import XAUUSD_POINT_SIZE
+from typing import TYPE_CHECKING
+
+from smc.smc_core.constants import XAUUSD_POINT_SIZE  # noqa: F401 — kept for import compat
 from smc.smc_core.types import SMCSnapshot
 from smc.strategy.types import EntrySignal, TradeZone
+
+if TYPE_CHECKING:
+    from smc.instruments.types import InstrumentConfig
 
 __all__ = ["check_entry"]
 
@@ -147,25 +152,54 @@ def _find_bos_in_zone(
 
 def _compute_sl_buffer(
     h1_atr: float,
-    sl_atr_multiplier: float = _SL_ATR_MULTIPLIER,
+    cfg: InstrumentConfig | None = None,
 ) -> float:
     """Compute adaptive SL buffer from H1 ATR(14) in points.
 
-    Returns the buffer in points: max(atr * multiplier, floor).
+    Returns the buffer in points: max(atr * multiplier, min_pts).
+    For instruments that use sl_min_buffer_pct instead (e.g. BTC),
+    this function returns only the ATR contribution — the pct check is
+    done in _compute_sl where the price context is available.
+
+    When cfg is None, defaults to XAUUSD config (preserves backward compat).
     """
-    return max(h1_atr * sl_atr_multiplier, _SL_MIN_BUFFER)
+    if cfg is None:
+        from smc.instruments import get_instrument_config
+        cfg = get_instrument_config("XAUUSD")
+    min_pts = cfg.sl_min_buffer_points if cfg.sl_min_buffer_points is not None else 0.0
+    return max(cfg.sl_atr_multiplier * h1_atr, min_pts)
 
 
 def _compute_sl(
     zone: TradeZone,
     h1_atr: float,
-    sl_atr_multiplier: float = _SL_ATR_MULTIPLIER,
+    cfg: InstrumentConfig,
+    price: float | None = None,
 ) -> float:
-    """Compute stop-loss price beyond zone boundary + ATR-adaptive buffer."""
-    buffer = _compute_sl_buffer(h1_atr, sl_atr_multiplier) * XAUUSD_POINT_SIZE
+    """Compute stop-loss price beyond zone boundary + ATR-adaptive buffer.
+
+    XAU path: buffer in points → converted to price via cfg.point_size.
+    BTC path: buffer = max(atr_contribution, pct_of_price); requires price.
+    """
+    if cfg.sl_min_buffer_points is not None:
+        # XAU path: buffer in points → price units
+        buffer_value = _compute_sl_buffer(h1_atr, cfg) * cfg.point_size
+    else:
+        # BTC path: buffer is max(atr contribution, pct of price)
+        assert cfg.sl_min_buffer_pct is not None, (
+            f"{cfg.symbol}: sl_min_buffer_pct required when sl_min_buffer_points is None"
+        )
+        assert price is not None, (
+            f"{cfg.symbol}: price required for pct-of-price SL buffer calculation"
+        )
+        atr_contribution = cfg.sl_atr_multiplier * h1_atr * cfg.point_size
+        # sl_min_buffer_pct is stored as e.g. 0.3 meaning 0.3% of price
+        pct_contribution = (cfg.sl_min_buffer_pct / 100.0) * price
+        buffer_value = max(atr_contribution, pct_contribution)
+
     if zone.direction == "long":
-        return zone.zone_low - buffer
-    return zone.zone_high + buffer
+        return zone.zone_low - buffer_value
+    return zone.zone_high + buffer_value
 
 
 def _find_next_liquidity_level(
@@ -250,6 +284,7 @@ def check_entry(
     enable_ob_test: bool = False,
     sl_atr_multiplier: float = _SL_ATR_MULTIPLIER,
     tp1_rr: float = _TP1_RR_RATIO,
+    cfg: InstrumentConfig | None = None,
 ) -> EntrySignal | None:
     """Check for a valid M15 entry trigger inside an H1 trade zone.
 
@@ -264,12 +299,19 @@ def check_entry(
     h1_atr:
         H1 ATR(14) in points for adaptive SL buffer computation.
         When 0.0 (default), the minimum buffer floor is used.
+    cfg:
+        InstrumentConfig for per-symbol SL/TP parameters.  Defaults to XAUUSD
+        when not provided (preserves backward compatibility).
 
     Returns
     -------
     EntrySignal | None
         A frozen entry signal if a valid trigger is found, otherwise None.
     """
+    if cfg is None:
+        from smc.instruments import get_instrument_config
+        cfg = get_instrument_config("XAUUSD")
+
     # Price must be in or very near the zone
     zone_range = zone.zone_high - zone.zone_low
     expanded_high = zone.zone_high + zone_range * 0.25
@@ -295,30 +337,32 @@ def check_entry(
 
     # Compute entry parameters (Sprint 6: regime-configurable SL/TP)
     entry_price = current_price
-    stop_loss = _compute_sl(zone, h1_atr, sl_atr_multiplier)
-    risk_points = abs(entry_price - stop_loss) / XAUUSD_POINT_SIZE
+    stop_loss = _compute_sl(zone, h1_atr, cfg, price=current_price)
+    risk_points = abs(entry_price - stop_loss) / cfg.point_size
 
     if risk_points == 0:
         return None
 
-    # TP1 at configurable RR ratio (default 2.5)
-    reward_1 = risk_points * tp1_rr
+    # TP1 at configurable RR ratio (cfg.tp1_rr_ratio, overridable via legacy kwarg)
+    # tp1_rr kwarg kept for backward compat; cfg.tp1_rr_ratio is canonical
+    effective_tp1_rr = cfg.tp1_rr_ratio if tp1_rr == _TP1_RR_RATIO else tp1_rr
+    reward_1 = risk_points * effective_tp1_rr
     if zone.direction == "long":
-        tp1 = entry_price + reward_1 * XAUUSD_POINT_SIZE
+        tp1 = entry_price + reward_1 * cfg.point_size
     else:
-        tp1 = entry_price - reward_1 * XAUUSD_POINT_SIZE
+        tp1 = entry_price - reward_1 * cfg.point_size
 
-    # TP2 at next liquidity level or fallback to 1:4 RR
+    # TP2 at next liquidity level or fallback to cfg.tp2_rr_ratio
     tp2_liq = _find_next_liquidity_level(m15_snapshot, zone, current_price)
     if tp2_liq is not None:
         tp2 = tp2_liq
-        reward_2_points = abs(tp2 - entry_price) / XAUUSD_POINT_SIZE
+        reward_2_points = abs(tp2 - entry_price) / cfg.point_size
     else:
-        reward_2_points = risk_points * _TP2_RR_RATIO
+        reward_2_points = risk_points * cfg.tp2_rr_ratio
         if zone.direction == "long":
-            tp2 = entry_price + reward_2_points * XAUUSD_POINT_SIZE
+            tp2 = entry_price + reward_2_points * cfg.point_size
         else:
-            tp2 = entry_price - reward_2_points * XAUUSD_POINT_SIZE
+            tp2 = entry_price - reward_2_points * cfg.point_size
 
     rr_ratio = reward_1 / risk_points if risk_points > 0 else 0.0
     grade = _grade_entry(trigger_type, zone, rr_ratio)

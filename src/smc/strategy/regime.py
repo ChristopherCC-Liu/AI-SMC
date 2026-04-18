@@ -6,16 +6,19 @@ Tier 2/3 bias trades in low-volatility environments where SMC zones
 tend to get repeatedly mitigated without follow-through.
 
 Thresholds:
-  - ATR% >= 1.2 → trending (all tiers active)
-  - ATR% < 0.8  → ranging (only Tier 1 allowed)
-  - 0.8 <= ATR% < 1.2 → transitional (all tiers, but Tier 2/3 need higher confluence)
+  - ATR% >= regime_trending_pct → trending (all tiers active)
+  - ATR% < regime_ranging_pct  → ranging (only Tier 1 allowed)
+  - regime_ranging_pct <= ATR% < regime_trending_pct → transitional
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import polars as pl
+
+if TYPE_CHECKING:
+    from smc.instruments.types import InstrumentConfig
 
 __all__ = ["classify_regime", "MarketRegime"]
 
@@ -35,7 +38,11 @@ MarketRegime = Literal["trending", "transitional", "ranging"]
 # ---------------------------------------------------------------------------
 
 
-def classify_regime(d1_df: pl.DataFrame | None) -> MarketRegime:
+def classify_regime(
+    d1_df: pl.DataFrame | None,
+    *,
+    cfg: InstrumentConfig | None = None,
+) -> MarketRegime:
     """Classify market regime from D1 OHLCV data using ATR(14) as % of price.
 
     Parameters
@@ -44,12 +51,22 @@ def classify_regime(d1_df: pl.DataFrame | None) -> MarketRegime:
         D1 OHLCV DataFrame with at least ``high``, ``low``, ``close`` columns.
         Must have >= ATR_PERIOD + 1 rows for a valid ATR calculation.
         Returns 'transitional' (permissive default) if None or insufficient data.
+    cfg:
+        InstrumentConfig for per-symbol regime thresholds.  Defaults to XAUUSD
+        when not provided (preserves backward compatibility).
 
     Returns
     -------
     MarketRegime
         'trending', 'transitional', or 'ranging'.
     """
+    if cfg is None:
+        from smc.instruments import get_instrument_config
+        cfg = get_instrument_config("XAUUSD")
+
+    trending_thr = cfg.regime_trending_pct
+    ranging_thr = cfg.regime_ranging_pct
+
     if d1_df is None or len(d1_df) < _ATR_PERIOD + 1:
         return "transitional"
 
@@ -76,8 +93,8 @@ def classify_regime(d1_df: pl.DataFrame | None) -> MarketRegime:
 
     atr_pct = (atr / latest_close) * 100.0
 
-    if atr_pct >= _TRENDING_THRESHOLD:
+    if atr_pct >= trending_thr:
         return "trending"
-    if atr_pct < _RANGING_THRESHOLD:
+    if atr_pct < ranging_thr:
         return "ranging"
     return "transitional"

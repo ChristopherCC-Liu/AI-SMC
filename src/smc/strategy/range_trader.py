@@ -20,8 +20,9 @@ from typing import Optional
 
 import polars as pl
 
+from smc.instruments.types import InstrumentConfig
 from smc.monitor.state_io import atomic_write_json, load_json
-from smc.smc_core.constants import XAUUSD_POINT_SIZE
+from smc.smc_core.constants import XAUUSD_POINT_SIZE  # retained; Stage 6 will deprecate
 from smc.smc_core.types import OrderBlock, SMCSnapshot, SwingPoint
 from smc.strategy.entry_trigger import _compute_sl_buffer, _find_choch_in_zone
 from smc.strategy.range_types import RangeBounds, RangeSetup
@@ -34,6 +35,7 @@ __all__ = [
     "check_range_guards",
     "check_bounds_only_guards",
     "get_last_guards_diagnostic",
+    "_min_range_width_resolved",
 ]
 
 # ---------------------------------------------------------------------------
@@ -87,6 +89,25 @@ _WIDE_BAND_SESSIONS: frozenset[str] = frozenset(
 _SECONDS_PER_H1_BAR = 3600
 
 
+def _min_range_width_resolved(cfg: InstrumentConfig, current_price: float) -> float:
+    """Resolve min range width: XAU uses absolute points, BTC uses pct of price.
+
+    XAU path: cfg.min_range_width_points is not None → return points * point_size
+      (note: _validate_bounds uses raw points, not price; this returns price units
+       so callers that need price-domain comparison can use it directly).
+    BTC path: cfg.min_range_width_pct is not None → return (pct/100) * current_price.
+      pct is stored as 2.0 meaning 2% (BTC config).
+    Stage 5 will wire price flow for live BTC use; this helper is exposed now for
+    unit testing and future integration.
+    """
+    if cfg.min_range_width_points is not None:
+        return cfg.min_range_width_points * cfg.point_size
+    assert cfg.min_range_width_pct is not None, (
+        f"{cfg.symbol}: both min_range_width_points and min_range_width_pct are None"
+    )
+    return (cfg.min_range_width_pct / 100.0) * current_price
+
+
 def _h1_bars_between(earlier: datetime, later: datetime) -> int:
     """Round 4.5.1: approximate H1 bars elapsed between two timestamps.
 
@@ -122,6 +143,7 @@ def check_bounds_only_guards(
     bounds: RangeBounds,
     session: str,
     h1_df: pl.DataFrame,
+    cfg: InstrumentConfig | None = None,
 ) -> bool:
     """Round 4.6-E: bounds-level subset of check_range_guards (no setup yet).
 
@@ -134,17 +156,23 @@ def check_bounds_only_guards(
     Same session-aware thresholds as check_range_guards (Round 4.6-B).
     Writes its own trace into _LAST_GUARDS_CHECK so the existing diagnostic
     surface keeps working even before a setup exists.
+
+    cfg: InstrumentConfig to use. Defaults to XAUUSD config when None.
     """
+    if cfg is None:
+        from smc.instruments import get_instrument_config
+        cfg = get_instrument_config("XAUUSD")
+
     global _LAST_GUARDS_CHECK
 
-    is_asian = session in _ASIAN_SESSIONS
-    min_width = _GUARD_WIDTH_MIN_ASIAN if is_asian else _GUARD_WIDTH_MIN_DEFAULT
+    is_asian = session in cfg.asian_sessions
+    min_width = cfg.guard_width_low if is_asian else cfg.guard_width_high
     min_duration = (
-        _GUARD_DURATION_MIN_ASIAN if is_asian else _GUARD_DURATION_MIN_DEFAULT
+        cfg.guard_duration_low if is_asian else cfg.guard_duration_high
     )
 
     width_pass = bounds.width_points >= min_width
-    touches = _count_boundary_touches(h1_df, bounds, tolerance_ratio=0.05)
+    touches = _count_boundary_touches(h1_df, bounds, tolerance_ratio=0.05, cfg=cfg)
     touches_pass = touches >= 2
     duration_pass = bounds.duration_bars >= min_duration
 
@@ -176,6 +204,7 @@ def check_range_guards(
     session: str,
     h1_df: pl.DataFrame,
     htf_bias: Optional["BiasDirection"] = None,
+    cfg: InstrumentConfig | None = None,
 ) -> bool:
     """Return True if all guards pass. See v3.0 plan.
 
@@ -191,18 +220,24 @@ def check_range_guards(
     Round 5 T0 (P0-9): Guard 6 — HTF bias alignment.  Only active when
     htf_bias.confidence >= 0.5; weak / neutral bias is skipped (pass-through)
     so callers that omit htf_bias see identical behaviour to before.
+
+    cfg: InstrumentConfig to use. Defaults to XAUUSD config when None.
     """
+    if cfg is None:
+        from smc.instruments import get_instrument_config
+        cfg = get_instrument_config("XAUUSD")
+
     global _LAST_GUARDS_CHECK
 
-    is_asian = session in _ASIAN_SESSIONS
-    min_width = _GUARD_WIDTH_MIN_ASIAN if is_asian else _GUARD_WIDTH_MIN_DEFAULT
+    is_asian = session in cfg.asian_sessions
+    min_width = cfg.guard_width_low if is_asian else cfg.guard_width_high
     min_duration = (
-        _GUARD_DURATION_MIN_ASIAN if is_asian else _GUARD_DURATION_MIN_DEFAULT
+        cfg.guard_duration_low if is_asian else cfg.guard_duration_high
     )
 
     width_pass = bounds.width_points >= min_width
-    rr_pass = setup.rr_ratio >= 1.2
-    touches = _count_boundary_touches(h1_df, bounds, tolerance_ratio=0.05)
+    rr_pass = setup.rr_ratio >= cfg.guard_rr_min
+    touches = _count_boundary_touches(h1_df, bounds, tolerance_ratio=0.05, cfg=cfg)
     touches_pass = touches >= 2
     duration_pass = bounds.duration_bars >= min_duration
 
@@ -251,10 +286,17 @@ def _count_boundary_touches(
     h1_df: pl.DataFrame,
     bounds: RangeBounds,
     tolerance_ratio: float = 0.05,
+    cfg: InstrumentConfig | None = None,
 ) -> int:
-    """Count bars that touched either upper or lower boundary within tolerance."""
+    """Count bars that touched either upper or lower boundary within tolerance.
+
+    cfg: InstrumentConfig for point_size. Defaults to XAUUSD config when None.
+    """
+    if cfg is None:
+        from smc.instruments import get_instrument_config
+        cfg = get_instrument_config("XAUUSD")
     tolerance_pts = bounds.width_points * tolerance_ratio
-    tol_price = tolerance_pts * XAUUSD_POINT_SIZE
+    tol_price = tolerance_pts * cfg.point_size
 
     highs = h1_df["high"].to_list()
     lows = h1_df["low"].to_list()
@@ -316,18 +358,27 @@ class RangeTrader:
 
     def __init__(
         self,
-        min_range_width: float = 200.0,  # Round 4.6-A: 300 → 200 (Asian 低波动接受更窄 range)
-        # Round 4.6-D: 3000 → 20000. Measure-first (UTC 06:00 cycle) showed
-        # Asian + London/NY 48-bar Donchian window legitimately spans ~7000 pts
-        # ($70) on active days. Keeping 3000 silently rejected every Donchian
-        # candidate via _validate_bounds. 5 guards still filter downstream.
-        max_range_width: float = 20000.0,
-        boundary_pct: float = 0.15,
+        *,
+        cfg: InstrumentConfig | None = None,
+        min_range_width: float | None = None,
+        max_range_width: float | None = None,
+        boundary_pct: float | None = None,
         cooldown_state_path: Optional[Path] = None,
     ) -> None:
-        self._min_range_width = min_range_width
-        self._max_range_width = max_range_width
-        self._boundary_pct = boundary_pct
+        from smc.instruments import get_instrument_config
+        if cfg is None:
+            cfg = get_instrument_config("XAUUSD")
+        self._cfg = cfg
+        # Points-based (XAU): use cfg directly; pct-based (BTC): None pending price resolution
+        self._min_range_width: float = (
+            min_range_width if min_range_width is not None
+            else (cfg.min_range_width_points if cfg.min_range_width_points is not None else 0.0)
+        )
+        self._max_range_width: float = (
+            max_range_width if max_range_width is not None
+            else (cfg.max_range_width_points if cfg.max_range_width_points is not None else float("inf"))
+        )
+        self._boundary_pct: float = boundary_pct if boundary_pct is not None else cfg.boundary_pct_default
         # Round 5 T0 (P0-4): persist cooldown state across process restarts.
         self._cooldown_state_path: Path = (
             cooldown_state_path
@@ -433,20 +484,20 @@ class RangeTrader:
 
         # Compute Donchian candidate width for diagnostic (regardless of success).
         donchian_width_pts: float | None = None
-        if h1_bars_count >= _DONCHIAN_LOOKBACK_BARS:
-            recent = h1_df.tail(_DONCHIAN_LOOKBACK_BARS)
+        if h1_bars_count >= self._cfg.donchian_lookback:
+            recent = h1_df.tail(self._cfg.donchian_lookback)
             try:
                 upper = float(recent["high"].max())
                 lower = float(recent["low"].min())
                 if upper > lower:
-                    donchian_width_pts = round((upper - lower) / XAUUSD_POINT_SIZE, 1)
+                    donchian_width_pts = round((upper - lower) / self._cfg.point_size, 1)
             except Exception:
                 donchian_width_pts = None
 
         bounds = method_a or method_b or method_d
         self._last_diagnostic = {
             "h1_bars_count": h1_bars_count,
-            "donchian_lookback_required": _DONCHIAN_LOOKBACK_BARS,
+            "donchian_lookback_required": self._cfg.donchian_lookback,
             "n_bearish_ob": n_bearish_ob,
             "n_bullish_ob": n_bullish_ob,
             "n_swing_high": n_swing_high,
@@ -488,13 +539,14 @@ class RangeTrader:
         target. Non-Asian sessions keep constructor/default value.
         """
         setups: list[RangeSetup] = []
-        # Round 4.6-I: all active ranging sessions use wide band (30%).
-        # Unknown/empty session falls back to constructor value (default 0.15).
+        # Round 4.6-I: all active ranging sessions use wide band.
+        # Unknown/empty session falls back to constructor value (default boundary_pct_default).
         effective_boundary_pct = (
-            _BOUNDARY_PCT_WIDE if session in _WIDE_BAND_SESSIONS else self._boundary_pct
+            self._cfg.boundary_pct_wide if session in self._cfg.wide_band_sessions
+            else self._boundary_pct
         )
         boundary_width_price = (
-            bounds.width_points * XAUUSD_POINT_SIZE * effective_boundary_pct
+            bounds.width_points * self._cfg.point_size * effective_boundary_pct
         )
 
         near_lower = current_price <= bounds.lower + boundary_width_price
@@ -654,10 +706,10 @@ class RangeTrader:
         Downstream 5 guards (width/RR/touches/duration/lot) still enforce
         full quality gate — this only opens candidate detection.
         """
-        if h1_df.is_empty() or h1_df.height < _DONCHIAN_LOOKBACK_BARS:
+        if h1_df.is_empty() or h1_df.height < self._cfg.donchian_lookback:
             return None
 
-        recent = h1_df.tail(_DONCHIAN_LOOKBACK_BARS)
+        recent = h1_df.tail(self._cfg.donchian_lookback)
         upper = float(recent["high"].max())
         lower = float(recent["low"].min())
 
@@ -670,7 +722,7 @@ class RangeTrader:
             source="donchian_channel",
             confidence=_DONCHIAN_CONFIDENCE,
             now=now,
-            duration_bars=_DONCHIAN_LOOKBACK_BARS,
+            duration_bars=self._cfg.donchian_lookback,
         )
 
     def _validate_bounds(
@@ -684,7 +736,7 @@ class RangeTrader:
         duration_bars: int = 0,
     ) -> RangeBounds | None:
         """Shared width validation for both detection methods."""
-        width_points = (upper - lower) / XAUUSD_POINT_SIZE
+        width_points = (upper - lower) / self._cfg.point_size
 
         if width_points < self._min_range_width:
             return None
@@ -738,7 +790,7 @@ class RangeTrader:
 
         # Create a synthetic TradeZone at the boundary for CHoCH check
         if direction == "long":
-            boundary_width = bounds.width_points * XAUUSD_POINT_SIZE * bp
+            boundary_width = bounds.width_points * self._cfg.point_size * bp
             zone = TradeZone(
                 zone_high=round(bounds.lower + boundary_width, 2),
                 zone_low=round(bounds.lower, 2),
@@ -748,7 +800,7 @@ class RangeTrader:
                 confidence=bounds.confidence,
             )
         else:
-            boundary_width = bounds.width_points * XAUUSD_POINT_SIZE * bp
+            boundary_width = bounds.width_points * self._cfg.point_size * bp
             zone = TradeZone(
                 zone_high=round(bounds.upper, 2),
                 zone_low=round(bounds.upper - boundary_width, 2),
@@ -767,14 +819,14 @@ class RangeTrader:
                 return None
 
         # SL: boundary +/- ATR-adaptive buffer
-        sl_buffer = _compute_sl_buffer(h1_atr) * XAUUSD_POINT_SIZE
+        sl_buffer = _compute_sl_buffer(h1_atr) * self._cfg.point_size
         if direction == "long":
             stop_loss = bounds.lower - sl_buffer
         else:
             stop_loss = bounds.upper + sl_buffer
 
         entry_price = current_price
-        risk_points = abs(entry_price - stop_loss) / XAUUSD_POINT_SIZE
+        risk_points = abs(entry_price - stop_loss) / self._cfg.point_size
         if risk_points == 0:
             return None
 
@@ -782,7 +834,7 @@ class RangeTrader:
         take_profit = bounds.midpoint
 
         # TP aggressive: opposite boundary minus 10% inset
-        range_price = bounds.width_points * XAUUSD_POINT_SIZE
+        range_price = bounds.width_points * self._cfg.point_size
         inset = range_price * 0.10
         if direction == "long":
             take_profit_ext = bounds.upper - inset
@@ -794,7 +846,7 @@ class RangeTrader:
         # RR 永远 < 1.2, Guard 2 reject all trades (UTC 08:30-11:30 共 12 cycle
         # 全 HOLD). Mean reversion 经典做法 = 持仓到对立边界. TP_ext 是真实
         # 策略目标 (TP1=midpoint 保留作 "conservative partial exit" 概念).
-        reward_points = abs(take_profit_ext - entry_price) / XAUUSD_POINT_SIZE
+        reward_points = abs(take_profit_ext - entry_price) / self._cfg.point_size
         rr_ratio = reward_points / risk_points if risk_points > 0 else 0.0
 
         # Round 4.6-K: enforce Guard 2 (RR >= 1.2) at setup build time.
