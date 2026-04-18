@@ -563,9 +563,19 @@ def main():
         action="store_true",
         help="Paper mode — log signals but send no real MT5 orders",
     )
+    parser.add_argument(
+        "--no-execute",
+        action="store_true",
+        help=(
+            "Signal-only mode — compute strategy + write live_state.json for "
+            "external executor (e.g. AISMCReceiver.mq5 EA) but do NOT call "
+            "mt5.order_send from Python. Avoids MT5 multi-client IPC issues."
+        ),
+    )
     args = parser.parse_args()
     SYMBOL = args.symbol
-    PAPER_MODE = args.paper
+    PAPER_MODE = args.paper or args.no_execute  # both short-circuit order_send
+    NO_EXECUTE = args.no_execute
 
     from smc.instruments import get_instrument_config
     cfg = get_instrument_config(SYMBOL)
