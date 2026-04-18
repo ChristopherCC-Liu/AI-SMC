@@ -74,6 +74,11 @@ class MT5BrokerPort:
     _TRADE_ACTION_SLTP: int = 6  # Modify SL/TP
     _TRADE_RETCODE_DONE: int = 10009
 
+    # audit-r3 O7: default magic preserved for backward-compat; real value
+    # comes from cfg.magic (XAU=19760418, BTC=19760419).  This default is
+    # only used when no cfg is supplied (legacy/test paths).
+    _DEFAULT_MAGIC: int = 202500
+
     def __init__(
         self,
         login: int,
@@ -81,7 +86,17 @@ class MT5BrokerPort:
         server: str,
         *,
         path: str | None = None,
+        cfg: "object | None" = None,
     ) -> None:
+        """Create an MT5 broker adapter.
+
+        audit-r3 O7: *cfg* (``InstrumentConfig``) supplies the per-symbol
+        ``magic`` for order tagging.  Left as ``None`` for backward-compat
+        — legacy callers (tests, CLI plumbing) fall back to the built-in
+        ``_DEFAULT_MAGIC`` so no existing code breaks.  New production
+        callers should pass ``cfg`` so XAU/BTC positions are tracked
+        independently (identical policy to the live_demo / EA path).
+        """
         try:
             import MetaTrader5 as mt5  # type: ignore[import-untyped]
         except ImportError as exc:
@@ -92,6 +107,8 @@ class MT5BrokerPort:
             ) from exc
 
         self._mt5 = mt5
+        # Resolve magic once at construction — every order uses the same value.
+        self._magic: int = int(getattr(cfg, "magic", self._DEFAULT_MAGIC))
 
         if not mt5.initialize(path=path, login=login, password=password, server=server):
             code, msg = mt5.last_error()
@@ -113,7 +130,7 @@ class MT5BrokerPort:
             "sl": request.stop_loss,
             "tp": request.take_profit_1,
             "deviation": 20,
-            "magic": 202500,
+            "magic": self._magic,  # audit-r3 O7: cfg-driven per-symbol
             "comment": "ai-smc",
             "type_time": 0,  # GTC
             "type_filling": 1,  # IOC
@@ -194,7 +211,7 @@ class MT5BrokerPort:
             "position": ticket,
             "price": price,
             "deviation": 20,
-            "magic": 202500,
+            "magic": self._magic,  # audit-r3 O7: cfg-driven per-symbol
             "comment": "ai-smc-close",
             "type_time": 0,
             "type_filling": 1,

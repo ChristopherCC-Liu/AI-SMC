@@ -32,7 +32,16 @@ input int      DeviationPoints      = 100;
 input double   DefaultLot           = 0.01;
 input bool     EnableTrading        = true;
 input bool     VerboseLog           = true;
-input int      DirectionCooldownSec = 1800;  // 30 min same-direction cooldown
+// audit-r3 R5: cooldown is now **mode-aware** based on /signal.trading_mode:
+//   "ranging"  → RangingCooldownSec  (high-frequency reversals)
+//   "trending" → TrendingCooldownSec (low-frequency continuation)
+//   other/missing → TrendingCooldownSec (conservative fallback)
+// Old single DirectionCooldownSec input kept as deprecated fallback for
+// backward-compatible deployment; if both are present we prefer the
+// mode-specific inputs and ignore the legacy one.
+input int      RangingCooldownSec   = 300;   // 5 min — ranging: quick re-entry OK
+input int      TrendingCooldownSec  = 1800;  // 30 min — trending: avoid chasing
+input int      DirectionCooldownSec = 1800;  // DEPRECATED — kept for rollback only
 
 CTrade         g_trade;
 datetime       g_last_poll_ts    = 0;
@@ -124,21 +133,37 @@ void PollAndExecute()
 }
 
 
+int ResolveCooldownSec(const string &body)
+{
+   // audit-r3 R5: mode-aware direction cooldown.
+   // Ranging sessions (Asian) reverse quickly → short cooldown to not miss
+   // the next leg.  Trending sessions (London/NY) want fewer re-entries
+   // to avoid chasing.  Unknown mode → conservative trending value.
+   string mode = JsonStr(body, "trading_mode");
+   StringToLower(mode);
+   if (mode == "ranging") return RangingCooldownSec;
+   if (mode == "trending") return TrendingCooldownSec;
+   return TrendingCooldownSec;
+}
+
+
 bool ExecuteDirection(bool is_buy, const string &body)
 {
-   // Fix 3: direction-level cooldown — prevent same-direction re-entry within
-   // DirectionCooldownSec seconds (default 30 min).
+   // audit-r3 R5: cooldown resolved from /signal.trading_mode (ranging=300,
+   // trending=1800, fallback=1800).  Replaces the previous fixed
+   // DirectionCooldownSec input-level constant.
+   int cooldown = ResolveCooldownSec(body);
    datetime now = TimeCurrent();
-   if (is_buy && now - g_last_buy_ts < DirectionCooldownSec)
+   if (is_buy && now - g_last_buy_ts < cooldown)
    {
-      PrintFormat("Skip BUY: cooldown %ds remaining",
-                  DirectionCooldownSec - (int)(now - g_last_buy_ts));
+      PrintFormat("Skip BUY: cooldown %ds remaining (mode cooldown=%d)",
+                  cooldown - (int)(now - g_last_buy_ts), cooldown);
       return false;
    }
-   if (!is_buy && now - g_last_sell_ts < DirectionCooldownSec)
+   if (!is_buy && now - g_last_sell_ts < cooldown)
    {
-      PrintFormat("Skip SELL: cooldown %ds remaining",
-                  DirectionCooldownSec - (int)(now - g_last_sell_ts));
+      PrintFormat("Skip SELL: cooldown %ds remaining (mode cooldown=%d)",
+                  cooldown - (int)(now - g_last_sell_ts), cooldown);
       return false;
    }
 
