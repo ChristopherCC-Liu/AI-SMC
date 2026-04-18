@@ -2,26 +2,51 @@
 # AI-SMC Mac launchd agent installer
 # Run from the project root: bash ops/mac/install.sh
 #
-# Prerequisites:
-#   brew install sshpass
-#   mkdir -p ~/Backups/AI-SMC/XAUUSD ~/Backups/AI-SMC/BTCUSD
-#
-# Optional (recommended - avoids storing password in plist):
-#   ssh-keygen -t ed25519 -f ~/.ssh/id_aismc -N ""
-#   ssh-copy-id -i ~/.ssh/id_aismc.pub Administrator@43.163.107.158
-#   Then edit plist files to use: ssh -i ~/.ssh/id_aismc (no sshpass)
+# Auth setup (pick one — script will guide you):
+#   A) ssh-key (recommended, no plaintext credentials):
+#        ssh-keygen -t ed25519 -f ~/.ssh/id_aismc -N ""
+#        ssh-copy-id -i ~/.ssh/id_aismc.pub Administrator@<VPS>
+#   B) password via ~/.aismc/env (chmod 600):
+#        mkdir -p ~/.aismc && chmod 700 ~/.aismc
+#        echo "export SSHPASS='your-password'" > ~/.aismc/env
+#        chmod 600 ~/.aismc/env
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
+VPS_HOST_DEFAULT="Administrator@43.163.107.158"
 
 echo "==> Installing AI-SMC Mac launchd agents"
 
-# ── Verify prerequisites ────────────────────────────────────────────────────
+# ── Auth setup (ssh-key preferred) ──────────────────────────────────────────
 
-if ! command -v sshpass >/dev/null 2>&1; then
-    echo "ERROR: sshpass not found. Install with: brew install sshpass"
+SSH_KEY="$HOME/.ssh/id_aismc"
+
+if [ -f "$SSH_KEY" ]; then
+    echo "  SSH key detected: $SSH_KEY — using key auth (no password needed)"
+elif [ -f "$HOME/.aismc/env" ]; then
+    echo "  ~/.aismc/env detected — using password auth fallback"
+    if ! command -v sshpass >/dev/null 2>&1; then
+        echo "ERROR: sshpass required when using password auth. Install: brew install sshpass" >&2
+        exit 1
+    fi
+else
+    cat >&2 <<EOF
+ERROR: no auth configured. Pick one:
+
+  A) ssh-key (recommended):
+       ssh-keygen -t ed25519 -f ~/.ssh/id_aismc -N ""
+       ssh-copy-id -i ~/.ssh/id_aismc.pub $VPS_HOST_DEFAULT
+
+  B) password file (fallback):
+       mkdir -p ~/.aismc && chmod 700 ~/.aismc
+       printf "export SSHPASS='%s'\n" 'your-password' > ~/.aismc/env
+       chmod 600 ~/.aismc/env
+       brew install sshpass
+
+Rerun this installer after either A or B is done.
+EOF
     exit 1
 fi
 

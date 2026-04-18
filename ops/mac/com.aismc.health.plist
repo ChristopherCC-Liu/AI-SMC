@@ -34,11 +34,27 @@
 set -euo pipefail
 
 VPS_HOST="Administrator@43.163.107.158"
-SSHPASS_BIN="/opt/homebrew/bin/sshpass"
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=20 -o BatchMode=no"
 FAIL_FILE="/tmp/aismc_health_fails"
 MAX_FAILS=3
-export SSHPASS='Lcc5201314^^'
+
+# Credentials (no plaintext in plist): prefer ssh-key, else ~/.aismc/env
+SSH_KEY="$HOME/.ssh/id_aismc"
+if [ -f "$SSH_KEY" ]; then
+    SSH_AUTH=(ssh "-i" "$SSH_KEY")
+elif [ -f "$HOME/.aismc/env" ]; then
+    . "$HOME/.aismc/env"   # must export SSHPASS=... (chmod 600)
+    if [ -z "${SSHPASS:-}" ]; then
+        echo "FATAL: ~/.aismc/env must export SSHPASS" >&2
+        exit 1
+    fi
+    SSHPASS_BIN="/opt/homebrew/bin/sshpass"
+    SSH_AUTH=("$SSHPASS_BIN" "-e" ssh)
+    export SSHPASS
+else
+    echo "FATAL: configure ~/.ssh/id_aismc (preferred) or ~/.aismc/env" >&2
+    exit 1
+fi
 
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
@@ -50,7 +66,7 @@ else
 fi
 
 # Query healthz via SSH (avoids needing port 8080 open externally)
-RESPONSE=$("$SSHPASS_BIN" -e ssh $SSH_OPTS "$VPS_HOST" \
+RESPONSE=$("${SSH_AUTH[@]}" $SSH_OPTS "$VPS_HOST" \
     "curl -s --max-time 10 http://127.0.0.1:8080/healthz" 2>/dev/null) || RESPONSE=""
 
 OK=0

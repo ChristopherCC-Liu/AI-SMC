@@ -36,24 +36,40 @@
 set -e
 VPS_HOST="Administrator@43.163.107.158"
 DEST="$HOME/Backups/AI-SMC"
-SSHPASS_BIN="/opt/homebrew/bin/sshpass"
 SCP="/usr/bin/scp"
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=30"
-export SSHPASS='Lcc5201314^^'
+
+# Credentials (no plaintext in plist): prefer ssh-key, else ~/.aismc/env
+SSH_KEY="$HOME/.ssh/id_aismc"
+if [ -f "$SSH_KEY" ]; then
+    SCP_AUTH=("$SCP" "-i" "$SSH_KEY")
+elif [ -f "$HOME/.aismc/env" ]; then
+    . "$HOME/.aismc/env"   # must export SSHPASS=... (chmod 600)
+    if [ -z "${SSHPASS:-}" ]; then
+        echo "FATAL: ~/.aismc/env must export SSHPASS" >&2
+        exit 1
+    fi
+    SSHPASS_BIN="/opt/homebrew/bin/sshpass"
+    SCP_AUTH=("$SSHPASS_BIN" "-e" "$SCP")
+    export SSHPASS
+else
+    echo "FATAL: configure ~/.ssh/id_aismc (preferred) or ~/.aismc/env" >&2
+    exit 1
+fi
 
 mkdir -p "$DEST/XAUUSD" "$DEST/BTCUSD"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting AI-SMC backup"
 
 # XAUUSD
-"$SSHPASS_BIN" -e "$SCP" $SSH_OPTS -r \
+"${SCP_AUTH[@]}" $SSH_OPTS -r \
     "${VPS_HOST}:C:/AI-SMC/data/XAUUSD/." \
     "$DEST/XAUUSD/" \
     && echo "[$(date '+%Y-%m-%d %H:%M:%S')] XAUUSD backup OK" \
     || echo "[$(date '+%Y-%m-%d %H:%M:%S')] XAUUSD backup FAILED"
 
 # BTCUSD
-"$SSHPASS_BIN" -e "$SCP" $SSH_OPTS -r \
+"${SCP_AUTH[@]}" $SSH_OPTS -r \
     "${VPS_HOST}:C:/AI-SMC/data/BTCUSD/." \
     "$DEST/BTCUSD/" \
     && echo "[$(date '+%Y-%m-%d %H:%M:%S')] BTCUSD backup OK" \

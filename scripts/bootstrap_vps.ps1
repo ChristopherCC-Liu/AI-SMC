@@ -87,7 +87,11 @@ function Get-ServiceTaskXml {
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>true</StartWhenAvailable>
-    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
+    <!-- Round 5 T5 audit r1 fix (P0-1): PT2H on a long-running daemon caused
+         Task Scheduler to hard-kill the process every 2h, losing in-memory
+         cycle/quota/circuit state. PT0S = no limit. RestartOnFailure still
+         catches genuine crashes. -->
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <RestartOnFailure>
       <Interval>PT5M</Interval>
       <Count>10</Count>
