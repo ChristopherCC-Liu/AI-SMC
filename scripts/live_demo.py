@@ -140,11 +140,12 @@ from smc.strategy.range_trader import (
 )
 from smc.strategy.range_quota import AsianRangeQuota
 from smc.strategy.phase1a_circuit_breaker import Phase1aCircuitBreaker
-from smc.strategy.htf_bias import compute_htf_bias
+from smc.strategy.htf_bias import compute_htf_bias, htf_bias_tier
 from smc.monitor.timing import next_bar_close
 from smc.monitor.structured_log import crit as log_crit, warn as log_warn, info as log_info
 from smc.monitor.critical_alerter import alert_critical
 from smc.monitor.state_io import atomic_write_json
+from smc.monitor.reconcile_cursor import load_reconcile_cursor, save_reconcile_cursor
 from smc.strategy.session import get_session_info
 from smc.execution.mt5_send import send_with_retry, compute_dynamic_deviation
 # Round 5 T1 F2+F3: real broker reconciliation + daily halt gating.
@@ -155,6 +156,7 @@ from smc.execution.mt5_positions_adapter import (
 from smc.risk.consec_loss_halt import ConsecLossHalt
 from smc.risk.drawdown_guard import DrawdownGuard
 from smc.risk.margin_cap import check_margin_cap
+from smc.risk.live_position_sizer import compute_live_position_size
 
 # ---------------------------------------------------------------------------
 # Per-symbol data paths (populated in main() after argparse).
@@ -483,8 +485,21 @@ def determine_action(setups, ai_analysis, regime, *,
 
 def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
                best_setup, *, mode_decision=None, range_trader=None, aggregator=None,
-               blocked_reason: "str | None" = None):
-    """Save live state for dashboard display (dual-mode aware)."""
+               blocked_reason: "str | None" = None,
+               cfg=None, balance_usd: "float | None" = None, risk_pct: float = 1.0,
+               position_size_lots: "float | None" = None,
+               htf_bias=None):
+    """Save live state for dashboard display (dual-mode aware).
+
+    audit-r2 R1 (rev2 per ops-sustain):
+      - position_size_lots can be supplied pre-computed (single source of
+        truth with pre_write_gate) or recomputed inline via
+        compute_live_position_size.  Supplying it is the preferred path —
+        guarantees gate and EA see the same lot.
+      - balance_usd is fail-closed: None or non-positive → lot = 0.0.  Never
+        default to a literal ($10k) that can be magnitudes higher than demo
+        equity.
+    """
     state = {
         "cycle": cycle,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -528,11 +543,49 @@ def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
     if aggregator is not None and hasattr(aggregator, "_last_setup_diagnostic"):
         state["smc_diagnostic"] = dict(aggregator._last_setup_diagnostic or {})
 
+    # audit-r2 R1 (rev2): use caller-provided lots when given (single source
+    # of truth with pre_write_gate); otherwise fall through to helper.
+    if position_size_lots is None:
+        if cfg is not None:
+            position_size_lots = compute_live_position_size(
+                best_setup,
+                cfg=cfg,
+                balance_usd=balance_usd,
+                risk_pct=risk_pct,
+                blocked_reason=blocked_reason,
+            )
+        else:
+            position_size_lots = 0.0
+    state["position_size"] = position_size_lots
+
+    # audit-r2 ops #18 (Guard 6 debate monitor): expose HTF bias confidence
+    # + tier bucket so decision-reviewer can accumulate session-level
+    # distribution data to size Round 3 S2 two-stage soft-multiplier decision.
+    # None-safe: halt path / missing snapshots → neutral tier, conf 0.0.
+    _hb_conf = 0.0
+    if htf_bias is not None:
+        _hb_conf = float(getattr(htf_bias, "confidence", 0.0) or 0.0)
+    state["htf_bias_conf"] = round(_hb_conf, 3)
+    state["htf_bias_tier"] = htf_bias_tier(_hb_conf)
+
     if best_setup:
         # Range setups use .direction/.trigger/.confidence directly (RangeSetup)
         # Trending setups use .entry_signal (TradeSetup)
+        # audit-r2 ops #18 (TP1 debate monitor):
+        #   planned_rr_ratio: build-time nominal RR (what Guard 2 validated
+        #     against the aggressive TP — take_profit_ext on RangeSetup,
+        #     take_profit_1 on TradeSetup since trending has no separate
+        #     aggressive target today).
+        #   exec_rr_ratio: the RR MT5 actually sees on the order (midpoint
+        #     for Range, tp1 for Trend — identical to planned for Trend).
+        # Round 3 will compare hit-rate distribution planned vs exec to
+        # decide Option A/B/C for TP1 policy.
         if hasattr(best_setup, "entry_signal"):
             e = best_setup.entry_signal
+            # Trending: planned == exec (no separate aggressive target today)
+            _risk_pts = abs(e.entry_price - e.stop_loss)
+            _tp1_pts = abs(e.take_profit_1 - e.entry_price)
+            _exec_rr = round(_tp1_pts / _risk_pts, 3) if _risk_pts > 0 else 0.0
             state["best_setup"] = {
                 "direction": e.direction,
                 "entry": e.entry_price,
@@ -540,16 +593,33 @@ def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
                 "tp1": e.take_profit_1,
                 "trigger": e.trigger_type,
                 "confluence": best_setup.confluence_score,
+                # audit-r2 R1: strategy_server reads this → /signal.lot → EA.
+                "position_size_lots": position_size_lots,
+                # audit-r2 ops #18 (TP1 debate):
+                "planned_rr_ratio": _exec_rr,  # trending has no nominal-vs-exec divergence
+                "exec_rr_ratio": _exec_rr,
             }
         else:
-            # RangeSetup from range_trader
+            # RangeSetup: planned (aggressive TP=tp_ext) vs exec (midpoint TP)
+            _entry = getattr(best_setup, "entry_price", price)
+            _sl = getattr(best_setup, "stop_loss", 0)
+            _tp_exec = getattr(best_setup, "take_profit", 0)
+            _tp_planned = getattr(best_setup, "take_profit_ext", _tp_exec)
+            _risk_pts = abs(_entry - _sl)
+            _planned_rr = round(abs(_tp_planned - _entry) / _risk_pts, 3) if _risk_pts > 0 else 0.0
+            _exec_rr = round(abs(_tp_exec - _entry) / _risk_pts, 3) if _risk_pts > 0 else 0.0
             state["best_setup"] = {
                 "direction": best_setup.direction,
-                "entry": getattr(best_setup, "entry_price", price),
-                "sl": getattr(best_setup, "stop_loss", 0),
-                "tp1": getattr(best_setup, "take_profit", 0),
+                "entry": _entry,
+                "sl": _sl,
+                "tp1": _tp_exec,
                 "trigger": best_setup.trigger,
                 "confluence": best_setup.confidence,
+                # audit-r2 R1: strategy_server reads this → /signal.lot → EA.
+                "position_size_lots": position_size_lots,
+                # audit-r2 ops #18 (TP1 debate):
+                "planned_rr_ratio": _planned_rr,
+                "exec_rr_ratio": _exec_rr,
             }
 
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -616,6 +686,9 @@ def main():
     # Round 5 T2 Stage 5: per-symbol circuit breaker flag so XAU and BTC
     # processes each own their execution circuit independently.
     CIRCUIT_FLAG_PATH = DATA_ROOT / "execution_circuit_open.flag"
+    # audit-r2 ops #4: reconcile cursor — prevents double-counting of
+    # closed deals across restarts (silent bug surfaced by ops-sustain).
+    RECONCILE_TS_PATH = DATA_ROOT / "last_reconcile_ts.json"
 
     print(f"[{datetime.now()}] AI-SMC Live Trading Loop Starting...")
     print("=" * 60)
@@ -714,10 +787,11 @@ def main():
     _initial_balance = float(info.balance)
     peak_balance = _initial_balance
     daily_pnl = 0.0
-    # Last cycle UTC timestamp used to query newly-closed deals. On first
-    # cycle we look back 12h to pick up any closes that happened while the
-    # process was restarting — the magic-filter in the adapter makes this safe.
-    last_reconcile_ts = datetime.now(timezone.utc) - timedelta(hours=12)
+    # audit-r2 ops #4: reload persisted reconcile cursor so closed deals
+    # processed pre-restart are NOT re-played into consec_halt /
+    # phase1a_breaker / daily_pnl on startup.  Missing or corrupt cursor
+    # falls back to the original "now - 12h" first-boot behaviour.
+    last_reconcile_ts = load_reconcile_cursor(RECONCILE_TS_PATH)
 
     while running:
         cycle += 1
@@ -740,19 +814,31 @@ def main():
         print(f"[{now.strftime('%H:%M:%S')} UTC] CYCLE {cycle}")
         print(f"{'='*60}")
 
+        # audit-r2 ops #3: halt paths fall through to save_state so the
+        # dashboard's "为什么不开仓" card surfaces the real reason (symmetry
+        # with pre_write_gate added in Round 1).  Before this fix, halt
+        # `continue` skipped save_state entirely — live_state.json went
+        # stale and watchdog_smart's Axis-3 freshness check could mistake
+        # a legitimate halt for a process crash.
+        _halt_blocked_reason: str | None = None
+        _halt_label: str | None = None
+        _halt_display_reason: str | None = None
+
         # Round 5-P0-2a: honor dashboard KillSwitch. If the pause flag is present,
         # skip all trading logic for this cycle. dashboard_server.py creates the
         # flag on POST /api/toggle_trading; live_demo was previously ignoring it.
         if PAUSE_FLAG_PATH.exists():
             log_warn("trading_paused", cycle=cycle, flag=str(PAUSE_FLAG_PATH))
             print(f"  [PAUSED] trading_paused.flag present — skipping cycle {cycle}")
-            continue
+            _halt_blocked_reason = "kill_switch:dashboard_paused"
+            _halt_label = "PAUSED"
+            _halt_display_reason = "Dashboard kill-switch active (trading_paused.flag)"
 
         # Round 5 T1 F3: daily-halt gating. Consecutive-loss halt is the
         # user-visible "亏 3 单自动停" rule; DrawdownGuard is the %-based
         # backstop (3% daily loss). Either trip blocks new opens until the
         # next UTC 00:00 rollover (Phase1a/ConsecLoss) or a manual reset.
-        if consec_halt.is_tripped():
+        if _halt_blocked_reason is None and consec_halt.is_tripped():
             snap = consec_halt.snapshot()
             log_warn(
                 "consec_loss_halt_active",
@@ -761,21 +847,53 @@ def main():
                 tripped_at=snap.tripped_at,
             )
             print(f"  [HALT] consec-loss halt ({snap.consec_losses} losses) — skipping cycle {cycle}")
-            continue
-        budget = drawdown_guard.check_budget(
-            balance=float(info.balance),
-            peak_balance=peak_balance,
-            daily_pnl=daily_pnl,
-        )
-        if not budget.can_trade:
-            log_warn(
-                "drawdown_guard_block",
-                cycle=cycle,
-                reason=budget.rejection_reason,
-                daily_loss_pct=budget.daily_loss_pct,
-                total_drawdown_pct=budget.total_drawdown_pct,
+            _halt_blocked_reason = f"consec_loss_halt:losses={snap.consec_losses}"
+            _halt_label = "HALT"
+            _halt_display_reason = f"连亏 {snap.consec_losses} 单触发每日保险"
+
+        if _halt_blocked_reason is None:
+            budget = drawdown_guard.check_budget(
+                balance=float(info.balance),
+                peak_balance=peak_balance,
+                daily_pnl=daily_pnl,
             )
-            print(f"  [HALT] drawdown guard: {budget.rejection_reason}")
+            if not budget.can_trade:
+                log_warn(
+                    "drawdown_guard_block",
+                    cycle=cycle,
+                    reason=budget.rejection_reason,
+                    daily_loss_pct=budget.daily_loss_pct,
+                    total_drawdown_pct=budget.total_drawdown_pct,
+                )
+                print(f"  [HALT] drawdown guard: {budget.rejection_reason}")
+                _halt_blocked_reason = f"drawdown_guard:{budget.rejection_reason}"
+                _halt_label = "HALT"
+                _halt_display_reason = f"回撤保护: {budget.rejection_reason}"
+
+        if _halt_blocked_reason is not None:
+            # audit-r2 ops #3: write HOLD state so dashboard + EA /signal
+            # both see the halt reason explicitly instead of stale data.
+            try:
+                save_state(
+                    cycle=cycle,
+                    price=0.0,
+                    action="HOLD",
+                    reason=f"[{_halt_label}] {_halt_display_reason}",
+                    ai_analysis={},
+                    regime="unknown",
+                    setups=(),
+                    best_setup=None,
+                    mode_decision=None,
+                    range_trader=None,
+                    aggregator=None,
+                    blocked_reason=_halt_blocked_reason,
+                    cfg=cfg,
+                    balance_usd=None,  # halt path: no sizer work needed → fail-closed to 0 lots
+                    risk_pct=1.0,
+                    position_size_lots=0.0,
+                )
+            except Exception as _halt_save_exc:
+                log_warn("halt_save_state_fail", exc=str(_halt_save_exc)[:120])
             continue
 
         try:
@@ -862,6 +980,30 @@ def main():
             # We intercept here — before save_state writes live_state.json — so
             # strategy_server /signal reads HOLD and EA naturally skips opening.
             blocked_reason: str | None = None
+
+            # audit-r2 R1 (rev2 per ops-sustain #1 + #2): compute lot size BEFORE
+            # margin_cap so the gate evaluates the actual order volume the EA
+            # will receive.  Previous revision read a non-existent attribute on
+            # the TradeSetup/RangeSetup instance and silently fell back to
+            # 0.01 lot, disabling margin_cap for any lot > 0.01.
+            # balance_usd is fail-closed: unknown equity → 0 lots, not a
+            # $10k fantasy that would magnify risk on a $1k demo account.
+            _live_balance_usd: float | None = None
+            try:
+                _acc_info = mt5.account_info()
+                if _acc_info is not None and float(_acc_info.balance) > 0:
+                    _live_balance_usd = float(_acc_info.balance)
+            except Exception as _bal_exc:
+                log_warn("balance_probe_error", exc=str(_bal_exc)[:120])
+
+            planned_lots = compute_live_position_size(
+                best,
+                cfg=cfg,
+                balance_usd=_live_balance_usd,
+                risk_pct=1.0,
+                blocked_reason=None,  # gate will set blocked_reason below
+            )
+
             if best is not None:
                 # Gate 1: margin_cap — requires live MT5 account_info
                 try:
@@ -875,7 +1017,13 @@ def main():
                         mt5.ORDER_TYPE_BUY if getattr(best, "direction", "long") == "long"
                         else mt5.ORDER_TYPE_SELL
                     )
-                    _gate_lots = getattr(best, "position_size_lots", cfg.min_lot)
+                    # audit-r2 R1 (rev2): use the SAME lot size save_state /
+                    # strategy_server / EA will see.  If sizer returned 0.0
+                    # (unknown balance / bad SL), gate falls back to min_lot so
+                    # margin_cap still sanity-checks the smallest possible
+                    # tradeable order — preserves old behaviour for the
+                    # degenerate case.
+                    _gate_lots = planned_lots if planned_lots > 0 else cfg.min_lot
                     _margin_result = check_margin_cap(
                         mt5,
                         symbol=cfg.mt5_path,
@@ -901,6 +1049,7 @@ def main():
                 action = "HOLD"
                 reason = f"[PRE_WRITE_GATE] {blocked_reason}"
                 best = None
+                planned_lots = 0.0  # audit-r2 R1 rev2: gate trip → lot=0 for save_state
                 log_warn("pre_write_gate_blocked", blocked_reason=blocked_reason)
                 print(f"  [PRE_WRITE_GATE] Blocked: {blocked_reason}")
 
@@ -1150,6 +1299,22 @@ def main():
                         "notional_value_usd": round(notional_value_usd, 2),
                         "margin_used_estimate_usd": margin_used_estimate_usd,
                         "leverage_ratio": cfg.leverage_ratio,
+                        # audit-r2 ops #18 (TP1 debate + Guard 6 monitor):
+                        # planned = TP_ext (aggressive, Guard 2 validator);
+                        # exec    = TP midpoint (what MT5 receives).
+                        # Round 3 uses hit-rate of both to decide TP1 policy.
+                        "planned_rr_ratio": round(
+                            abs(best.take_profit_ext - best.entry_price)
+                            / abs(best.entry_price - best.stop_loss),
+                            3,
+                        ) if abs(best.entry_price - best.stop_loss) > 0 else 0.0,
+                        "exec_rr_ratio": round(
+                            abs(best.take_profit - best.entry_price)
+                            / abs(best.entry_price - best.stop_loss),
+                            3,
+                        ) if abs(best.entry_price - best.stop_loss) > 0 else 0.0,
+                        "htf_bias_conf": round(float(getattr(htf_bias, "confidence", 0.0) or 0.0), 3),
+                        "htf_bias_tier": htf_bias_tier(float(getattr(htf_bias, "confidence", 0.0) or 0.0)),
                     }
                     with open(JOURNAL_PATH, "a") as f:
                         f.write(json.dumps(log_entry) + "\n")
@@ -1157,6 +1322,18 @@ def main():
                 # Trending (v1 5-gate) path: iterate setups as before
                 for s in setups:
                     e = s.entry_signal
+                    # audit-r2 R1 rev2 (ops-sustain #4): surface the R1-computed
+                    # lot in journal for --no-execute audit trail.  Trending
+                    # setups currently do NOT use per-setup sizing (EA uses
+                    # /signal.lot based on best_setup only), so we log the
+                    # planned_lots for the best setup = the EA will execute,
+                    # or 0.0 if this setup is not the one written to /signal.
+                    _journal_lots = planned_lots if (best is s) else 0.0
+                    # audit-r2 ops #18: trending has no separate aggressive TP;
+                    # planned == exec.  Formula mirrors RangeSetup block above
+                    # so journal comparisons across modes are apples-to-apples.
+                    _t_risk = abs(e.entry_price - e.stop_loss)
+                    _t_rr = round(abs(e.take_profit_1 - e.entry_price) / _t_risk, 3) if _t_risk > 0 else 0.0
                     log_entry = {
                         "time": now.isoformat(),
                         "cycle": cycle,
@@ -1172,6 +1349,12 @@ def main():
                         "ai_direction": ai_analysis.get("ai_direction", ai_analysis.get("direction", "?")),
                         "mode": "PAPER",
                         "trading_mode": mode.mode,
+                        # audit-r2 ops #18 (TP1 debate + Guard 6 monitor)
+                        "planned_rr_ratio": _t_rr,  # trending: planned == exec
+                        "exec_rr_ratio": _t_rr,
+                        "htf_bias_conf": round(float(getattr(htf_bias, "confidence", 0.0) or 0.0), 3),
+                        "htf_bias_tier": htf_bias_tier(float(getattr(htf_bias, "confidence", 0.0) or 0.0)),
+                        "position_size_lots": _journal_lots,
                     }
                     with open(JOURNAL_PATH, "a") as f:
                         f.write(json.dumps(log_entry) + "\n")
@@ -1219,6 +1402,14 @@ def main():
                 except Exception:
                     pass
                 last_reconcile_ts = now
+                # audit-r2 ops #4: persist cursor immediately after updating
+                # in-memory state so next restart picks up from here, not
+                # from now-12h.  Wrapped in try/except to keep trading loop
+                # alive even if disk write fails (next cycle will retry).
+                try:
+                    save_reconcile_cursor(RECONCILE_TS_PATH, last_reconcile_ts)
+                except Exception as _cursor_exc:
+                    log_warn("reconcile_cursor_save_fail", exc=str(_cursor_exc)[:120])
                 # If the halt just tripped this cycle, fire a loud alert so the
                 # user knows the system went to sleep for the day.
                 if consec_halt.is_tripped() and closed_deals:
@@ -1262,6 +1453,13 @@ def main():
             # Variables that may be unset if an exception fired early are
             # retrieved via locals() with safe defaults.
             _locs = locals()
+            # audit-r2 R1 rev2 (ops-sustain #2): fail-closed balance.  Prefer
+            # the _live_balance_usd already probed in the main body; fall
+            # through to peak_balance; NEVER default to a literal ($10k) —
+            # oversizing on a $1k demo would trigger one-tick liquidation.
+            _balance_for_sizing = _locs.get("_live_balance_usd", None)
+            if _balance_for_sizing is None and peak_balance:
+                _balance_for_sizing = float(peak_balance)
             try:
                 save_state(
                     _locs.get("cycle", cycle),
@@ -1276,6 +1474,11 @@ def main():
                     range_trader=range_trader,
                     aggregator=aggregator,
                     blocked_reason=_locs.get("blocked_reason", None),
+                    cfg=cfg,
+                    balance_usd=_balance_for_sizing,
+                    risk_pct=1.0,  # TODO: pull from cfg when risk_pct added to InstrumentConfig
+                    position_size_lots=_locs.get("planned_lots", None),  # single source of truth
+                    htf_bias=_locs.get("htf_bias", None),  # audit-r2 ops #18 Guard 6 monitor
                 )
             except Exception as save_exc:
                 log_warn("save_state_fail", exc=str(save_exc)[:100])
