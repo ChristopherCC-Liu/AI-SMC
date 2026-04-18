@@ -62,6 +62,10 @@ class TestEmptyDay:
         )
         assert digest["symbol"] == "XAUUSD"
         assert digest["date"] == "2026-04-18"
+        # decision-reviewer request: cycles_today_note disclaimer must be
+        # present so dashboard tooltip can set operator expectations.
+        assert "cycles_today_note" in digest
+        assert "process-start" in digest["cycles_today_note"]
         assert digest["trades_opened"] == 0
         assert digest["trades_closed"] == 0
         assert digest["wins"] == 0

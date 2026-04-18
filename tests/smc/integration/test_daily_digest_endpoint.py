@@ -53,7 +53,12 @@ class TestDailyDigestEndpoint:
     def test_invalid_date_returns_400(self, client):
         resp = client.get("/api/daily_digest?symbol=XAUUSD&date=not-a-date")
         assert resp.status_code == 400
-        assert "Invalid date" in resp.json().get("detail", "")
+        detail = resp.json().get("detail", "")
+        # Friendly error surfaces the expected format and the offending input
+        # so the operator knows what to type next time.
+        assert "Invalid date format" in detail
+        assert "YYYY-MM-DD" in detail
+        assert "not-a-date" in detail
 
     def test_default_date_is_today_utc(self, client, tmp_path):
         _mk_tree(tmp_path)
