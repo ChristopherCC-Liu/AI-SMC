@@ -1,0 +1,29 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard-server",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": ["scripts/dashboard_server.py"],
+      "port": 8765
+    },
+    {
+      "name": "live-demo",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": ["scripts/live_demo.py"],
+      "port": 0
+    },
+    {
+      "name": "dashboard-tui",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": ["scripts/dashboard.py"],
+      "port": 0
+    },
+    {
+      "name": "pytest-strategy",
+      "runtimeExecutable": ".venv/bin/pytest",
+      "runtimeArgs": ["tests/smc/unit/strategy/", "-v"],
+      "port": 0
+    }
+  ]
+}

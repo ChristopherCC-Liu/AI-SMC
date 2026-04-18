@@ -32,24 +32,70 @@ _PID_FILE = os.path.realpath(
 )
 
 
+def _pid_alive(pid: int) -> bool:
+    """Check if a process with the given PID is alive. Pure stdlib, cross-platform.
+
+    POSIX: signal 0 raises ProcessLookupError if dead.
+    Windows: OpenProcess + GetExitCodeProcess via ctypes.
+    """
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
 def _ensure_single_instance():
     os.makedirs(os.path.dirname(_PID_FILE), exist_ok=True)
+    # Round 5-P0-4: stale PID self-heal. If an old PID file exists but the owning
+    # process no longer runs (SIGKILL / OOM / hard reboot: atexit did not fire),
+    # remove the stale file and retry instead of refusing to start.
     try:
         fd = os.open(_PID_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode("utf-8"))
-        os.close(fd)
-        atexit.register(lambda: os.path.exists(_PID_FILE) and os.remove(_PID_FILE))
     except FileExistsError:
+        stale_pid = -1
         try:
             with open(_PID_FILE, "r", encoding="utf-8") as f:
-                existing = f.read().strip()
-        except OSError:
-            existing = "unknown"
+                stale_pid = int(f.read().strip() or "-1")
+        except (OSError, ValueError):
+            stale_pid = -1
+        if stale_pid > 0 and _pid_alive(stale_pid):
+            sys.stderr.write(
+                f"[4.6-L] live_demo.py already running (PID {stale_pid}). Exiting.\n"
+            )
+            sys.exit(1)
         sys.stderr.write(
-            f"[4.6-L] live_demo.py already running (PID {existing}). "
-            f"If stale, delete {_PID_FILE} and restart. Exiting.\n"
+            f"[Round5-P0-4] stale PID file ({stale_pid}) — removing and restarting.\n"
         )
-        sys.exit(1)
+        try:
+            os.remove(_PID_FILE)
+        except OSError:
+            pass
+        try:
+            fd = os.open(_PID_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            sys.stderr.write("[Round5-P0-4] race on PID create after stale remove. Exiting.\n")
+            sys.exit(1)
+    os.write(fd, str(os.getpid()).encode("utf-8"))
+    os.close(fd)
+    atexit.register(lambda: os.path.exists(_PID_FILE) and os.remove(_PID_FILE))
 
 
 _ensure_single_instance()
@@ -72,11 +118,16 @@ from smc.strategy.range_trader import (
 )
 from smc.strategy.range_quota import AsianRangeQuota
 from smc.strategy.phase1a_circuit_breaker import Phase1aCircuitBreaker
+from smc.strategy.htf_bias import compute_htf_bias
 from smc.monitor.timing import next_bar_close
+from smc.monitor.structured_log import crit as log_crit, warn as log_warn, info as log_info
+from smc.monitor.critical_alerter import alert_critical
+from smc.execution.mt5_send import send_with_retry, compute_dynamic_deviation
 
 JOURNAL_PATH = Path("data/journal/live_trades.jsonl")
 STATE_PATH = Path("data/live_state.json")
 AI_PATH = Path("data/ai_analysis.json")
+PAUSE_FLAG_PATH = Path("data/trading_paused.flag")
 
 
 def fetch_mt5_data():
@@ -244,13 +295,16 @@ def _determine_v1_passthrough(setups, session):
 
 
 def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
-                       range_trader, breakout_detector, session="", h1_df=None):
+                       range_trader, breakout_detector, session="", h1_df=None,
+                       htf_bias=None):
     """Ranging mode: breakout guard + mean-reversion setups at range boundaries.
 
     Returns (action, reason, best_setup). Round 4.6-F: session kwarg so
     generate_range_setups can apply Asian-wide boundary_pct (30%).
     Round 4.6-K: h1_df enables setup-level check_range_guards enforcement
     (RR>=1.2, touches>=2) — closing the 4.6-E "deferred" TODO.
+    Round 5 T0 (P0-9): htf_bias enables Guard 6 HTF alignment — rejects range
+    setups that oppose a confident HTF bias (confidence >= 0.5).
     """
     # Breakout invalidation — if price breaks the range, hold and wait
     breakout = breakout_detector.check_breakout(price, range_bounds, h1_atr)
@@ -263,11 +317,11 @@ def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
     )
 
     # Round 4.6-K: setup-level guards (RR>=1.2, touches>=2) enforcement.
-    # Was "deferred" in 4.6-E but never wired into production path.
+    # Round 5 T0 (P0-9): Guard 6 HTF alignment — pass htf_bias into each check.
     if range_setups and h1_df is not None:
         range_setups = tuple(
             s for s in range_setups
-            if check_range_guards(range_bounds, s, session, h1_df)
+            if check_range_guards(range_bounds, s, session, h1_df, htf_bias=htf_bias)
         )
 
     if range_setups:
@@ -289,11 +343,14 @@ def determine_action(setups, ai_analysis, regime, *,
                      h1_df=None, h1_snapshot=None, m15_snapshot=None,
                      h1_atr=0.0, price=0.0,
                      range_trader=None, breakout_detector=None,
-                     asian_range_quota=None, phase1a_breaker=None):
+                     asian_range_quota=None, phase1a_breaker=None,
+                     htf_bias=None):
     """Dual-mode action router: trending (v1 5-gate) or ranging (mean-reversion).
 
     Always detects range for display. Mode router decides which path runs.
     Returns (action, reason, best_setup, mode_decision).
+    Round 5 T0 (P0-9): htf_bias piped to _determine_ranging → check_range_guards
+    Guard 6 (HTF alignment). None is safe (backward-compat default).
     """
     session, session_penalty = get_session_info()
     ai_dir = ai_analysis.get("ai_direction", ai_analysis.get("direction", "neutral"))
@@ -340,6 +397,7 @@ def determine_action(setups, ai_analysis, regime, *,
         action, reason, best = _determine_ranging(
             price, mode.range_bounds, h1_snapshot, m15_snapshot, h1_atr,
             range_trader, breakout_detector, session=session, h1_df=h1_df,
+            htf_bias=htf_bias,
         )
         return action, reason, best, mode
 
@@ -491,10 +549,19 @@ def main():
         print(f"[{now.strftime('%H:%M:%S')} UTC] CYCLE {cycle}")
         print(f"{'='*60}")
 
+        # Round 5-P0-2a: honor dashboard KillSwitch. If the pause flag is present,
+        # skip all trading logic for this cycle. dashboard_server.py creates the
+        # flag on POST /api/toggle_trading; live_demo was previously ignoring it.
+        if PAUSE_FLAG_PATH.exists():
+            log_warn("trading_paused", cycle=cycle, flag=str(PAUSE_FLAG_PATH))
+            print(f"  [PAUSED] trading_paused.flag present — skipping cycle {cycle}")
+            continue
+
         try:
             # 1. Price
             tick = mt5.symbol_info_tick("XAUUSD")
             if tick is None:
+                log_warn("tick_unavailable", cycle=cycle)
                 print("  WARN: no tick data")
                 continue
             price = tick.bid
@@ -522,7 +589,7 @@ def main():
             regime = classify_regime(data.get(Timeframe.D1))
             print(f"  Regime: {regime}")
 
-            # 4b. Detect H1 SMC snapshot + ATR for range detection
+            # 4b. Detect SMC snapshots for HTF bias + range detection
             h1_df = data.get(Timeframe.H1)
             h1_snapshot = None
             if h1_df is not None and len(h1_df) > 0:
@@ -531,6 +598,14 @@ def main():
             m15_df = data.get(Timeframe.M15)
             if m15_df is not None and len(m15_df) > 0:
                 m15_snapshot = detector.detect(m15_df, Timeframe.M15)
+            # Round 5 T0 (P0-9): D1 + H4 snapshots for HTF bias → Guard 6 alignment
+            # in range_trader.check_range_guards. Previously only h1/m15 detected;
+            # Guard 6 would pass-through with htf_bias=None (backward-compat default).
+            d1_df = data.get(Timeframe.D1)
+            d1_snapshot = detector.detect(d1_df, Timeframe.D1) if d1_df is not None and len(d1_df) > 0 else None
+            h4_df = data.get(Timeframe.H4)
+            h4_snapshot = detector.detect(h4_df, Timeframe.H4) if h4_df is not None and len(h4_df) > 0 else None
+            htf_bias = compute_htf_bias(d1_snapshot, h4_snapshot)
             h1_atr = aggregator._compute_h1_atr(h1_df)
 
             # 5. Strategy (v1 trending setups — always generated)
@@ -550,9 +625,11 @@ def main():
                 breakout_detector=breakout_det,
                 asian_range_quota=asian_range_quota,
                 phase1a_breaker=phase1a_breaker,
+                htf_bias=htf_bias,
             )
-            if action.startswith("RANGE") and session in _ASIAN_SESSIONS:
-                asian_range_quota = asian_range_quota.record_open(datetime.now(tz=timezone.utc))
+            # Round 5 T0 (P0-2b): quota record_open moved *after* successful
+            # order_send below (inside LIVE_EXEC branch). MT5 failures no longer
+            # consume Asian 1/day quota.
             # TODO: When paper/live trade-close tracking is implemented, call
             # phase1a_breaker.record_trade_close(pnl_usd) after each
             # ASIAN_LONDON_TRANSITION ranging trade closes.
@@ -617,37 +694,68 @@ def main():
                     notional_value_usd / PAPER_LEVERAGE_RATIO, 2
                 )
 
-                # Round 4.6-X: actual MT5 order_send when SMC_MT5_EXECUTE=1
+                # Round 4.6-X + Round 5 T0 (P0-3): MT5 order_send via rugged wrapper
+                # with retry / backoff / dynamic deviation / circuit breaker.
+                # send_with_retry refreshes tick.ask/bid before each attempt and
+                # opens a persistent circuit flag after 3 consecutive REQUOTE/EXC.
+                _mt5_send_attempts = 0
                 if _mt5_execute:
-                    try:
-                        tick = mt5.symbol_info_tick("XAUUSD")
-                        current_tick_price = tick.ask if best.direction == "long" else tick.bid
-                        request = {
-                            "action": mt5.TRADE_ACTION_DEAL,
-                            "symbol": "XAUUSD",
-                            "volume": position_size_lots,
-                            "type": mt5.ORDER_TYPE_BUY if best.direction == "long" else mt5.ORDER_TYPE_SELL,
-                            "price": current_tick_price,
-                            "sl": best.stop_loss,
-                            "tp": best.take_profit,
-                            "deviation": 20,
-                            "magic": 19760418,
-                            "comment": f"AI-SMC {best.trigger[:15]}",
-                            "type_time": mt5.ORDER_TIME_GTC,
-                            "type_filling": mt5.ORDER_FILLING_IOC,
-                        }
-                        result = mt5.order_send(request)
-                        _mt5_send_retcode = result.retcode if result else None
-                        _mt5_ticket = result.order if result else None
-                        if _mt5_send_retcode == mt5.TRADE_RETCODE_DONE:
-                            _mt5_mode_tag = "LIVE_EXEC"
-                            print(f"  [MT5] Order sent ✓ ticket={_mt5_ticket}")
-                        else:
-                            _mt5_mode_tag = f"MT5_FAIL_{_mt5_send_retcode}"
-                            print(f"  [MT5] Order FAIL retcode={_mt5_send_retcode}")
-                    except Exception as exc:
-                        _mt5_mode_tag = f"MT5_EXC_{type(exc).__name__}"
-                        print(f"  [MT5] Exception: {exc}")
+                    dyn_deviation = compute_dynamic_deviation(mt5, "XAUUSD", fallback=100)
+                    request = {
+                        "action": mt5.TRADE_ACTION_DEAL,
+                        "symbol": "XAUUSD",
+                        "volume": position_size_lots,
+                        "type": mt5.ORDER_TYPE_BUY if best.direction == "long" else mt5.ORDER_TYPE_SELL,
+                        "price": 0.0,  # refreshed per attempt inside send_with_retry
+                        "sl": best.stop_loss,
+                        "tp": best.take_profit,
+                        "deviation": dyn_deviation,
+                        "magic": 19760418,
+                        "comment": f"AI-SMC {best.trigger[:15]}",
+                        "type_time": mt5.ORDER_TIME_GTC,
+                        "type_filling": mt5.ORDER_FILLING_IOC,
+                    }
+                    send_result = send_with_retry(mt5, request)
+                    _mt5_send_retcode = send_result.retcode
+                    _mt5_ticket = send_result.ticket
+                    _mt5_send_attempts = send_result.attempts
+                    if send_result.success:
+                        _mt5_mode_tag = "LIVE_EXEC"
+                        print(
+                            f"  [MT5] Order sent ✓ ticket={_mt5_ticket} "
+                            f"attempts={_mt5_send_attempts} dev={dyn_deviation}"
+                        )
+                        log_info(
+                            "mt5_order_sent",
+                            cycle=cycle,
+                            ticket=_mt5_ticket,
+                            attempts=_mt5_send_attempts,
+                            deviation=dyn_deviation,
+                            direction=best.direction,
+                            volume=position_size_lots,
+                        )
+                    else:
+                        _mt5_mode_tag = f"MT5_FAIL_{_mt5_send_retcode}"
+                        print(
+                            f"  [MT5] Order FAIL retcode={_mt5_send_retcode} "
+                            f"attempts={_mt5_send_attempts} msg={send_result.message}"
+                        )
+                        alert_critical(
+                            "mt5_order_fail",
+                            cycle=cycle,
+                            retcode=_mt5_send_retcode,
+                            attempts=_mt5_send_attempts,
+                            message=send_result.message,
+                            direction=best.direction,
+                        )
+
+                # Round 5 T0 (P0-2b): Asian quota only consumed on PAPER mode
+                # (audit trail) or successful LIVE_EXEC. MT5 failures preserve
+                # the 1/day quota so subsequent cycles can retry.
+                if session in _ASIAN_SESSIONS and _mt5_mode_tag in ("PAPER", "LIVE_EXEC"):
+                    asian_range_quota = asian_range_quota.record_open(
+                        datetime.now(tz=timezone.utc)
+                    )
 
                 log_entry = {
                     "time": now.isoformat(),
@@ -673,6 +781,7 @@ def main():
                     "mode": _mt5_mode_tag,  # 4.6-X: PAPER / LIVE_EXEC / MT5_FAIL_xxx
                     "mt5_ticket": _mt5_ticket,
                     "mt5_retcode": _mt5_send_retcode,
+                    "mt5_send_attempts": _mt5_send_attempts,  # Round 5 T0 P0-3
                     "trading_mode": mode.mode,
                     "session": session,
                     # Round 4.6-J position sizing fields (4.6-J-fix: notional separated)
@@ -713,9 +822,19 @@ def main():
                        aggregator=aggregator)
 
         except Exception as exc:
-            print(f"  ERROR: {exc}")
             import traceback
+            tb_tail = traceback.format_exc(limit=4)
+            print(f"  ERROR: {exc}")
             traceback.print_exc()
+            # Round 5 T0 (P0-7 + P0-8): structured critical alert with bounded
+            # traceback for grep-ability and optional Telegram push.
+            alert_critical(
+                "cycle_exception",
+                cycle=cycle,
+                exception_type=type(exc).__name__,
+                exception_msg=str(exc)[:200],
+                traceback_tail=tb_tail[-800:],
+            )
 
     mt5.shutdown()
     print(f"\n[{datetime.now()}] AI-SMC Live Trading Loop stopped.")

@@ -22,10 +22,17 @@ env/
 # Data (keep structure, ignore content)
 data/parquet/**/*.parquet
 data/journal/**/*.parquet
+data/journal/**/*.jsonl
 data/manifests/*.json
+data/*.json
+data/*.pid
+data/*.flag
 !data/parquet/.gitkeep
 !data/journal/.gitkeep
 !data/manifests/.gitkeep
+
+# Scratch / local drafts
+.scratch/
 
 # Logs
 logs/*.log
