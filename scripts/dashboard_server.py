@@ -153,6 +153,28 @@ def get_journal(
     return JSONResponse({"trades": trades})
 
 
+@app.get("/api/daily_digest")
+def get_daily_digest(
+    symbol: str = Query(default="XAUUSD"),
+    date_str: str | None = Query(default=None, alias="date"),
+) -> JSONResponse:
+    """Round 3 Sprint 1: one-page "today" summary for老板 5min scan.
+
+    Response schema per `.scratch/audit-r2/ops-daily-digest-spec.md` §2.
+    Builder tolerates missing data sources; returns zeros + warnings list.
+    """
+    from datetime import date as date_cls
+    from smc.monitor.daily_digest import build_daily_digest
+
+    try:
+        target = date_cls.fromisoformat(date_str) if date_str else datetime.now(timezone.utc).date()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid date: {exc}")
+    root = _symbol_data_root(symbol)
+    digest = build_daily_digest(symbol, target, data_root=root, log_root=ROOT / "logs")
+    return JSONResponse(digest)
+
+
 @app.get("/api/config")
 def get_config(symbol: str = Query(default="XAUUSD")) -> JSONResponse:
     root = _symbol_data_root(symbol)
