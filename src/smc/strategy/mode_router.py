@@ -64,9 +64,13 @@ def route_trading_mode(
         cfg = get_instrument_config("XAUUSD")
 
     # Priority 1: AI strong directional + NOT ASIAN_CORE → trending (v1 5-gate)
+    # Round 5 T5 tweak: threshold 0.5 → 0.45. decision-reviewer observed
+    # today's XAU ai_confidence=0.47 (bearish) was stuck below 0.5 → never
+    # entered trending path. 0.45 lets edge-case convictions through; v1
+    # 5-gate aggregator still filters false trends downstream.
     if (
         ai_direction in ("bullish", "bearish")
-        and ai_confidence >= 0.5
+        and ai_confidence >= 0.45
         and (cfg.asian_core_session_name is None or session != cfg.asian_core_session_name)
     ):
         return TradingMode(

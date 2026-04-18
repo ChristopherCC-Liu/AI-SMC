@@ -136,9 +136,11 @@ class TestPriority1Trending:
         assert result.mode == "trending"
 
     def test_below_conf_threshold_does_not_trend(self) -> None:
+        # Round 5 T5: threshold lowered from 0.50 to 0.45 so 0.47 edge
+        # cases can enter trending. Update test to use 0.44 (just below).
         result = route_trading_mode(
             ai_direction="bullish",
-            ai_confidence=0.49,
+            ai_confidence=0.44,
             regime="trending",
             session="LONDON",
             range_bounds=None,

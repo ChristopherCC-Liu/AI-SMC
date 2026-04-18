@@ -218,8 +218,9 @@ def check_range_guards(
     so live_demo can surface why a given setup was rejected.
 
     Round 5 T0 (P0-9): Guard 6 — HTF bias alignment.  Only active when
-    htf_bias.confidence >= 0.5; weak / neutral bias is skipped (pass-through)
-    so callers that omit htf_bias see identical behaviour to before.
+    htf_bias.confidence >= 0.7 (Round 5 T5 tweak: raised from 0.5 so only
+    Tier 1 multi-TF confirmed bias blocks range mean-reversion; weaker
+    biases are pass-through to preserve range double-sided trading).
 
     cfg: InstrumentConfig to use. Defaults to XAUUSD config when None.
     """
@@ -241,12 +242,13 @@ def check_range_guards(
     touches_pass = touches >= 2
     duration_pass = bounds.duration_bars >= min_duration
 
-    # Guard 6: HTF bias alignment (P0-9 — Round 5 T0)
-    # Only activated when bias confidence >= 0.5; weaker/neutral bias is
-    # pass-through so guard stays backward-compatible when htf_bias is None.
+    # Guard 6: HTF bias alignment (P0-9 — Round 5 T0; threshold raised T5)
+    # Only activated when bias confidence >= 0.7 (Tier 1 multi-TF confirmed).
+    # Below that threshold, range mean-reversion remains double-sided; this
+    # avoids turning a 40-50% conf bearish regime into SELL-only trading.
     guard6_pass = True
     guard6_reason: Optional[str] = None
-    if htf_bias is not None and htf_bias.confidence >= 0.5:
+    if htf_bias is not None and htf_bias.confidence >= 0.7:
         bias_dir = htf_bias.direction  # "bullish" / "bearish" / "neutral"
         if bias_dir == "bullish" and setup.direction == "short":
             guard6_pass = False
