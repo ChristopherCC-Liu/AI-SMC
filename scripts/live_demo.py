@@ -603,6 +603,13 @@ def main():
                 lot_multiplier = 0.3 if session in _ASIAN_SESSIONS else 1.0
                 base_lot = 0.01
                 position_size_lots = round(base_lot * lot_multiplier, 4)
+                # Round 4.6-Y (USER CATCH): MT5 min lot = 0.01 broker-wide, 0.003
+                # 会被 reject (retcode 10014 Invalid volume). Clamp Asian-reduced
+                # lot back to MT5 min. Asian risk management 改由 quota (1/day)
+                # 和 CircuitBreaker 承担, 不靠 fractional lot.
+                _MT5_MIN_LOT = 0.01
+                if position_size_lots < _MT5_MIN_LOT:
+                    position_size_lots = _MT5_MIN_LOT
                 notional_value_usd = (
                     best.entry_price * XAUUSD_CONTRACT_SIZE_OZ * position_size_lots
                 )
