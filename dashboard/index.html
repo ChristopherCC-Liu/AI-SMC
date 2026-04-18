@@ -142,6 +142,17 @@
     </div>
   </div>
 
+  <!-- 卡片 2.5: 策略建议手数 (audit-r2 R1) -->
+  <div x-show="plannedLotDisplay" class="card p-5 md:p-6">
+    <div class="flex items-center justify-between">
+      <div>
+        <div class="text-xs uppercase tracking-wider text-muted">策略建议手数</div>
+        <div class="mt-1 text-sm text-muted">下一单计划开仓大小（已含风险限额 + 账户余额）</div>
+      </div>
+      <div class="num text-3xl md:text-4xl font-bold" :style="{ color: plannedLotColor }" x-text="plannedLotDisplay"></div>
+    </div>
+  </div>
+
   <!-- 卡片 3: 为什么不开 (HOLD 时显示) -->
   <div x-show="showReasonCard" class="card p-5 md:p-6 border-l-4" style="border-left-color: #A78BFA">
     <div class="flex items-center justify-between mb-3">
@@ -716,6 +727,22 @@
       },
 
       get rangeBounds() { return this.state?.range_bounds || null; },
+
+      // audit-r2 R1: display strategy-computed lot size (0.0 hidden = HOLD / blocked).
+      get plannedLot() {
+        const v = this.state?.position_size;
+        return (typeof v === "number" && v > 0) ? v : 0;
+      },
+      get plannedLotDisplay() {
+        const v = this.plannedLot;
+        return v > 0 ? v.toFixed(2) + " 手" : "";
+      },
+      get plannedLotColor() {
+        const v = this.plannedLot;
+        if (v >= 0.5) return "#F59E0B";  // warn: larger than default
+        if (v >= 0.1) return "#10B981";  // normal
+        return "#94A3B8";                 // muted fallback
+      },
 
       get rangeDotPct() {
         const rb = this.rangeBounds;
