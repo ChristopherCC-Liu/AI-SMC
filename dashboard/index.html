@@ -142,6 +142,53 @@
     </div>
   </div>
 
+  <!-- 卡片 2.25: 今日概览 (Round 3 Sprint 1 daily_digest) -->
+  <div x-show="digest" class="card p-5 md:p-6 border-l-4" :style="{ borderLeftColor: digestBorderColor }">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <div class="text-xs uppercase tracking-wider text-muted">今日概览 · <span class="num" x-text="digest?.date || ''"></span></div>
+        <div class="text-xs text-muted mt-0.5" x-show="digestWarningText" x-text="digestWarningText"></div>
+      </div>
+      <div class="text-xs num" :class="digestHaltActive ? 'text-short' : 'text-long'" x-text="digestHaltLabel"></div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div>
+        <div class="num text-2xl md:text-3xl font-bold" :style="{ color: digestPnlColor }" x-text="digestPnlDisplay"></div>
+        <div class="text-xs text-muted mt-1">今日已实现盈亏</div>
+      </div>
+      <div>
+        <div class="num text-2xl md:text-3xl font-bold"><span x-text="digest?.wins || 0"></span>/<span class="text-muted" x-text="digest?.trades_closed || 0"></span></div>
+        <div class="text-xs text-muted mt-1">胜 / 平 (<span x-text="digestWinRate"></span>)</div>
+      </div>
+      <div>
+        <div class="num text-2xl md:text-3xl font-bold" x-text="digest?.trades_opened || 0"></div>
+        <div class="text-xs text-muted mt-1">今日开单</div>
+      </div>
+      <div>
+        <div class="num text-2xl md:text-3xl font-bold" :class="(digest?.pre_write_gate_blocks || 0) > 0 ? 'text-warn' : ''" x-text="digest?.pre_write_gate_blocks || 0"></div>
+        <div class="text-xs text-muted mt-1">风控阻挡 (保证金+Asian+DD)</div>
+      </div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-3 pt-3 border-t border-slate-700">
+      <div class="text-xs">
+        <div class="text-muted">运行时长</div>
+        <div class="num font-medium" x-text="digest?.uptime_hours != null ? digest.uptime_hours.toFixed(1) + 'h' : '—'"></div>
+      </div>
+      <div class="text-xs">
+        <div class="text-muted">连亏止损</div>
+        <div class="num font-medium" :class="digest?.consec_loss_halt_tripped ? 'text-short' : ''" x-text="digest?.guards_current?.consec_loss?.consec_losses || 0"></div>
+      </div>
+      <div class="text-xs">
+        <div class="text-muted">Asian 配额</div>
+        <div class="num font-medium" :class="digest?.guards_current?.asian_quota?.exhausted_today ? 'text-short' : 'text-long'" x-text="digest?.guards_current?.asian_quota?.exhausted_today ? '已用' : '可用'"></div>
+      </div>
+      <div class="text-xs">
+        <div class="text-muted">Phase1a Breaker</div>
+        <div class="num font-medium" :class="digest?.phase1a_breaker_tripped ? 'text-short' : ''" x-text="digest?.phase1a_breaker_tripped ? '已触发' : '正常'"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- 卡片 2.5: 策略建议手数 (audit-r2 R1) -->
   <div x-show="plannedLotDisplay" class="card p-5 md:p-6">
     <div class="flex items-center justify-between">
@@ -449,6 +496,8 @@
       positions: [],
       positionsTs: null,
       halt: { tripped: false, consec_losses: 0, tripped_at: null },
+      // Round 3 Sprint 1 daily digest: null until first fetch, then DailyDigest dict.
+      digest: null,
       config: structuredClone(DEFAULT_CONFIG),
       loading: false,
       error: null,
@@ -492,10 +541,12 @@
         const sym = encodeURIComponent(this.currentSymbol);
         try {
           // Round 5 T1 F2: fetch /api/positions in parallel for real Hero data.
-          const [sRes, jRes, pRes] = await Promise.all([
+          // Round 3 Sprint 1: + /api/daily_digest for "今日概览" card.
+          const [sRes, jRes, pRes, dRes] = await Promise.all([
             fetch(`/api/state?symbol=${sym}`),
             fetch(`/api/journal?symbol=${sym}&limit=50`),
             fetch(`/api/positions?symbol=${sym}`),
+            fetch(`/api/daily_digest?symbol=${sym}`),
           ]);
           if (sRes.ok) {
             const s = await sRes.json();
@@ -513,6 +564,9 @@
             this.positions = p.positions || [];
             this.positionsTs = p.ts || null;
             this.halt = p.halt || { tripped: false, consec_losses: 0, tripped_at: null };
+          }
+          if (dRes && dRes.ok) {
+            this.digest = await dRes.json();
           }
           this.error = null;
         } catch (e) {
@@ -727,6 +781,33 @@
       },
 
       get rangeBounds() { return this.state?.range_bounds || null; },
+
+      // Round 3 Sprint 1: daily digest getters.
+      get digestHaltActive() {
+        const d = this.digest;
+        if (!d) return false;
+        return !!(d.consec_loss_halt_tripped || d.phase1a_breaker_tripped || d.drawdown_halt_active);
+      },
+      get digestHaltLabel() { return this.digestHaltActive ? "风控已触发" : "允许开仓"; },
+      get digestBorderColor() { return this.digestHaltActive ? "#EF4444" : "#10B981"; },
+      get digestPnlColor() {
+        const v = this.digest?.gross_pnl_usd || 0;
+        return v > 0 ? "#10B981" : v < 0 ? "#EF4444" : "#94A3B8";
+      },
+      get digestPnlDisplay() {
+        const v = this.digest?.gross_pnl_usd;
+        if (v == null) return "—";
+        return (v >= 0 ? "+$" : "-$") + Math.abs(v).toFixed(2);
+      },
+      get digestWinRate() {
+        const r = this.digest?.win_rate_pct;
+        return r != null ? r.toFixed(0) + "%" : "—";
+      },
+      get digestWarningText() {
+        const w = this.digest?.warnings || [];
+        if (!w.length) return "";
+        return "⚠ " + w.join("、");
+      },
 
       // audit-r2 R1: display strategy-computed lot size (0.0 hidden = HOLD / blocked).
       get plannedLot() {
