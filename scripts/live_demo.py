@@ -606,8 +606,30 @@ def main():
     print("=" * 60)
     print()
 
-    if not mt5.initialize():
-        print(f"MT5 init failed: {mt5.last_error()}")
+    # Round 5 T4 band-aid: retry mt5.initialize() up to 3 times with 5s backoff
+    # so a transient MT5 terminal window (e.g. the terminal auto-restarting due
+    # to a broker connection hiccup) doesn't kill the whole live_demo process.
+    # Proper fix (Week 2) is an MQL5 EA signal receiver that removes Python ↔
+    # MT5 IPC coupling entirely. See docs/MILESTONE_20260418.md Round 5 T4.
+    _mt5_init_ok = False
+    for _attempt in range(1, 4):
+        if mt5.initialize():
+            _mt5_init_ok = True
+            if _attempt > 1:
+                log_info("mt5_init_retry_success", attempt=_attempt)
+            break
+        err = mt5.last_error()
+        log_warn("mt5_init_attempt_failed", attempt=_attempt, error=str(err))
+        print(f"MT5 init attempt {_attempt}/3 failed: {err}")
+        if _attempt < 3:
+            time.sleep(5)
+    if not _mt5_init_ok:
+        alert_critical(
+            "mt5_init_exhausted",
+            attempts=3,
+            last_error=str(mt5.last_error()),
+            send_telegram=True,
+        )
         sys.exit(1)
 
     info = mt5.account_info()
