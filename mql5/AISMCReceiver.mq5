@@ -23,19 +23,22 @@
 
 #include <Trade/Trade.mqh>
 
-input string   SignalURL         = "http://127.0.0.1:8080/signal";
-input int      PollIntervalSec   = 15;
-input double   MinConfidence     = 0.3;
-input int      MagicXAU          = 19760418;
-input int      MagicBTC          = 19760419;
-input int      DeviationPoints   = 100;
-input double   DefaultLot        = 0.01;
-input bool     EnableTrading     = true;
-input bool     VerboseLog        = true;
+input string   SignalURL            = "http://127.0.0.1:8080/signal";
+input int      PollIntervalSec      = 15;
+input double   MinConfidence        = 0.3;
+input int      MagicXAU             = 19760418;
+input int      MagicBTC             = 19760419;
+input int      DeviationPoints      = 100;
+input double   DefaultLot           = 0.01;
+input bool     EnableTrading        = true;
+input bool     VerboseLog           = true;
+input int      DirectionCooldownSec = 1800;  // 30 min same-direction cooldown
 
 CTrade         g_trade;
 datetime       g_last_poll_ts    = 0;
 string         g_last_signal_id  = "";
+datetime       g_last_buy_ts     = 0;
+datetime       g_last_sell_ts    = 0;
 
 
 int OnInit()
@@ -123,6 +126,22 @@ void PollAndExecute()
 
 bool ExecuteDirection(bool is_buy, const string &body)
 {
+   // Fix 3: direction-level cooldown — prevent same-direction re-entry within
+   // DirectionCooldownSec seconds (default 30 min).
+   datetime now = TimeCurrent();
+   if (is_buy && now - g_last_buy_ts < DirectionCooldownSec)
+   {
+      PrintFormat("Skip BUY: cooldown %ds remaining",
+                  DirectionCooldownSec - (int)(now - g_last_buy_ts));
+      return false;
+   }
+   if (!is_buy && now - g_last_sell_ts < DirectionCooldownSec)
+   {
+      PrintFormat("Skip SELL: cooldown %ds remaining",
+                  DirectionCooldownSec - (int)(now - g_last_sell_ts));
+      return false;
+   }
+
    double entry = StringToDouble(JsonStr(body, "entry"));
    double sl    = StringToDouble(JsonStr(body, "sl"));
    double tp    = StringToDouble(JsonStr(body, "tp"));
@@ -134,7 +153,10 @@ bool ExecuteDirection(bool is_buy, const string &body)
       return false;
    }
 
-   double lot = DefaultLot;
+   // Fix 2: use server-provided lot; fall back to DefaultLot if missing/zero.
+   double lot = StringToDouble(JsonStr(body, "lot"));
+   if (lot <= 0.0) lot = DefaultLot;
+
    double price = is_buy
                   ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
                   : SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -147,6 +169,13 @@ bool ExecuteDirection(bool is_buy, const string &body)
                is_buy ? "BUY" : "SELL", lot, _Symbol, price, sl, tp, conf,
                g_trade.ResultRetcode(),
                ok ? "OK" : g_trade.ResultComment());
+
+   // Fix 3: record successful order timestamp for cooldown tracking.
+   if (ok)
+   {
+      if (is_buy) g_last_buy_ts  = TimeCurrent();
+      else        g_last_sell_ts = TimeCurrent();
+   }
    return ok;
 }
 
