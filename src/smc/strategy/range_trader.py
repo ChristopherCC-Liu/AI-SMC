@@ -312,6 +312,31 @@ def _count_boundary_touches(
 _SOFT_REVERSAL_SWING_WINDOW: int = 3
 _SOFT_REVERSAL_RECENCY: timedelta = timedelta(minutes=30)
 
+# Audit R3 J2 — mid-range sub-classification cutoff.
+# Price within this fraction of range_width from a boundary is "almost_near",
+# otherwise "middle". 5% chosen as balanced operating point; raw distances
+# are also surfaced in diagnostic for 3%/5%/10% post-hoc bucketing.
+_ALMOST_NEAR_PCT: float = 0.05
+
+
+def _classify_mid_range(
+    distance_to_upper_pct: float | None,
+    distance_to_lower_pct: float | None,
+) -> str:
+    """Return reason_if_zero label for price in mid-range region.
+
+    Both distances are fractions of range width in (0, 1). Since the caller
+    only invokes this when both `near_upper` and `near_lower` are False, we
+    know the price is in the interior; the narrower side wins.
+    """
+    if distance_to_upper_pct is None or distance_to_lower_pct is None:
+        return "price_mid_range"
+    if distance_to_upper_pct < _ALMOST_NEAR_PCT:
+        return "almost_near_upper"
+    if distance_to_lower_pct < _ALMOST_NEAR_PCT:
+        return "almost_near_lower"
+    return "middle"
+
 
 def _soft_reversal_3bar(
     m15_snapshot: SMCSnapshot,
@@ -594,10 +619,26 @@ class RangeTrader:
             if short_setup is not None:
                 setups.append(short_setup)
 
+        # Audit R3 J2: sub-classify mid-range into almost_near_upper /
+        # almost_near_lower / middle so journal reason_if_zero distribution
+        # can guide future band-widening decisions. Also surface raw
+        # distance_to_{upper,lower}_pct floats so post-hoc bucketing at
+        # 3%/5%/10% cuts is possible without code change.
+        range_price = bounds.width_points * self._cfg.point_size
+        distance_to_upper_pct = (
+            (bounds.upper - current_price) / range_price if range_price > 0 else None
+        )
+        distance_to_lower_pct = (
+            (current_price - bounds.lower) / range_price if range_price > 0 else None
+        )
+
         reason_if_zero: str | None = None
         if not setups:
             if not near_lower and not near_upper:
-                reason_if_zero = "price_mid_range"
+                reason_if_zero = _classify_mid_range(
+                    distance_to_upper_pct,
+                    distance_to_lower_pct,
+                )
             elif near_lower and long_setup is None and not near_upper:
                 reason_if_zero = "no_m15_choch_at_lower"
             elif near_upper and short_setup is None and not near_lower:
@@ -618,6 +659,9 @@ class RangeTrader:
             "short_setup_built": short_setup is not None,
             "setup_count": len(setups),
             "reason_if_zero": reason_if_zero,
+            # R3 J2 — raw distances for post-hoc bucketing (None if range zero)
+            "distance_to_upper_pct": distance_to_upper_pct,
+            "distance_to_lower_pct": distance_to_lower_pct,
         }
 
         return tuple(setups[:2])

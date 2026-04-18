@@ -27,9 +27,11 @@ from smc.smc_core.types import (
     SwingPoint,
 )
 from smc.strategy.range_trader import (
+    _ALMOST_NEAR_PCT,
     _SOFT_REVERSAL_RECENCY,
     _SOFT_REVERSAL_SWING_WINDOW,
     RangeTrader,
+    _classify_mid_range,
     _soft_reversal_3bar,
 )
 from smc.strategy.range_types import RangeBounds, RangeSetup
@@ -827,6 +829,11 @@ class TestSetupsDiagnostic:
         h1_with_obs: SMCSnapshot,
         m15_choch_at_lower: SMCSnapshot,
     ) -> None:
+        """Audit R3 J2: price at exact midpoint → reason 'middle'.
+
+        Former label 'price_mid_range' split into 'almost_near_upper' /
+        'almost_near_lower' / 'middle' using _ALMOST_NEAR_PCT window.
+        """
         bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
         assert bounds is not None
         # Price at midpoint (far from both boundaries)
@@ -839,7 +846,10 @@ class TestSetupsDiagnostic:
         assert diag["setup_count"] == 0
         assert diag["near_lower"] is False
         assert diag["near_upper"] is False
-        assert diag["reason_if_zero"] == "price_mid_range"
+        assert diag["reason_if_zero"] == "middle"
+        # Raw distance percentages surfaced for post-hoc bucketing
+        assert diag["distance_to_upper_pct"] == pytest.approx(0.5, abs=1e-3)
+        assert diag["distance_to_lower_pct"] == pytest.approx(0.5, abs=1e-3)
 
     def test_diagnostic_near_lower_no_structure_rejects(
         self,
@@ -880,6 +890,135 @@ class TestSetupsDiagnostic:
         assert diag["near_lower"] is True
         assert diag["long_setup_built"] is True
         assert diag["reason_if_zero"] is None
+
+
+class TestReasonIfZeroSubclassification:
+    """Audit R3 J2: mid-range sub-classified into
+    almost_near_upper / almost_near_lower / middle with raw distance floats.
+    """
+
+    def test_classify_helper_middle(self) -> None:
+        """Both distances > cutoff → 'middle'."""
+        assert _classify_mid_range(0.30, 0.70) == "middle"
+        assert _classify_mid_range(0.50, 0.50) == "middle"
+
+    def test_classify_helper_almost_near_upper(self) -> None:
+        """distance_to_upper < cutoff → 'almost_near_upper' (takes priority)."""
+        assert _classify_mid_range(0.03, 0.97) == "almost_near_upper"
+        # Boundary case: strictly-less-than 5%
+        assert _classify_mid_range(_ALMOST_NEAR_PCT - 0.001, 0.95) == "almost_near_upper"
+
+    def test_classify_helper_almost_near_lower(self) -> None:
+        """distance_to_lower < cutoff → 'almost_near_lower'."""
+        assert _classify_mid_range(0.97, 0.03) == "almost_near_lower"
+        assert _classify_mid_range(0.95, _ALMOST_NEAR_PCT - 0.001) == "almost_near_lower"
+
+    def test_classify_helper_none_fallback(self) -> None:
+        """Either distance None (zero range width) → legacy 'price_mid_range'.
+
+        Guards divide-by-zero + keeps backward-compatible label for rare edge.
+        """
+        assert _classify_mid_range(None, 0.5) == "price_mid_range"
+        assert _classify_mid_range(0.5, None) == "price_mid_range"
+        assert _classify_mid_range(None, None) == "price_mid_range"
+
+    def test_classify_helper_boundary_exactly_at_cutoff(self) -> None:
+        """distance == cutoff → 'middle' (strict `<` comparison).
+
+        Locks the ±0 boundary so future constant changes can't silently
+        flip the decision.
+        """
+        assert _classify_mid_range(_ALMOST_NEAR_PCT, 0.5) == "middle"
+        assert _classify_mid_range(0.5, _ALMOST_NEAR_PCT) == "middle"
+
+    def test_diagnostic_almost_near_upper_when_price_close_to_upper(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_lower: SMCSnapshot,
+    ) -> None:
+        """Integration: price 4% below upper + outside near_upper band → almost_near_upper.
+
+        Range: 2348-2370 = $22. Upper band (default pct=0.15) covers top 15%
+        (~$3.3). Place price $1 below upper (4.5% of width) to fall outside
+        near_upper yet inside 5% almost_near window.
+        """
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+        # bounds: upper=2370, lower=2348, width=$22
+        # default boundary_pct=0.15 → near_upper band = upper - 3.3 = 2366.7
+        # Need price > 2366.7 fails (would be near_upper), use narrower trader.
+        trader_narrow = RangeTrader(
+            min_range_width=300,
+            max_range_width=3000,
+            boundary_pct=0.02,  # near-zone only top 2% = $0.44
+        )
+        bounds2 = trader_narrow.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds2 is not None
+        # Price $1 below upper = distance_to_upper = 1/22 ≈ 4.5% → almost_near_upper
+        price = bounds2.upper - 1.0
+        setups = trader_narrow.generate_range_setups(
+            h1_with_obs, m15_choch_at_lower, price, bounds2
+        )
+        assert len(setups) == 0
+        diag = trader_narrow._last_setups_diagnostic
+        assert diag["near_upper"] is False
+        assert diag["near_lower"] is False
+        assert diag["reason_if_zero"] == "almost_near_upper"
+        assert diag["distance_to_upper_pct"] == pytest.approx(1.0 / 22.0, abs=1e-3)
+
+    def test_diagnostic_almost_near_lower_when_price_close_to_lower(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_lower: SMCSnapshot,
+    ) -> None:
+        """Integration mirror of almost_near_upper — price $1 above lower."""
+        trader_narrow = RangeTrader(
+            min_range_width=300,
+            max_range_width=3000,
+            boundary_pct=0.02,
+        )
+        bounds2 = trader_narrow.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds2 is not None
+        price = bounds2.lower + 1.0
+        setups = trader_narrow.generate_range_setups(
+            h1_with_obs, m15_choch_at_lower, price, bounds2
+        )
+        assert len(setups) == 0
+        diag = trader_narrow._last_setups_diagnostic
+        assert diag["near_upper"] is False
+        assert diag["near_lower"] is False
+        assert diag["reason_if_zero"] == "almost_near_lower"
+        assert diag["distance_to_lower_pct"] == pytest.approx(1.0 / 22.0, abs=1e-3)
+
+    def test_diagnostic_distance_floats_surface_on_near_boundary(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+        m15_choch_at_lower: SMCSnapshot,
+    ) -> None:
+        """Raw distance_to_upper/lower_pct fields present even when a setup
+        is built (not only on mid-range reject).
+
+        Post-hoc analytics (3%/5%/10% bucketing by Lead/decision-reviewer)
+        requires distance floats to exist in every diagnostic, not only on
+        reason_if_zero != None.
+        """
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+        # Price at lower boundary → near_lower=True, setup may build
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_choch_at_lower, 2349.00, bounds
+        )
+        diag = trader._last_setups_diagnostic
+        # Distances exist regardless of setup outcome
+        assert diag["distance_to_upper_pct"] is not None
+        assert diag["distance_to_lower_pct"] is not None
+        # 2349 is near 2348 lower → small distance_to_lower
+        assert diag["distance_to_lower_pct"] < 0.10
+        # And far from 2370 upper → large distance_to_upper
+        assert diag["distance_to_upper_pct"] > 0.90
 
 
 class TestAsianBoundaryPctProfile:
