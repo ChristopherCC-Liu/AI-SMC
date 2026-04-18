@@ -257,12 +257,17 @@ def run_ai_analysis(data):
                 analysis["confidence"] = 0.3
             analysis["reasoning"] = f"Price ${price:.0f} vs SMA20 ${sma20:.0f} vs SMA50 ${sma50:.0f}"
 
-    # Try AI debate (Claude CLI)
+    # Try AI debate (Claude CLI) — Round 5 T5: 180s hard cap via ThreadPoolExecutor
+    # Prevents worst-case 9-step debate (4 analysts + 2×bull/bear + judge) at
+    # 120s/step from hanging an entire M15 cycle (18 min worst case → now ≤3 min).
     try:
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutTimeout
         from smc.ai.direction_engine import DirectionEngine
         engine = DirectionEngine(cache_ttl_hours=1)  # Round 4.6-Q (USER): 4h→1h
         h4_df = data.get(Timeframe.H4)
-        ai_dir = engine.get_direction(h4_df=h4_df)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(engine.get_direction, h4_df=h4_df)
+            ai_dir = fut.result(timeout=180)  # 3min hard cap
         if ai_dir.source != "neutral_default":
             analysis["ai_direction"] = ai_dir.direction
             analysis["ai_confidence"] = round(ai_dir.confidence, 3)
@@ -270,6 +275,9 @@ def run_ai_analysis(data):
             analysis["ai_source"] = ai_dir.source
             analysis["ai_key_drivers"] = list(ai_dir.key_drivers) if ai_dir.key_drivers else []
             analysis["source"] = f"technical + {ai_dir.source}"
+    except FutTimeout:
+        analysis["ai_error"] = "ai_timeout_180s"
+        log_warn("ai_timeout", cycle_hint=analysis.get("assessed_at", "?"))
     except Exception as e:
         analysis["ai_error"] = str(e)[:100]
 
@@ -616,13 +624,13 @@ def main():
     print("=" * 60)
     print()
 
-    # Round 5 T4 band-aid: retry mt5.initialize() up to 3 times with 5s backoff
-    # so a transient MT5 terminal window (e.g. the terminal auto-restarting due
-    # to a broker connection hiccup) doesn't kill the whole live_demo process.
+    # Round 5 T4 band-aid: retry mt5.initialize() up to 10 times with 5s backoff
+    # (10 × 5s = 50s covers MT5 cold-start 30s window).
     # Proper fix (Week 2) is an MQL5 EA signal receiver that removes Python ↔
     # MT5 IPC coupling entirely. See docs/MILESTONE_20260418.md Round 5 T4.
+    # Round 5 T5: extended from 3 → 10 attempts.
     _mt5_init_ok = False
-    for _attempt in range(1, 4):
+    for _attempt in range(1, 11):
         if mt5.initialize():
             _mt5_init_ok = True
             if _attempt > 1:
@@ -630,13 +638,13 @@ def main():
             break
         err = mt5.last_error()
         log_warn("mt5_init_attempt_failed", attempt=_attempt, error=str(err))
-        print(f"MT5 init attempt {_attempt}/3 failed: {err}")
-        if _attempt < 3:
+        print(f"MT5 init attempt {_attempt}/10 failed: {err}")
+        if _attempt < 10:
             time.sleep(5)
     if not _mt5_init_ok:
         alert_critical(
             "mt5_init_exhausted",
-            attempts=3,
+            attempts=10,
             last_error=str(mt5.last_error()),
             send_telegram=True,
         )
@@ -1180,9 +1188,8 @@ def main():
                 )
 
             # 8. Save state for dashboard (dual-mode aware)
-            save_state(cycle, price, action, reason, ai_analysis, regime, setups,
-                       best, mode_decision=mode, range_trader=range_trader,
-                       aggregator=aggregator)
+            # NOTE: canonical save_state call moved to finally block below so
+            # dashboard always reflects the most recent attempt even on crash.
 
         except Exception as exc:
             import traceback
@@ -1198,6 +1205,28 @@ def main():
                 exception_msg=str(exc)[:200],
                 traceback_tail=tb_tail[-800:],
             )
+        finally:
+            # Round 5 T5: defensive save_state — runs even if cycle body crashes
+            # mid-way so dashboard/watchdog always see the latest attempt.
+            # Variables that may be unset if an exception fired early are
+            # retrieved via locals() with safe defaults.
+            _locs = locals()
+            try:
+                save_state(
+                    _locs.get("cycle", cycle),
+                    _locs.get("price", 0.0),
+                    _locs.get("action", "UNKNOWN"),
+                    _locs.get("reason", "cycle_error"),
+                    _locs.get("ai_analysis", ai_analysis),
+                    _locs.get("regime", "unknown"),
+                    _locs.get("setups", ()),
+                    _locs.get("best", None),
+                    mode_decision=_locs.get("mode", None),
+                    range_trader=range_trader,
+                    aggregator=aggregator,
+                )
+            except Exception as save_exc:
+                log_warn("save_state_fail", exc=str(save_exc)[:100])
 
     mt5.shutdown()
     print(f"\n[{datetime.now()}] AI-SMC Live Trading Loop stopped.")

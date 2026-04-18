@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import time
@@ -46,6 +47,11 @@ logger = logging.getLogger(__name__)
 
 _FAST_MODEL_CLI = "sonnet"  # Analysts
 _SLOW_MODEL_CLI = "opus"    # Researchers + Judge
+
+# Round 5 T5: allow operator to cap debate rounds via env var.
+# SMC_AI_DEBATE_ROUNDS=1 halves worst-case LLM wall-time (2 bull+bear → 1).
+# Default 2 keeps existing behaviour when the var is absent or empty.
+_DEBATE_ROUNDS_DEFAULT = int(os.environ.get("SMC_AI_DEBATE_ROUNDS", "2") or "2")
 
 BackendType = Literal["anthropic", "claude_cli", "auto"]
 
@@ -299,7 +305,7 @@ def run_regime_debate(
     backend: BackendType = "auto",
     anthropic_client: Any = None,
     anthropic_model: str = "claude-sonnet-4-6",
-    n_debate_rounds: int = 2,
+    n_debate_rounds: int = _DEBATE_ROUNDS_DEFAULT,
     fast_max_tokens: int = 512,
     slow_max_tokens: int = 1024,
     on_step: Any | None = None,
