@@ -13,6 +13,11 @@
     This prevents cold-start false kills where the state file hasn't been
     written yet (backfill + first AI analysis can take several minutes).
 
+    StrategyServer mode (-Symbol StrategyServer):
+      HTTP GET http://127.0.0.1:8080/healthz — body must contain "ok":true.
+      On failure: kill uvicorn process + exit 1 → Task Scheduler restarts.
+      On success: exit 0.
+
     On DEAD: exit 1 → Task Scheduler RestartOnFailure triggers restart.
     On HEALTHY or GRACE: exit 0.
     On STALE (alive but frozen): kill + exit 1 → schtasks restart.
@@ -24,13 +29,14 @@
 .EXAMPLE
     powershell -File C:\AI-SMC\scripts\watchdog_smart.ps1 -Symbol XAUUSD
     powershell -File C:\AI-SMC\scripts\watchdog_smart.ps1 -Symbol BTCUSD
+    powershell -File C:\AI-SMC\scripts\watchdog_smart.ps1 -Symbol StrategyServer
 #>
 
 param(
     [string]$InstallDir    = "C:\AI-SMC",
     [int]$StaleMinutes     = 20,
     [int]$GraceMinutes     = 10,
-    [ValidateSet("XAUUSD", "BTCUSD")]
+    [ValidateSet("XAUUSD", "BTCUSD", "StrategyServer")]
     [string]$Symbol        = "XAUUSD"
 )
 
@@ -57,6 +63,48 @@ function Write-Log {
     $line  = "$stamp [$Symbol] $msg"
     Add-Content -Path $logPath -Value $line -Encoding UTF8
     Write-Host $line
+}
+
+# ── StrategyServer health check (early return) ────────────────────────────────
+if ($Symbol -eq "StrategyServer") {
+    Write-Log "watchdog_smart tick"
+    Write-Log "StrategyServer mode: checking http://127.0.0.1:8080/healthz"
+    $healthy = $false
+    try {
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8080/healthz" `
+                    -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+        if ($resp.StatusCode -eq 200 -and $resp.Content -match '"ok"\s*:\s*true') {
+            $healthy = $true
+        } else {
+            Write-Log "StrategyServer UNHEALTHY: StatusCode=$($resp.StatusCode) body=$($resp.Content)"
+        }
+    } catch {
+        Write-Log "StrategyServer UNREACHABLE: $_"
+    }
+
+    if ($healthy) {
+        Write-Log "StrategyServer HEALTHY: /healthz ok"
+        exit 0
+    }
+
+    # Not healthy — kill uvicorn so Task Scheduler RestartOnFailure can revive it
+    Write-Log "StrategyServer DEAD/FROZEN: killing uvicorn"
+    try {
+        $uvicorn = Get-CimInstance Win32_Process -ErrorAction Stop |
+                   Where-Object { $_.CommandLine -and $_.CommandLine -match 'uvicorn.*strategy_server' }
+        foreach ($p in $uvicorn) {
+            try {
+                Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
+                Write-Log "  killed uvicorn PID $($p.ProcessId)"
+            } catch {
+                Write-Log "  could not kill PID $($p.ProcessId) — $_"
+            }
+        }
+    } catch {
+        Write-Log "  WMI query for uvicorn failed — $_"
+    }
+    Write-Log "StrategyServer: exiting 1 → Task Scheduler RestartOnFailure will restart"
+    exit 1
 }
 
 # ── Axis 1: process alive ─────────────────────────────────────────────────────

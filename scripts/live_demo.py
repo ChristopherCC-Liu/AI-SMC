@@ -482,7 +482,8 @@ def determine_action(setups, ai_analysis, regime, *,
 
 
 def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
-               best_setup, *, mode_decision=None, range_trader=None, aggregator=None):
+               best_setup, *, mode_decision=None, range_trader=None, aggregator=None,
+               blocked_reason: "str | None" = None):
     """Save live state for dashboard display (dual-mode aware)."""
     state = {
         "cycle": cycle,
@@ -496,6 +497,8 @@ def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
         "setups_count": len(setups),
         "volatility": ai_analysis.get("volatility", "?"),
         "trading_mode": mode_decision.mode if mode_decision else "trending",
+        # Round 5 T5 audit r1: null when no gate tripped; str reason when blocked.
+        "blocked_reason": blocked_reason,
     }
 
     # Range bounds (always populated when detected, even in trending mode)
@@ -852,6 +855,54 @@ def main():
             # TODO: When paper/live trade-close tracking is implemented, call
             # phase1a_breaker.record_trade_close(pnl_usd) after each
             # ASIAN_LONDON_TRANSITION ranging trade closes.
+
+            # Round 5 T5 audit r1 (P0-risk): Pre-write risk gate for EA architecture.
+            # In EA mode Python does NOT call order_send, so margin_cap and
+            # asian_range_quota gates inside the execution block never fire.
+            # We intercept here — before save_state writes live_state.json — so
+            # strategy_server /signal reads HOLD and EA naturally skips opening.
+            blocked_reason: str | None = None
+            if best is not None:
+                # Gate 1: margin_cap — requires live MT5 account_info
+                try:
+                    _gate_tick = mt5.symbol_info_tick(cfg.mt5_path)
+                    _gate_price = (
+                        float(getattr(_gate_tick, "ask" if getattr(best, "direction", "long") == "long" else "bid", price))
+                        if _gate_tick is not None
+                        else price
+                    )
+                    _gate_order_type = (
+                        mt5.ORDER_TYPE_BUY if getattr(best, "direction", "long") == "long"
+                        else mt5.ORDER_TYPE_SELL
+                    )
+                    _gate_lots = getattr(best, "position_size_lots", cfg.min_lot)
+                    _margin_result = check_margin_cap(
+                        mt5,
+                        symbol=cfg.mt5_path,
+                        action=_gate_order_type,
+                        volume=_gate_lots,
+                        price=_gate_price,
+                        max_pct=0.40,
+                    )
+                    if not _margin_result.can_trade:
+                        blocked_reason = f"margin_cap:{_margin_result.reason}"
+                except Exception as _gate_exc:
+                    log_warn("pre_write_margin_cap_error", exc=str(_gate_exc)[:120])
+
+                # Gate 2: asian_range_quota — only during Asian sessions
+                if not blocked_reason and session in _ASIAN_SESSIONS:
+                    try:
+                        if asian_range_quota.is_exhausted_today(datetime.now(tz=timezone.utc)):
+                            blocked_reason = "asian_quota:exhausted_today"
+                    except Exception as _quota_exc:
+                        log_warn("pre_write_quota_error", exc=str(_quota_exc)[:120])
+
+            if blocked_reason:
+                action = "HOLD"
+                reason = f"[PRE_WRITE_GATE] {blocked_reason}"
+                best = None
+                log_warn("pre_write_gate_blocked", blocked_reason=blocked_reason)
+                print(f"  [PRE_WRITE_GATE] Blocked: {blocked_reason}")
 
             # Display action prominently
             action_colors = {
@@ -1224,6 +1275,7 @@ def main():
                     mode_decision=_locs.get("mode", None),
                     range_trader=range_trader,
                     aggregator=aggregator,
+                    blocked_reason=_locs.get("blocked_reason", None),
                 )
             except Exception as save_exc:
                 log_warn("save_state_fail", exc=str(save_exc)[:100])

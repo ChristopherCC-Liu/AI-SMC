@@ -9,15 +9,16 @@
     and watchdogs fire every 5 minutes.
 
     Tasks registered:
-      \AI-SMC-Live              — XAUUSD live_demo signal loop
-      \AI-SMC-Live-BTC          — BTCUSD live_demo signal loop
-      \AI-SMC-StrategyServer    — FastAPI signal server (port 8080)
-      \AI-SMC-DashboardWeb      — Dashboard web server (port 8765)
-      \AI-SMC-Watchdog          — XAUUSD three-axis watchdog (every 5 min)
-      \AI-SMC-Watchdog-BTC      — BTCUSD three-axis watchdog (every 5 min)
+      \AI-SMC-Live                    — XAUUSD live_demo signal loop
+      \AI-SMC-Live-BTC                — BTCUSD live_demo signal loop
+      \AI-SMC-StrategyServer          — FastAPI signal server (port 8080)
+      \AI-SMC-DashboardWeb            — Dashboard web server (port 8765)
+      \AI-SMC-Watchdog                — XAUUSD three-axis watchdog (every 5 min)
+      \AI-SMC-Watchdog-BTC            — BTCUSD three-axis watchdog (every 5 min)
+      \AI-SMC-Watchdog-StrategyServer — FastAPI /healthz watchdog (every 5 min)
 
     All service tasks: BootTrigger + RestartOnFailure (PT5M, 10 retries)
-                       + ExecutionTimeLimit PT2H + StartWhenAvailable
+                       + ExecutionTimeLimit PT0S (unlimited) + StartWhenAvailable
     Watchdog tasks:    RepetitionInterval PT5M (no RestartOnFailure needed;
                        next 5-min fire is the natural retry)
 
@@ -197,6 +198,10 @@ $tasks = @(
     @{
         Name    = "AI-SMC-Watchdog-BTC"
         Xml     = Get-WatchdogTaskXml -Symbol "BTCUSD"
+    },
+    @{
+        Name    = "AI-SMC-Watchdog-StrategyServer"
+        Xml     = Get-WatchdogTaskXml -Symbol "StrategyServer"
     }
 )
 
