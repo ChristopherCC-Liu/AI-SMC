@@ -13,15 +13,21 @@ TP conservative = midpoint, TP aggressive = opposite boundary minus 10%.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional
 
 import polars as pl
 
+from smc.monitor.state_io import atomic_write_json, load_json
 from smc.smc_core.constants import XAUUSD_POINT_SIZE
 from smc.smc_core.types import OrderBlock, SMCSnapshot, SwingPoint
 from smc.strategy.entry_trigger import _compute_sl_buffer, _find_choch_in_zone
 from smc.strategy.range_types import RangeBounds, RangeSetup
-from smc.strategy.types import TradeZone
+from smc.strategy.types import BiasDirection, TradeZone
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "RangeTrader",
@@ -169,8 +175,9 @@ def check_range_guards(
     setup: RangeSetup,
     session: str,
     h1_df: pl.DataFrame,
+    htf_bias: Optional["BiasDirection"] = None,
 ) -> bool:
-    """Return True if all 5 guards pass. See v3.0 plan.
+    """Return True if all guards pass. See v3.0 plan.
 
     Round 4.6-B: Guard 1 (width) and Guard 4 (duration) are session-aware.
     Asian sessions use relaxed thresholds (width 400/duration 8) because
@@ -180,6 +187,10 @@ def check_range_guards(
 
     Round 4.6-C2: records per-call diagnostic in module _LAST_GUARDS_CHECK
     so live_demo can surface why a given setup was rejected.
+
+    Round 5 T0 (P0-9): Guard 6 — HTF bias alignment.  Only active when
+    htf_bias.confidence >= 0.5; weak / neutral bias is skipped (pass-through)
+    so callers that omit htf_bias see identical behaviour to before.
     """
     global _LAST_GUARDS_CHECK
 
@@ -195,7 +206,23 @@ def check_range_guards(
     touches_pass = touches >= 2
     duration_pass = bounds.duration_bars >= min_duration
 
-    all_passed = width_pass and rr_pass and touches_pass and duration_pass
+    # Guard 6: HTF bias alignment (P0-9 — Round 5 T0)
+    # Only activated when bias confidence >= 0.5; weaker/neutral bias is
+    # pass-through so guard stays backward-compatible when htf_bias is None.
+    guard6_pass = True
+    guard6_reason: Optional[str] = None
+    if htf_bias is not None and htf_bias.confidence >= 0.5:
+        bias_dir = htf_bias.direction  # "bullish" / "bearish" / "neutral"
+        if bias_dir == "bullish" and setup.direction == "short":
+            guard6_pass = False
+            guard6_reason = "htf_bias_opposed"
+        elif bias_dir == "bearish" and setup.direction == "long":
+            guard6_pass = False
+            guard6_reason = "htf_bias_opposed"
+
+    all_passed = (
+        width_pass and rr_pass and touches_pass and duration_pass and guard6_pass
+    )
 
     _LAST_GUARDS_CHECK = {
         "session": session,
@@ -211,6 +238,9 @@ def check_range_guards(
         "duration_bars": bounds.duration_bars,
         "duration_pass": duration_pass,
         # Guard 5 (lot_multiplier) enforced downstream (live_demo); logged separately.
+        # Guard 6: HTF alignment
+        "guard6_pass": guard6_pass,
+        "guard6_reason": guard6_reason,
         "all_passed": all_passed,
     }
 
@@ -239,12 +269,14 @@ def _soft_reversal_3bar(
     m15_snapshot: SMCSnapshot,
     direction: str,
 ) -> bool:
-    """Round 4.6-U + V: soft reversal fallback when strict M15 CHoCH absent.
+    """Soft reversal fallback when strict M15 CHoCH is absent.
 
-    Tradeoff: lower quality vs no trades in trending market.
-    4.6-V (USER 解决到开仓): 4.6-U's single-swing check too narrow (latest
-    swing 方向不一定 match direction). Look at last 5 swings: any matching
-    swing_type indicates near-term market structure aware of the level.
+    Require structure break (Check 1) OR recent swing match (Check 2);
+    no structure → reject.
+
+    Round 4.6-U + V: widened swing look-back to last 5 points.
+    Round 5 T0 (P0-9): removed unconditional Check 3 `return True` — that
+    bypass allowed structureless setups through with no market evidence.
     """
     target = "bearish" if direction == "short" else "bullish"
 
@@ -260,10 +292,8 @@ def _soft_reversal_3bar(
         if sw.swing_type == target_swing:
             return True
 
-    # Check 3 (4.6-V chase mode): if HTF + price already says reversal intent
-    # is valid (caller validated near_boundary), accept structureless setup.
-    # Compensated by Guard 2 RR>=1.2 downstream + TP_ext to opposite boundary.
-    return True
+    # No structure break and no matching swing → reject (P0-9 fix).
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -293,10 +323,17 @@ class RangeTrader:
         # candidate via _validate_bounds. 5 guards still filter downstream.
         max_range_width: float = 20000.0,
         boundary_pct: float = 0.15,
+        cooldown_state_path: Optional[Path] = None,
     ) -> None:
         self._min_range_width = min_range_width
         self._max_range_width = max_range_width
         self._boundary_pct = boundary_pct
+        # Round 5 T0 (P0-4): persist cooldown state across process restarts.
+        self._cooldown_state_path: Path = (
+            cooldown_state_path
+            if cooldown_state_path is not None
+            else Path("data/range_cooldown_state.json")
+        )
         # Round 4.6-C2: measure-first diagnostic.
         # live_demo writes this into journal['range_diagnostic'] each cycle
         # so we can see which method/condition caused range_bounds=None.
@@ -306,7 +343,52 @@ class RangeTrader:
         # Tracks last setup timestamp per direction — blocks _build_setup from
         # returning a non-None setup within cooldown window. Solves UTC 16:45-18:00
         # 6-SHORT same-zone stacking (quality dropped Grade A → C, RR 2.31 → 1.45).
+        # Round 5 T0 (P0-4): loaded from / persisted to JSON so restarts don't reset.
         self._last_setup_ts: dict[str, datetime] = {}
+        self._load_cooldown_state()
+
+    # ------------------------------------------------------------------
+    # Cooldown persistence helpers (Round 5 T0, P0-4)
+    # ------------------------------------------------------------------
+
+    def _load_cooldown_state(self) -> None:
+        """Load per-direction cooldown timestamps from JSON (fail-open).
+
+        Populates self._last_setup_ts from {direction: iso_timestamp} dict.
+        Missing or corrupt file is silently ignored (fresh cooldown state).
+        """
+        raw: dict[str, object] = load_json(self._cooldown_state_path, default={})
+        ts_map: dict[str, datetime] = {}
+        for direction, iso_str in raw.items():
+            if not isinstance(iso_str, str):
+                continue
+            try:
+                ts = datetime.fromisoformat(iso_str)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                ts_map[direction] = ts
+            except Exception:
+                pass
+        self._last_setup_ts = ts_map
+
+    def _persist_cooldown_state(self) -> None:
+        """Persist per-direction cooldown timestamps to JSON (best-effort).
+
+        Writes {direction: iso_timestamp} dict atomically.  Failure is logged
+        but never raised — in-memory state remains authoritative.
+        """
+        payload = {
+            direction: ts.isoformat()
+            for direction, ts in self._last_setup_ts.items()
+        }
+        try:
+            atomic_write_json(self._cooldown_state_path, payload)
+        except Exception as exc:
+            _log.warning(
+                "RangeTrader: failed to persist cooldown state to %s: %s",
+                self._cooldown_state_path,
+                exc,
+            )
 
     # ------------------------------------------------------------------
     # Range detection
@@ -722,8 +804,10 @@ class RangeTrader:
 
         grade = self._grade_setup(bounds, rr_ratio)
 
-        # Round 4.6-W: record successful setup timestamp for cooldown gate
+        # Round 4.6-W / Round 5 T0 (P0-4 + P0-5): record setup timestamp for
+        # unconditional per-direction 30-min cooldown, then persist to disk.
         self._last_setup_ts[direction] = datetime.now(tz=timezone.utc)
+        self._persist_cooldown_state()
 
         return RangeSetup(
             direction=direction,  # type: ignore[arg-type]

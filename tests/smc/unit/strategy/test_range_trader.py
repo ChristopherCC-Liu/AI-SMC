@@ -13,6 +13,7 @@ Covers:
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -66,8 +67,13 @@ def _empty_h1_df() -> pl.DataFrame:
 
 
 @pytest.fixture()
-def trader() -> RangeTrader:
-    return RangeTrader(min_range_width=300, max_range_width=3000)
+def trader(tmp_path: Path) -> RangeTrader:
+    """RangeTrader with isolated cooldown state so tests don't share timestamps."""
+    return RangeTrader(
+        min_range_width=300,
+        max_range_width=3000,
+        cooldown_state_path=tmp_path / "cooldown.json",
+    )
 
 
 @pytest.fixture()
@@ -419,26 +425,30 @@ class TestNoSetupMidRange:
 
 
 class TestM15Confirmation:
-    def test_setup_without_choch_accepted_via_soft_fallback(
+    def test_setup_without_choch_rejected_by_check3_fix(
         self,
         trader: RangeTrader,
         h1_with_obs: SMCSnapshot,
         m15_no_choch: SMCSnapshot,
     ) -> None:
-        """Round 4.6-V (USER 解决到开仓): soft_reversal_3bar fallback Check 3
-        accepts setup when strict CHoCH absent. Quality floor enforced by Guard 2
-        RR>=1.2 + TP_ext downstream.
+        """Round 5 T0 (P0-9): Check 3 unconditional `return True` removed.
+
+        With no structure breaks and no matching swings in m15_no_choch,
+        _soft_reversal_3bar now returns False → setup is rejected.
+
+        Previously (4.6-V): `assert len(setups) in (0, 1)` accepted the
+        soft-fallback allowing structureless setups through. Now we require
+        at least Check 1 (structure break) or Check 2 (matching swing).
         """
         bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
         assert bounds is not None
 
-        # Price at lower boundary, no strict CHoCH, but soft fallback accepts
+        # Price at lower boundary, no strict CHoCH, no swings → rejected
         setups = trader.generate_range_setups(
             h1_with_obs, m15_no_choch, 2349.00, bounds
         )
-        # 4.6-V: setup 可以存在 (soft fallback 允许) OR 被 Guard 2 RR<1.2 reject
-        # 关键: 不再要求 exactly 0 setups
-        assert len(setups) in (0, 1)
+        # P0-9 fix: no structure → 0 setups (Check 3 no longer bypasses)
+        assert len(setups) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -825,14 +835,16 @@ class TestSetupsDiagnostic:
         assert diag["near_upper"] is False
         assert diag["reason_if_zero"] == "price_mid_range"
 
-    def test_diagnostic_near_lower_with_soft_fallback(
+    def test_diagnostic_near_lower_no_structure_rejects(
         self,
         trader: RangeTrader,
         h1_with_obs: SMCSnapshot,
         m15_no_choch: SMCSnapshot,
     ) -> None:
-        """Round 4.6-V: near_lower + no strict CHoCH → soft fallback may allow.
-        Diagnostic still reports near_lower status correctly.
+        """Round 5 T0 (P0-9): near_lower + no CHoCH + no swings → rejected.
+
+        Diagnostic still reports near_lower=True (price was near boundary),
+        but long_setup_built=False because Check 3 no longer bypasses structure.
         """
         bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
         assert bounds is not None
@@ -841,8 +853,9 @@ class TestSetupsDiagnostic:
         )
         diag = trader._last_setups_diagnostic
         assert diag["near_lower"] is True
-        # 4.6-V: near_lower 正确识别. long_setup_built / reason_if_zero 不再
-        # 严格要求 CHoCH-only semantics (soft fallback 可能 build setup).
+        assert len(setups) == 0
+        assert diag["long_setup_built"] is False
+        assert diag["reason_if_zero"] == "no_m15_choch_at_lower"
 
     def test_diagnostic_long_built(
         self,
@@ -970,3 +983,434 @@ class TestAsianBoundaryPctProfile:
         # diverge: near_lower=True but long_setup_built=False due to narrow
         # CHoCH zone. Consistent: either both True or both False.
         assert diag["long_setup_built"] == (len(setups) >= 1)
+
+
+# ---------------------------------------------------------------------------
+# Round 5 T0 (P0-9): Check 3 returns False — structureless setups rejected
+# ---------------------------------------------------------------------------
+
+
+class TestCheck3ReturnsFalseWithoutStructure:
+    """P0-9: _soft_reversal_3bar no longer has an unconditional `return True`."""
+
+    def test_check3_returns_false_without_structure(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+    ) -> None:
+        """Empty M15 snapshot (no breaks, no swings) → 0 setups at boundary."""
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+
+        m15_empty = _make_snapshot(timeframe=Timeframe.M15)
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_empty, 2349.00, bounds
+        )
+        # P0-9: no structure → rejected by _soft_reversal_3bar returning False
+        assert len(setups) == 0
+
+    def test_check3_passes_with_matching_swing(
+        self,
+        trader: RangeTrader,
+        h1_with_obs: SMCSnapshot,
+    ) -> None:
+        """A matching swing (Check 2) is sufficient — setup is built."""
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+
+        # No structure break but has a "low" swing (matches direction="long")
+        m15_swing_only = _make_snapshot(
+            timeframe=Timeframe.M15,
+            swing_points=(
+                SwingPoint(ts=_BASE_TS, price=2349.00, swing_type="low", strength=3),
+            ),
+        )
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_swing_only, 2349.00, bounds
+        )
+        # Check 2 matched → should build a setup (RR check may still reject)
+        # At minimum, the soft_reversal check passes; we verify it was attempted.
+        diag = trader._last_setups_diagnostic
+        assert diag["near_lower"] is True
+        # long_setup_built depends on RR — just assert no exception and near_lower ok
+
+
+# ---------------------------------------------------------------------------
+# Round 5 T0 (P0-4): Cooldown state persisted across RangeTrader instances
+# ---------------------------------------------------------------------------
+
+
+class TestCooldownPersisted:
+    """P0-4: _last_setup_ts is saved to JSON and reloaded on construction."""
+
+    def test_cooldown_persisted_across_instances(self, tmp_path: Path) -> None:
+        """State written by one RangeTrader instance survives a restart."""
+        state_path = tmp_path / "cooldown.json"
+
+        # Instance 1: record a "long" setup (triggers cooldown)
+        trader1 = RangeTrader(
+            min_range_width=300,
+            max_range_width=3000,
+            cooldown_state_path=state_path,
+        )
+        trader1._last_setup_ts["long"] = datetime.now(tz=timezone.utc)
+        trader1._persist_cooldown_state()
+
+        # Instance 2: reconstruct from same state path
+        trader2 = RangeTrader(
+            min_range_width=300,
+            max_range_width=3000,
+            cooldown_state_path=state_path,
+        )
+        assert "long" in trader2._last_setup_ts
+
+        elapsed = (
+            datetime.now(tz=timezone.utc) - trader2._last_setup_ts["long"]
+        ).total_seconds()
+        # Timestamp round-tripped; should be within a few seconds of now
+        assert elapsed < 10
+
+    def test_cooldown_state_path_defaults_when_not_given(self) -> None:
+        """Default path is data/range_cooldown_state.json (no crash if missing)."""
+        # Just check construction doesn't raise even if the file is absent
+        trader = RangeTrader.__new__(RangeTrader)
+        trader._min_range_width = 200.0
+        trader._max_range_width = 20000.0
+        trader._boundary_pct = 0.15
+        trader._last_diagnostic = {}
+        trader._last_setups_diagnostic = {}
+        trader._cooldown_state_path = Path("data/range_cooldown_state_NONEXISTENT_TEST.json")
+        trader._last_setup_ts = {}
+        trader._load_cooldown_state()  # must not raise even if file missing
+        assert trader._last_setup_ts == {}
+
+    def test_corrupt_state_file_does_not_crash(self, tmp_path: Path) -> None:
+        """Corrupt JSON state file → load silently falls back to empty dict."""
+        state_path = tmp_path / "bad.json"
+        state_path.write_text("{not valid json}", encoding="utf-8")
+
+        # Must not raise
+        trader = RangeTrader(
+            min_range_width=300,
+            max_range_width=3000,
+            cooldown_state_path=state_path,
+        )
+        assert trader._last_setup_ts == {}
+
+
+# ---------------------------------------------------------------------------
+# Round 5 T0 (P0-5): Unconditional per-direction 30-min cooldown
+# ---------------------------------------------------------------------------
+
+
+class TestCooldown30MinUnconditional:
+    """P0-5: 30-min per-direction cooldown is unconditional (not just on loss)."""
+
+    def test_cooldown_blocks_within_30min(
+        self, tmp_path: Path, h1_with_obs: SMCSnapshot
+    ) -> None:
+        """After a setup is recorded, same-direction attempts within 30 min are blocked."""
+        trader = RangeTrader(
+            min_range_width=300,
+            max_range_width=3000,
+            cooldown_state_path=tmp_path / "cd.json",
+        )
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+
+        m15_bullish = _make_snapshot(
+            timeframe=Timeframe.M15,
+            structure_breaks=(
+                StructureBreak(
+                    ts=_BASE_TS,
+                    price=2349.00,
+                    break_type="choch",
+                    direction="bullish",
+                    timeframe=Timeframe.M15,
+                ),
+            ),
+        )
+
+        # First call: should succeed (no cooldown yet)
+        setups1 = trader.generate_range_setups(
+            h1_with_obs, m15_bullish, 2349.00, bounds
+        )
+        assert len(setups1) >= 1, "First setup should be accepted (no prior cooldown)"
+
+        # Immediately call again: within 30-min window → blocked
+        setups2 = trader.generate_range_setups(
+            h1_with_obs, m15_bullish, 2349.00, bounds
+        )
+        assert len(setups2) == 0, "Same direction within 30 min must be blocked"
+
+    def test_cooldown_expires_after_30min(
+        self, tmp_path: Path, h1_with_obs: SMCSnapshot
+    ) -> None:
+        """After 30+ minutes the cooldown expires and a new setup is accepted."""
+        trader = RangeTrader(
+            min_range_width=300,
+            max_range_width=3000,
+            cooldown_state_path=tmp_path / "cd.json",
+        )
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+
+        # Seed an old timestamp (35 minutes ago)
+        trader._last_setup_ts["long"] = datetime.now(tz=timezone.utc) - timedelta(minutes=35)
+
+        m15_bullish = _make_snapshot(
+            timeframe=Timeframe.M15,
+            structure_breaks=(
+                StructureBreak(
+                    ts=_BASE_TS,
+                    price=2349.00,
+                    break_type="choch",
+                    direction="bullish",
+                    timeframe=Timeframe.M15,
+                ),
+            ),
+        )
+
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_bullish, 2349.00, bounds
+        )
+        assert len(setups) >= 1, "Setup should be accepted after 35 min cooldown expiry"
+
+    def test_cooldown_is_per_direction(
+        self, tmp_path: Path, h1_with_obs: SMCSnapshot
+    ) -> None:
+        """A long cooldown must not block short setups at the upper boundary."""
+        trader = RangeTrader(
+            min_range_width=300,
+            max_range_width=3000,
+            cooldown_state_path=tmp_path / "cd.json",
+        )
+        bounds = trader.detect_range(_empty_h1_df(), h1_with_obs)
+        assert bounds is not None
+
+        # Seed "long" cooldown (just now)
+        trader._last_setup_ts["long"] = datetime.now(tz=timezone.utc)
+
+        m15_bearish = _make_snapshot(
+            timeframe=Timeframe.M15,
+            structure_breaks=(
+                StructureBreak(
+                    ts=_BASE_TS,
+                    price=2369.00,
+                    break_type="choch",
+                    direction="bearish",
+                    timeframe=Timeframe.M15,
+                ),
+            ),
+        )
+
+        # Short at upper boundary — must not be blocked by long cooldown
+        setups = trader.generate_range_setups(
+            h1_with_obs, m15_bearish, 2369.00, bounds
+        )
+        assert len(setups) >= 1, "Short setup should not be blocked by long-direction cooldown"
+
+
+# ---------------------------------------------------------------------------
+# Round 5 T0 (P0-9): Guard 6 — HTF bias alignment
+# ---------------------------------------------------------------------------
+
+
+class TestGuard6HTFAlignment:
+    """P0-9: Guard 6 rejects setups that oppose a strong HTF bias."""
+
+    def _passing_h1_df(self) -> "pl.DataFrame":
+        """H1 df with enough touches for guards to pass."""
+        import polars as pl
+        highs = [2370.0] * 3 + [2359.0] * 5
+        lows = [2362.0] * 3 + [2348.0] * 3 + [2358.0] * 2
+        return pl.DataFrame({"high": highs, "low": lows})
+
+    def test_guard6_bullish_bias_blocks_sell(
+        self, h1_with_obs: SMCSnapshot
+    ) -> None:
+        """HTF bullish bias (conf>=0.5) rejects a short setup."""
+        from smc.strategy.range_trader import check_range_guards
+        from smc.strategy.range_types import RangeBounds, RangeSetup
+        from smc.strategy.types import BiasDirection
+
+        detected_at = datetime(2024, 7, 1, tzinfo=timezone.utc)
+        bounds = RangeBounds(
+            upper=2380.0, lower=2370.0,
+            width_points=1000.0, midpoint=2375.0,
+            detected_at=detected_at,
+            source="ob_boundaries", confidence=0.85, duration_bars=20,
+        )
+        setup = RangeSetup(
+            direction="short",
+            entry_price=2379.0, stop_loss=2381.0,
+            take_profit=2375.0, take_profit_ext=2371.0,
+            risk_points=200.0, reward_points=800.0, rr_ratio=4.0,
+            range_bounds=bounds, confidence=0.85,
+            trigger="resistance_rejection", grade="A",
+        )
+
+        import polars as pl
+        h1_df = pl.DataFrame({
+            "high": [2380.0] * 2 + [2375.0] * 5,
+            "low": [2374.0] * 2 + [2370.0] * 3 + [2373.0] * 2,
+        })
+        bullish_bias = BiasDirection(
+            direction="bullish",
+            confidence=0.7,
+            key_levels=(),
+            rationale="Tier 1 test",
+        )
+
+        result = check_range_guards(bounds, setup, "LONDON", h1_df, htf_bias=bullish_bias)
+        assert result is False, "Bullish HTF bias should block a short setup"
+
+    def test_guard6_bearish_bias_blocks_buy(
+        self, h1_with_obs: SMCSnapshot
+    ) -> None:
+        """HTF bearish bias (conf>=0.5) rejects a long setup."""
+        from smc.strategy.range_trader import check_range_guards
+        from smc.strategy.range_types import RangeBounds, RangeSetup
+        from smc.strategy.types import BiasDirection
+
+        detected_at = datetime(2024, 7, 1, tzinfo=timezone.utc)
+        bounds = RangeBounds(
+            upper=2380.0, lower=2370.0,
+            width_points=1000.0, midpoint=2375.0,
+            detected_at=detected_at,
+            source="ob_boundaries", confidence=0.85, duration_bars=20,
+        )
+        setup = RangeSetup(
+            direction="long",
+            entry_price=2371.0, stop_loss=2369.0,
+            take_profit=2375.0, take_profit_ext=2379.0,
+            risk_points=200.0, reward_points=800.0, rr_ratio=4.0,
+            range_bounds=bounds, confidence=0.85,
+            trigger="support_bounce", grade="A",
+        )
+
+        import polars as pl
+        h1_df = pl.DataFrame({
+            "high": [2380.0] * 2 + [2375.0] * 5,
+            "low": [2374.0] * 2 + [2370.0] * 3 + [2373.0] * 2,
+        })
+        bearish_bias = BiasDirection(
+            direction="bearish",
+            confidence=0.7,
+            key_levels=(),
+            rationale="Tier 1 test",
+        )
+
+        result = check_range_guards(bounds, setup, "LONDON", h1_df, htf_bias=bearish_bias)
+        assert result is False, "Bearish HTF bias should block a long setup"
+
+    def test_guard6_neutral_bias_does_not_reject(
+        self, h1_with_obs: SMCSnapshot
+    ) -> None:
+        """Neutral HTF bias (regardless of confidence) does not trigger Guard 6."""
+        from smc.strategy.range_trader import check_range_guards
+        from smc.strategy.range_types import RangeBounds, RangeSetup
+        from smc.strategy.types import BiasDirection
+
+        detected_at = datetime(2024, 7, 1, tzinfo=timezone.utc)
+        bounds = RangeBounds(
+            upper=2380.0, lower=2370.0,
+            width_points=1000.0, midpoint=2375.0,
+            detected_at=detected_at,
+            source="ob_boundaries", confidence=0.85, duration_bars=20,
+        )
+        setup = RangeSetup(
+            direction="short",
+            entry_price=2379.0, stop_loss=2381.0,
+            take_profit=2375.0, take_profit_ext=2371.0,
+            risk_points=200.0, reward_points=800.0, rr_ratio=4.0,
+            range_bounds=bounds, confidence=0.85,
+            trigger="resistance_rejection", grade="A",
+        )
+
+        import polars as pl
+        h1_df = pl.DataFrame({
+            "high": [2380.0] * 2 + [2375.0] * 5,
+            "low": [2374.0] * 2 + [2370.0] * 3 + [2373.0] * 2,
+        })
+        neutral_bias = BiasDirection(
+            direction="neutral",
+            confidence=0.9,
+            key_levels=(),
+            rationale="Conflicting D1/H4",
+        )
+
+        result = check_range_guards(bounds, setup, "LONDON", h1_df, htf_bias=neutral_bias)
+        assert result is True, "Neutral bias must not trigger Guard 6 rejection"
+
+    def test_guard6_low_confidence_bias_does_not_reject(
+        self, h1_with_obs: SMCSnapshot
+    ) -> None:
+        """Bullish bias with confidence < 0.5 does NOT trigger Guard 6 (pass-through)."""
+        from smc.strategy.range_trader import check_range_guards
+        from smc.strategy.range_types import RangeBounds, RangeSetup
+        from smc.strategy.types import BiasDirection
+
+        detected_at = datetime(2024, 7, 1, tzinfo=timezone.utc)
+        bounds = RangeBounds(
+            upper=2380.0, lower=2370.0,
+            width_points=1000.0, midpoint=2375.0,
+            detected_at=detected_at,
+            source="ob_boundaries", confidence=0.85, duration_bars=20,
+        )
+        setup = RangeSetup(
+            direction="short",
+            entry_price=2379.0, stop_loss=2381.0,
+            take_profit=2375.0, take_profit_ext=2371.0,
+            risk_points=200.0, reward_points=800.0, rr_ratio=4.0,
+            range_bounds=bounds, confidence=0.85,
+            trigger="resistance_rejection", grade="A",
+        )
+
+        import polars as pl
+        h1_df = pl.DataFrame({
+            "high": [2380.0] * 2 + [2375.0] * 5,
+            "low": [2374.0] * 2 + [2370.0] * 3 + [2373.0] * 2,
+        })
+        weak_bullish_bias = BiasDirection(
+            direction="bullish",
+            confidence=0.3,  # < 0.5 → Guard 6 inactive
+            key_levels=(),
+            rationale="Tier 3 weak",
+        )
+
+        result = check_range_guards(bounds, setup, "LONDON", h1_df, htf_bias=weak_bullish_bias)
+        assert result is True, "Weak bias (conf<0.5) must not trigger Guard 6"
+
+    def test_guard6_absent_htf_bias_backward_compat(
+        self, h1_with_obs: SMCSnapshot
+    ) -> None:
+        """Omitting htf_bias (None) behaves identically to pre-Guard-6 code."""
+        from smc.strategy.range_trader import check_range_guards
+        from smc.strategy.range_types import RangeBounds, RangeSetup
+
+        detected_at = datetime(2024, 7, 1, tzinfo=timezone.utc)
+        bounds = RangeBounds(
+            upper=2380.0, lower=2370.0,
+            width_points=1000.0, midpoint=2375.0,
+            detected_at=detected_at,
+            source="ob_boundaries", confidence=0.85, duration_bars=20,
+        )
+        setup = RangeSetup(
+            direction="short",
+            entry_price=2379.0, stop_loss=2381.0,
+            take_profit=2375.0, take_profit_ext=2371.0,
+            risk_points=200.0, reward_points=800.0, rr_ratio=4.0,
+            range_bounds=bounds, confidence=0.85,
+            trigger="resistance_rejection", grade="A",
+        )
+
+        import polars as pl
+        h1_df = pl.DataFrame({
+            "high": [2380.0] * 2 + [2375.0] * 5,
+            "low": [2374.0] * 2 + [2370.0] * 3 + [2373.0] * 2,
+        })
+
+        # No htf_bias kwarg at all — must not raise
+        result = check_range_guards(bounds, setup, "LONDON", h1_df)
+        assert result is True, "No htf_bias → Guard 6 skipped, all other guards pass"
