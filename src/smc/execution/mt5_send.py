@@ -30,6 +30,7 @@ TRADE_RETCODE_REQUOTE = 10004
 TRADE_RETCODE_REJECT = 10013
 TRADE_RETCODE_MARKET_CLOSED = 10018
 
+# kept as legacy default for backward-compat; new callers should pass circuit_flag_path explicitly
 CIRCUIT_OPEN_PATH = Path("data/execution_circuit_open.flag")
 
 
@@ -65,7 +66,7 @@ def send_with_retry(
     request: dict,
     max_attempts: int = 3,
     backoff_ms: tuple[int, ...] = (100, 300, 1000),
-    circuit_flag_path: Path = CIRCUIT_OPEN_PATH,
+    circuit_flag_path: "Path | None" = None,
 ) -> OrderSendResult:
     """MT5 order_send with retry, price refresh, and circuit breaker.
 
@@ -74,13 +75,17 @@ def send_with_retry(
     and retrying would burn attempts for no reason.
     Three consecutive REQUOTE/REJECT/Exception opens the circuit breaker flag so the caller
     knows to stop sending orders and alert the operator.
+
+    ``circuit_flag_path`` defaults to the module-level ``CIRCUIT_OPEN_PATH`` when ``None``
+    (legacy backward-compat). New callers should pass the path explicitly.
     """
-    if circuit_flag_path.exists():
+    flag_path: Path = circuit_flag_path if circuit_flag_path is not None else CIRCUIT_OPEN_PATH
+    if flag_path.exists():
         return OrderSendResult(
             success=False,
             retcode=-1,
             ticket=None,
-            message=f"Circuit breaker open ({circuit_flag_path})",
+            message=f"Circuit breaker open ({flag_path})",
             attempts=0,
         )
 
@@ -130,8 +135,8 @@ def send_with_retry(
             time.sleep(backoff_ms[delay_idx] / 1000.0)
 
     try:
-        circuit_flag_path.parent.mkdir(parents=True, exist_ok=True)
-        circuit_flag_path.write_text(
+        flag_path.parent.mkdir(parents=True, exist_ok=True)
+        flag_path.write_text(
             f"opened at attempt {attempt}, last retcode {last_retcode}: {last_msg}\n"
         )
     except Exception:

@@ -154,6 +154,7 @@ from smc.execution.mt5_positions_adapter import (
 )
 from smc.risk.consec_loss_halt import ConsecLossHalt
 from smc.risk.drawdown_guard import DrawdownGuard
+from smc.risk.margin_cap import check_margin_cap
 
 # ---------------------------------------------------------------------------
 # Per-symbol data paths (populated in main() after argparse).
@@ -589,6 +590,9 @@ def main():
     MT5_POSITIONS_PATH = DATA_ROOT / "mt5_positions.json"
     CONSEC_LOSS_PATH = DATA_ROOT / "consec_loss_state.json"
     ASIAN_QUOTA_PATH = DATA_ROOT / "asian_range_quota_state.json"
+    # Round 5 T2 Stage 5: per-symbol circuit breaker flag so XAU and BTC
+    # processes each own their execution circuit independently.
+    CIRCUIT_FLAG_PATH = DATA_ROOT / "execution_circuit_open.flag"
 
     print(f"[{datetime.now()}] AI-SMC Live Trading Loop Starting...")
     print("=" * 60)
@@ -833,6 +837,7 @@ def main():
                 _mt5_ticket: int | None = None
                 _mt5_send_retcode: int | None = None
                 _mt5_mode_tag = "PAPER"
+                _margin_gated = False  # set True when margin_cap gate blocks real order
                 # Asian ranging 用 0.3x multiplier (Phase1a 降档协议), 其他 1.0x.
                 # margin 公式分两步避免 bug:
                 #   notional_usd = entry × contract_size × lots
@@ -878,11 +883,65 @@ def main():
                 _mt5_send_attempts = 0
                 if _mt5_execute:
                     dyn_deviation = compute_dynamic_deviation(mt5, cfg.mt5_path, fallback=100)
+                    order_type = mt5.ORDER_TYPE_BUY if best.direction == "long" else mt5.ORDER_TYPE_SELL
+                    tick_for_margin = mt5.symbol_info_tick(cfg.mt5_path)
+                    margin_price = (
+                        float(getattr(tick_for_margin, "ask" if best.direction == "long" else "bid", best.entry_price))
+                        if tick_for_margin is not None
+                        else best.entry_price
+                    )
+                    # Round 5 T2 Stage 5: global margin cap gate before any real order.
+                    # Checks that total margin (existing + proposed) stays within 40% of
+                    # equity — prevents dual-symbol XAU+BTC from blowing the $1000 demo.
+                    margin_check = check_margin_cap(
+                        mt5,
+                        symbol=cfg.mt5_path,
+                        action=order_type,
+                        volume=position_size_lots,
+                        price=margin_price,
+                        max_pct=0.40,
+                    )
+                    if not margin_check.can_trade:
+                        log_warn(
+                            "margin_cap_gate",
+                            symbol=cfg.symbol,
+                            reason=margin_check.reason,
+                            margin_used=margin_check.current_margin_used,
+                            equity=margin_check.current_equity,
+                            proposed=margin_check.proposed_margin,
+                            total_after=margin_check.total_after,
+                            cap_ratio=margin_check.cap_ratio,
+                        )
+                        print(
+                            f"  [MARGIN_CAP] Gate blocked: {margin_check.reason} "
+                            f"(margin {margin_check.total_after:.2f} / equity {margin_check.current_equity:.2f})"
+                        )
+                        log_entry = {
+                            "time": now.isoformat(),
+                            "cycle": cycle,
+                            "price": price,
+                            "action": action,
+                            "direction": best.direction,
+                            "entry": best.entry_price,
+                            "sl": best.stop_loss,
+                            "tp1": best.take_profit,
+                            "trigger": best.trigger,
+                            "mode": "MARGIN_GATED",
+                            "margin_gated": True,
+                            "margin_reason": margin_check.reason,
+                            "trading_mode": mode.mode,
+                            "session": session,
+                        }
+                        with open(JOURNAL_PATH, "a") as f:
+                            f.write(json.dumps(log_entry) + "\n")
+                        # Skip real order; do not consume Asian quota.
+                        _mt5_execute = False  # prevents the send_with_retry block below
+                        _margin_gated = True
                     request = {
                         "action": mt5.TRADE_ACTION_DEAL,
                         "symbol": cfg.mt5_path,
                         "volume": position_size_lots,
-                        "type": mt5.ORDER_TYPE_BUY if best.direction == "long" else mt5.ORDER_TYPE_SELL,
+                        "type": order_type,
                         "price": 0.0,  # refreshed per attempt inside send_with_retry
                         "sl": best.stop_loss,
                         "tp": best.take_profit,
@@ -892,7 +951,8 @@ def main():
                         "type_time": mt5.ORDER_TIME_GTC,
                         "type_filling": mt5.ORDER_FILLING_IOC,
                     }
-                    send_result = send_with_retry(mt5, request)
+                if _mt5_execute:
+                    send_result = send_with_retry(mt5, request, circuit_flag_path=CIRCUIT_FLAG_PATH)
                     _mt5_send_retcode = send_result.retcode
                     _mt5_ticket = send_result.ticket
                     _mt5_send_attempts = send_result.attempts
@@ -952,42 +1012,43 @@ def main():
                         state_path=ASIAN_QUOTA_PATH,
                     )
 
-                log_entry = {
-                    "time": now.isoformat(),
-                    "cycle": cycle,
-                    "price": price,
-                    "action": action,
-                    "direction": best.direction,
-                    "entry": best.entry_price,
-                    "sl": best.stop_loss,
-                    "tp1": best.take_profit,
-                    "tp_ext": best.take_profit_ext,
-                    "trigger": best.trigger,
-                    "rr_ratio": best.rr_ratio,
-                    "risk_points": best.risk_points,
-                    "reward_points": best.reward_points,
-                    "confidence": best.confidence,
-                    "grade": best.grade,
-                    "range_source": best.range_bounds.source,
-                    "range_lower": best.range_bounds.lower,
-                    "range_upper": best.range_bounds.upper,
-                    "regime": regime,
-                    "ai_direction": ai_analysis.get("ai_direction", ai_analysis.get("direction", "?")),
-                    "mode": _mt5_mode_tag,  # 4.6-X: PAPER / LIVE_EXEC / MT5_FAIL_xxx
-                    "mt5_ticket": _mt5_ticket,
-                    "mt5_retcode": _mt5_send_retcode,
-                    "mt5_send_attempts": _mt5_send_attempts,  # Round 5 T0 P0-3
-                    "trading_mode": mode.mode,
-                    "session": session,
-                    # Round 4.6-J position sizing fields (4.6-J-fix: notional separated)
-                    "lot_multiplier": lot_multiplier,
-                    "position_size_lots": position_size_lots,
-                    "notional_value_usd": round(notional_value_usd, 2),
-                    "margin_used_estimate_usd": margin_used_estimate_usd,
-                    "leverage_ratio": cfg.leverage_ratio,
-                }
-                with open(JOURNAL_PATH, "a") as f:
-                    f.write(json.dumps(log_entry) + "\n")
+                if not _margin_gated:
+                    log_entry = {
+                        "time": now.isoformat(),
+                        "cycle": cycle,
+                        "price": price,
+                        "action": action,
+                        "direction": best.direction,
+                        "entry": best.entry_price,
+                        "sl": best.stop_loss,
+                        "tp1": best.take_profit,
+                        "tp_ext": best.take_profit_ext,
+                        "trigger": best.trigger,
+                        "rr_ratio": best.rr_ratio,
+                        "risk_points": best.risk_points,
+                        "reward_points": best.reward_points,
+                        "confidence": best.confidence,
+                        "grade": best.grade,
+                        "range_source": best.range_bounds.source,
+                        "range_lower": best.range_bounds.lower,
+                        "range_upper": best.range_bounds.upper,
+                        "regime": regime,
+                        "ai_direction": ai_analysis.get("ai_direction", ai_analysis.get("direction", "?")),
+                        "mode": _mt5_mode_tag,  # 4.6-X: PAPER / LIVE_EXEC / MT5_FAIL_xxx
+                        "mt5_ticket": _mt5_ticket,
+                        "mt5_retcode": _mt5_send_retcode,
+                        "mt5_send_attempts": _mt5_send_attempts,  # Round 5 T0 P0-3
+                        "trading_mode": mode.mode,
+                        "session": session,
+                        # Round 4.6-J position sizing fields (4.6-J-fix: notional separated)
+                        "lot_multiplier": lot_multiplier,
+                        "position_size_lots": position_size_lots,
+                        "notional_value_usd": round(notional_value_usd, 2),
+                        "margin_used_estimate_usd": margin_used_estimate_usd,
+                        "leverage_ratio": cfg.leverage_ratio,
+                    }
+                    with open(JOURNAL_PATH, "a") as f:
+                        f.write(json.dumps(log_entry) + "\n")
             else:
                 # Trending (v1 5-gate) path: iterate setups as before
                 for s in setups:
