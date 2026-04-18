@@ -19,17 +19,25 @@
 
 param(
     [string]$InstallDir = "C:\AI-SMC",
-    [int]$StaleMinutes = 20
+    [int]$StaleMinutes = 20,
+    [ValidateSet("XAUUSD", "BTCUSD")]
+    [string]$Symbol = "XAUUSD"
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Continue"
 
-$statePath    = Join-Path $InstallDir "data\live_state.json"
-$pidPath      = Join-Path $InstallDir "data\live_demo.pid"
+# Round 5 T2 (BTC): per-symbol paths + per-symbol start script so XAU and BTC
+# watchdogs operate independently (each schtasks task passes -Symbol).
+$statePath    = Join-Path $InstallDir ("data\{0}\live_state.json" -f $Symbol)
+$pidPath      = Join-Path $InstallDir ("data\{0}\live_demo.pid" -f $Symbol)
 $logDir       = Join-Path $InstallDir "logs"
-$logPath      = Join-Path $logDir "watchdog.log"
-$startScript  = Join-Path $InstallDir "scripts\start_live.bat"
+$logPath      = Join-Path $logDir ("watchdog_{0}.log" -f $Symbol.ToLower())
+if ($Symbol -eq "XAUUSD") {
+    $startScript = Join-Path $InstallDir "scripts\start_live.bat"
+} else {
+    $startScript = Join-Path $InstallDir ("scripts\start_live_{0}.bat" -f $Symbol.ToLower())
+}
 
 if (-not (Test-Path $logDir)) {
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
@@ -89,9 +97,11 @@ function Stop-LiveDemo {
         }
         Remove-Item -Path $pidPath -Force -ErrorAction SilentlyContinue
     }
-    # Sweep stray instances
+    # Sweep stray instances for THIS symbol only (matching --symbol arg).
+    # XAU default has no --symbol flag, so match any live_demo.py without --symbol BTCUSD.
+    $symbolPattern = if ($Symbol -eq "XAUUSD") { "(?!.*--symbol BTCUSD)" } else { "--symbol $Symbol" }
     $stray = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
-             Where-Object { $_.CommandLine -and $_.CommandLine -match "live_demo\.py" }
+             Where-Object { $_.CommandLine -and $_.CommandLine -match "live_demo\.py" -and $_.CommandLine -match $symbolPattern }
     foreach ($proc in $stray) {
         try {
             Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
