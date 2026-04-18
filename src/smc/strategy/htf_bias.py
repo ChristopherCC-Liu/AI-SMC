@@ -21,7 +21,38 @@ from smc.smc_core.constants import XAUUSD_POINT_SIZE
 from smc.smc_core.types import SMCSnapshot
 from smc.strategy.types import BiasDirection
 
-__all__ = ["compute_htf_bias"]
+__all__ = ["compute_htf_bias", "htf_bias_tier"]
+
+
+# ---------------------------------------------------------------------------
+# Tier classification helper (audit-r2 ops #18 journal monitor)
+# ---------------------------------------------------------------------------
+
+def htf_bias_tier(confidence: float) -> str:
+    """Map HTF bias confidence to tier label for monitoring / UI / journal.
+
+    Thresholds mirror compute_htf_bias docstring:
+      Tier 1 — D1 + H4 aligned:  conf 0.7 – 1.0
+      Tier 2 — H4-only:          conf 0.4 – 0.7
+      Tier 3 — D1-only:          conf 0.3 – 0.5
+      neutral                  — conf < 0.3 (includes explicit 0.0 for disagreement)
+
+    Note: Tier 2 / Tier 3 ranges overlap at 0.4-0.5; we classify by the
+    floor (>=0.4 → tier_2) because tier_2 has the higher floor and is
+    the more likely producer in that band.  Tier 3 is only reached when
+    conf is strictly in [0.3, 0.4).
+
+    audit-r2 ops #18: used by decision-reviewer's Guard 6 debate to size
+    Round 3 S2 two-stage soft-multiplier decision.  Round 3 S2 may reuse
+    this helper directly if sizing by tier bucket.
+    """
+    if confidence >= 0.7:
+        return "tier_1"
+    if confidence >= 0.4:
+        return "tier_2"
+    if confidence >= 0.3:
+        return "tier_3"
+    return "neutral"
 
 # ---------------------------------------------------------------------------
 # Internal scoring helpers
