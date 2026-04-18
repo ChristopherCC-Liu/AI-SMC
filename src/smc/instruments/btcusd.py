@@ -12,6 +12,9 @@ BTCUSD_CONFIG = InstrumentConfig(
     contract_size=1.0,
     leverage_ratio=100,
     min_lot=0.01,
+    # BTCUSD: 1 pip ($0.10 price move) × 1 BTC = $0.10 per lot.
+    # Broker "Tick Value" page should confirm; flagged for ops-sustain verification.
+    pip_value_per_lot=0.1,
     donchian_lookback=24,
     min_range_width_points=None,
     min_range_width_pct=2.0,

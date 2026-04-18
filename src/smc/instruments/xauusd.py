@@ -26,6 +26,8 @@ XAUUSD_CONFIG = InstrumentConfig(
     contract_size=100.0,
     leverage_ratio=100,
     min_lot=0.01,
+    # XAUUSD: 1 pip ($0.10 price move) × 100 oz = $10 per lot.
+    pip_value_per_lot=10.0,
     # range_trader.py:51 — _DONCHIAN_LOOKBACK_BARS = 48
     donchian_lookback=48,
     # range_trader.py:319 — min_range_width default 200.0

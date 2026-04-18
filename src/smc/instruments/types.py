@@ -16,6 +16,11 @@ class InstrumentConfig:
     contract_size: float
     leverage_ratio: int
     min_lot: float
+    # Dollar P&L of one pip (10 points) move per standard lot.
+    # XAUUSD: 1 pip = $0.10 move × 100 oz = $10.  BTCUSD: 1 pip = $0.10 × 1 BTC = $0.10.
+    # Required field — no default — to force per-instrument declaration
+    # (historic bug: BTC was silently using XAU's $10 default, under-sizing risk by 100x).
+    pip_value_per_lot: float
 
     # Range detection
     donchian_lookback: int
