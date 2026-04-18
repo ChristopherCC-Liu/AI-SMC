@@ -28,6 +28,10 @@ AI_PATH = DATA / "ai_analysis.json"
 JOURNAL_PATH = DATA / "journal" / "live_trades.jsonl"
 USER_CONFIG_PATH = DATA / "user_config.json"
 PAUSE_FLAG_PATH = DATA / "trading_paused.flag"
+# Round 5 T1 F2: real-time broker positions written by live_demo each cycle.
+MT5_POSITIONS_PATH = DATA / "mt5_positions.json"
+# Round 5 T1 F3: daily consecutive-loss halt state.
+CONSEC_LOSS_PATH = DATA / "consec_loss_state.json"
 
 STALE_THRESHOLD_SEC = 5 * 60  # 5 分钟无更新视为 stale
 
@@ -71,6 +75,27 @@ def get_state() -> JSONResponse:
         "freshness": _freshness(state),
         "trading_paused": PAUSE_FLAG_PATH.exists(),
         "server_time": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+@app.get("/api/positions")
+def get_positions() -> JSONResponse:
+    """Round 5 T1 F2: real broker positions + halt state for the Hero card.
+
+    ``live_demo`` writes ``data/mt5_positions.json`` at the end of each M15
+    cycle via the MT5 positions adapter. Empty list (not 404) on a missing
+    file keeps the dashboard usable during cold starts / market-closed.
+    """
+    data = _read_json(MT5_POSITIONS_PATH) or {}
+    halt = _read_json(CONSEC_LOSS_PATH) or {}
+    return JSONResponse({
+        "ts": data.get("ts"),
+        "positions": data.get("positions", []),
+        "halt": {
+            "tripped": bool(halt.get("tripped", False)),
+            "consec_losses": int(halt.get("consec_losses", 0)),
+            "tripped_at": halt.get("tripped_at"),
+        },
     })
 
 

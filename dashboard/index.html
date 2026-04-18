@@ -76,6 +76,19 @@
 <!-- ======== 监控页 ======== -->
 <section x-show="tab === 'monitor'" class="space-y-4 md:space-y-6">
 
+  <!-- Round 5 T1 F5: 每日停盘横幅 -->
+  <div x-show="halt && halt.tripped" class="card p-4 md:p-5 border-l-4" style="border-left-color: #F59E0B; background: rgba(245, 158, 11, 0.08);">
+    <div class="flex items-center justify-between gap-4 flex-wrap">
+      <div>
+        <div class="text-sm font-bold" style="color: #F59E0B">⚠ 今日已停盘</div>
+        <div class="text-xs text-muted mt-1">
+          连亏 <span class="num" x-text="halt.consec_losses"></span> 单触发每日保险，UTC 00:00 自动恢复
+          <span x-show="halt.tripped_at" class="ml-2">· 停于 <span class="num" x-text="formatTime(halt.tripped_at)"></span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- 卡片 1: Hero -->
   <div class="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6">
     <!-- 持仓状态 -->
@@ -178,6 +191,7 @@
             <th class="py-2 pr-3 num text-right">风险回报</th>
             <th class="py-2 pr-3">AI 同意</th>
             <th class="py-2 pr-3">来源</th>
+            <th class="py-2 pr-3">模式</th>
           </tr>
         </thead>
         <tbody>
@@ -191,6 +205,7 @@
               <td class="py-2.5 pr-3 num text-right" :class="(t.rr_ratio||0) >= 1.2 ? 'text-long' : 'text-warn'" x-text="(t.rr_ratio||0).toFixed(2) + ' : 1'"></td>
               <td class="py-2.5 pr-3" x-text="aiAgreeLabel(t)"></td>
               <td class="py-2.5 pr-3 text-muted" x-text="translateTrigger(t.trigger)"></td>
+              <td class="py-2.5 pr-3"><span class="px-2 py-0.5 rounded text-xs font-medium" :class="modeBadgeClass(t)" x-text="modeBadgeLabel(t)"></span></td>
             </tr>
           </template>
         </tbody>
@@ -211,6 +226,7 @@
             <span :class="(t.rr_ratio||0) >= 1.2 ? 'text-long' : 'text-warn'" x-text="'RR ' + (t.rr_ratio||0).toFixed(2)"></span>
           </div>
           <div class="mt-1 text-xs text-muted" x-text="aiAgreeLabel(t) + ' · ' + translateTrigger(t.trigger)"></div>
+          <div class="mt-1"><span class="px-2 py-0.5 rounded text-xs font-medium" :class="modeBadgeClass(t)" x-text="modeBadgeLabel(t)"></span></div>
         </div>
       </template>
     </div>
@@ -405,6 +421,10 @@
       freshness: { fresh: false, age_sec: null, stale: true },
       tradingPaused: false,
       trades: [],
+      // Round 5 T1 F2: real MT5 positions + halt from /api/positions
+      positions: [],
+      positionsTs: null,
+      halt: { tripped: false, consec_losses: 0, tripped_at: null },
       config: structuredClone(DEFAULT_CONFIG),
       loading: false,
       error: null,
@@ -424,9 +444,11 @@
 
       async fetchAll() {
         try {
-          const [sRes, jRes] = await Promise.all([
+          // Round 5 T1 F2: fetch /api/positions in parallel for real Hero data.
+          const [sRes, jRes, pRes] = await Promise.all([
             fetch("/api/state"),
             fetch("/api/journal?limit=50"),
+            fetch("/api/positions"),
           ]);
           if (sRes.ok) {
             const s = await sRes.json();
@@ -438,6 +460,12 @@
           if (jRes.ok) {
             const j = await jRes.json();
             this.trades = j.trades || [];
+          }
+          if (pRes.ok) {
+            const p = await pRes.json();
+            this.positions = p.positions || [];
+            this.positionsTs = p.ts || null;
+            this.halt = p.halt || { tripped: false, consec_losses: 0, tripped_at: null };
           }
           this.error = null;
         } catch (e) {
@@ -492,6 +520,20 @@
         }
       },
 
+      // Round 5 T1 F5: mode badge styling for trades table
+      modeBadgeClass(t) {
+        const mode = String(t?.mode || "PAPER").toUpperCase();
+        if (mode === "LIVE_EXEC") return "bg-emerald-500/15 text-long";
+        if (mode.startsWith("MT5_FAIL")) return "bg-red-500/15 text-short";
+        return "bg-slate-500/15 text-muted";
+      },
+      modeBadgeLabel(t) {
+        const mode = String(t?.mode || "PAPER").toUpperCase();
+        if (mode === "LIVE_EXEC") return "真实";
+        if (mode.startsWith("MT5_FAIL")) return "失败";
+        return "纸面";
+      },
+
       async toggleTrading() {
         this.confirmKillSwitch = false;
         try {
@@ -526,23 +568,54 @@
       },
 
       get positionSummary() {
-        const p = this.livePosition;
-        if (p) {
-          const isLong = (p.direction || p.action || "").toUpperCase().includes("BUY");
+        // Round 5 T1 F2: prefer real broker positions (from /api/positions) over
+        // the journal-inferred "livePosition" heuristic. Fall back to legacy
+        // guess only when mt5_positions.json is not yet written (cold start).
+        if (this.positions && this.positions.length > 0) {
+          const p = this.positions[0];
+          const isLong = p.direction === "long";
+          const lots = Number(p.lots || 0).toFixed(2);
+          const entry = this.formatNum(p.open_price);
           return {
-            label: isLong ? "多单 @ $" + this.formatNum(p.entry) : "空单 @ $" + this.formatNum(p.entry),
+            label: (isLong ? "多单 " : "空单 ") + lots + " 手 @ $" + entry,
             color: isLong ? "#10B981" : "#EF4444",
-            sub: (isLong ? "买入开仓 · " : "卖出开仓 · ") + (p.session || "") + " 时段",
+            sub: "实时 MT5 持仓 · ticket " + p.ticket,
+          };
+        }
+        const legacy = this.livePosition;
+        if (legacy) {
+          const isLong = (legacy.direction || legacy.action || "").toUpperCase().includes("BUY");
+          return {
+            label: isLong ? "多单 @ $" + this.formatNum(legacy.entry) : "空单 @ $" + this.formatNum(legacy.entry),
+            color: isLong ? "#10B981" : "#EF4444",
+            sub: (isLong ? "买入开仓 · " : "卖出开仓 · ") + (legacy.session || "") + " 时段 · journal 推断",
           };
         }
         return { label: "空仓中", color: "#94A3B8", sub: "系统在等候入场机会" };
       },
 
       get pnlSummary() {
-        // MVP: 无实时 MT5 positions, 用今日 trades 数量 + "待结算" 提示
+        // Round 5 T1 F2: sum real unrealised PnL from broker positions.
+        if (this.positions && this.positions.length > 0) {
+          const pnl = this.positions.reduce((a, p) => a + Number(p.pnl_usd || 0), 0);
+          const sign = pnl >= 0 ? "+" : "";
+          const color = pnl >= 0 ? "#10B981" : "#EF4444";
+          return {
+            label: sign + "$" + pnl.toFixed(2),
+            color,
+            sub: "实时浮动盈亏 · " + this.positions.length + " 笔持仓",
+          };
+        }
+        if (this.halt && this.halt.tripped) {
+          return {
+            label: "已停盘",
+            color: "#F59E0B",
+            sub: "连亏 " + this.halt.consec_losses + " 单触发每日保险",
+          };
+        }
         const todays = this.todayTrades.length;
         if (todays === 0) return { label: "—", color: "#94A3B8", sub: "今日暂无交易" };
-        return { label: todays + " 笔", color: "#F1F5F9", sub: "今日开仓次数（实时 P&L 需 MT5 连接）" };
+        return { label: todays + " 笔", color: "#F1F5F9", sub: "今日开仓次数 · 当前无持仓" };
       },
 
       get priceSummary() {
