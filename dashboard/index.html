@@ -54,6 +54,16 @@
         <div class="text-xs text-muted num" x-text="accountLabel"></div>
       </div>
     </div>
+    <!-- Symbol switcher (only shown when multiple symbols are registered) -->
+    <div class="flex gap-2" x-show="availableSymbols.length > 1">
+      <template x-for="sym in availableSymbols" :key="sym">
+        <button
+          @click="switchSymbol(sym)"
+          :class="sym === currentSymbol ? 'bg-long text-bg font-bold' : 'bg-panel text-muted hover:text-text'"
+          class="px-3 py-1 rounded text-sm transition"
+          x-text="sym"></button>
+      </template>
+    </div>
     <!-- Tab 切换 -->
     <div class="flex gap-1 p-1 rounded-lg bg-card">
       <button @click="tab = 'monitor'"
@@ -105,9 +115,9 @@
       <div class="mt-3 num text-4xl md:text-5xl font-bold" :style="{ color: pnlSummary.color }" x-text="pnlSummary.label"></div>
       <div class="mt-2 text-sm text-muted" x-text="pnlSummary.sub"></div>
     </div>
-    <!-- 金价 -->
+    <!-- 行情价格 (symbol-aware) -->
     <div class="card p-5 md:p-6">
-      <div class="text-xs uppercase tracking-wider text-muted">XAUUSD 金价</div>
+      <div class="text-xs uppercase tracking-wider text-muted" x-text="symbolDisplayName()"></div>
       <div class="mt-3 num text-4xl md:text-5xl font-bold" x-text="priceSummary.label"></div>
       <div class="mt-2 text-sm" :style="{ color: priceSummary.color }" x-text="priceSummary.sub"></div>
     </div>
@@ -416,6 +426,9 @@
   function dashboard() {
     return {
       tab: "monitor",
+      // Stage 4: symbol routing — read from URL query param, default XAUUSD
+      currentSymbol: new URLSearchParams(window.location.search).get("symbol") || "XAUUSD",
+      availableSymbols: ["XAUUSD"],
       state: null,
       ai: null,
       freshness: { fresh: false, age_sec: null, stale: true },
@@ -436,19 +449,42 @@
 
       accountLabel: "TMGM-60078709",
 
-      start() {
+      async start() {
+        await this.fetchSymbols();
         this.fetchAll();
         this.loadConfigFromServer();
         setInterval(() => this.fetchAll(), 5000);
       },
 
+      switchSymbol(sym) {
+        const url = new URL(window.location.href);
+        url.searchParams.set("symbol", sym);
+        window.location = url.toString();
+      },
+
+      symbolDisplayName() {
+        const map = { XAUUSD: "金价 XAUUSD", BTCUSD: "BTC / USD" };
+        return map[this.currentSymbol] || this.currentSymbol;
+      },
+
+      async fetchSymbols() {
+        try {
+          const r = await fetch("/api/symbols");
+          if (r.ok) {
+            const d = await r.json();
+            this.availableSymbols = d.symbols || ["XAUUSD"];
+          }
+        } catch (e) { /* keep default */ }
+      },
+
       async fetchAll() {
+        const sym = encodeURIComponent(this.currentSymbol);
         try {
           // Round 5 T1 F2: fetch /api/positions in parallel for real Hero data.
           const [sRes, jRes, pRes] = await Promise.all([
-            fetch("/api/state"),
-            fetch("/api/journal?limit=50"),
-            fetch("/api/positions"),
+            fetch(`/api/state?symbol=${sym}`),
+            fetch(`/api/journal?symbol=${sym}&limit=50`),
+            fetch(`/api/positions?symbol=${sym}`),
           ]);
           if (sRes.ok) {
             const s = await sRes.json();
@@ -474,8 +510,9 @@
       },
 
       async loadConfigFromServer() {
+        const sym = encodeURIComponent(this.currentSymbol);
         try {
-          const r = await fetch("/api/config");
+          const r = await fetch(`/api/config?symbol=${sym}`);
           if (r.ok) {
             const c = await r.json();
             if (c && Object.keys(c).length) {
@@ -494,10 +531,11 @@
       setSession(k, v) { this.config.sessions = { ...(this.config.sessions || {}), [k]: v }; },
 
       async saveConfig() {
+        const sym = encodeURIComponent(this.currentSymbol);
         this.saving = true;
         this.saveMessage = "";
         try {
-          const r = await fetch("/api/config", {
+          const r = await fetch(`/api/config?symbol=${sym}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(this.config),
@@ -535,9 +573,10 @@
       },
 
       async toggleTrading() {
+        const sym = encodeURIComponent(this.currentSymbol);
         this.confirmKillSwitch = false;
         try {
-          await fetch("/api/toggle_trading", {
+          await fetch(`/api/toggle_trading?symbol=${sym}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ paused: !this.tradingPaused }),
