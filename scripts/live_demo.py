@@ -586,7 +586,7 @@ def main():
     JOURNAL_PATH = DATA_ROOT / "journal" / "live_trades.jsonl"
     STATE_PATH = DATA_ROOT / "live_state.json"
     AI_PATH = DATA_ROOT / "ai_analysis.json"
-    PAUSE_FLAG_PATH = DATA_ROOT / "paused.flag"
+    PAUSE_FLAG_PATH = DATA_ROOT / "trading_paused.flag"
     MT5_POSITIONS_PATH = DATA_ROOT / "mt5_positions.json"
     CONSEC_LOSS_PATH = DATA_ROOT / "consec_loss_state.json"
     ASIAN_QUOTA_PATH = DATA_ROOT / "asian_range_quota_state.json"
