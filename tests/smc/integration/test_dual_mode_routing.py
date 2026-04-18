@@ -211,3 +211,200 @@ class TestDualModeRouting:
             guards_passed=True,
         )
         assert mode.mode == "ranging"
+
+
+# ---------------------------------------------------------------------------
+# Audit R3 S3 — session-adaptive ai_confidence threshold
+# ---------------------------------------------------------------------------
+
+
+def _make_cfg_with_thresholds(thresholds):
+    """Build a lightweight InstrumentConfig with only the fields route_trading_mode reads.
+
+    Keeps tests independent of the production XAU/BTC configs so changes to
+    those don't cause spurious S3 test failures.
+    """
+    from smc.instruments.types import InstrumentConfig
+    return InstrumentConfig(
+        symbol="TEST",
+        mt5_path="TEST",
+        magic=0,
+        point_size=0.01,
+        contract_size=100.0,
+        leverage_ratio=100,
+        min_lot=0.01,
+        pip_value_per_lot=10.0,
+        donchian_lookback=48,
+        min_range_width_points=200.0,
+        min_range_width_pct=None,
+        max_range_width_points=20000.0,
+        max_range_width_pct=None,
+        boundary_pct_default=0.15,
+        boundary_pct_wide=0.30,
+        guard_width_low=400.0,
+        guard_width_high=800.0,
+        guard_duration_low=8,
+        guard_duration_high=12,
+        guard_rr_min=1.2,
+        regime_trending_pct=1.4,
+        regime_ranging_pct=1.0,
+        sl_atr_multiplier=0.75,
+        sl_min_buffer_points=200.0,
+        sl_min_buffer_pct=None,
+        tp1_rr_ratio=2.5,
+        tp2_rr_ratio=4.0,
+        sessions={
+            "LONDON": (8, 13),
+            "ASIAN_LONDON_TRANSITION": (6, 8),
+            "LONDON/NY OVERLAP": (13, 16),
+            "LATE NY": (21, 24),
+            "NEW YORK": (16, 21),
+        },
+        ranging_sessions=frozenset({"LONDON", "LONDON/NY OVERLAP", "NEW YORK"}),
+        asian_sessions=frozenset({"ASIAN_LONDON_TRANSITION"}),
+        asian_core_session_name=None,
+        wide_band_sessions=frozenset(),
+        weekend_flag_active=False,
+        use_asian_quota=False,
+        consec_loss_limit=3,
+        mode_router_thresholds=thresholds,
+    )
+
+
+class TestS3SessionAdaptiveThresholds:
+    """Audit R3 S3: ai_confidence cutoff resolved per-session via
+    InstrumentConfig.mode_router_thresholds, with 0.45 fallback.
+    """
+
+    def test_no_thresholds_uses_default_045(self):
+        """cfg.mode_router_thresholds=None → all sessions use 0.45."""
+        cfg = _make_cfg_with_thresholds(None)
+        mode = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.46,
+            regime="trending",
+            session="LONDON",
+            range_bounds=None,
+            guards_passed=False,
+            cfg=cfg,
+        )
+        assert mode.mode == "trending"
+
+    def test_session_not_in_dict_uses_default_045(self):
+        """Session key missing → fallback to 0.45."""
+        cfg = _make_cfg_with_thresholds({"LONDON": 0.45})
+        mode = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.46,
+            regime="trending",
+            session="UNKNOWN_SESSION",
+            range_bounds=None,
+            guards_passed=False,
+            cfg=cfg,
+        )
+        assert mode.mode == "trending"
+
+    def test_london_at_045_passes(self):
+        """LONDON=0.45 boundary — >= triggers trending."""
+        cfg = _make_cfg_with_thresholds({"LONDON": 0.45})
+        mode = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.45,
+            regime="trending",
+            session="LONDON",
+            range_bounds=None,
+            guards_passed=False,
+            cfg=cfg,
+        )
+        assert mode.mode == "trending"
+
+    def test_lon_ny_overlap_at_041_passes_wider(self):
+        """LON/NY OVERLAP=0.40 wider threshold — 0.41 passes
+        where previous global 0.45 would have rejected it.
+        """
+        cfg = _make_cfg_with_thresholds({
+            "LONDON/NY OVERLAP": 0.40,
+        })
+        mode = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.41,
+            regime="trending",
+            session="LONDON/NY OVERLAP",
+            range_bounds=None,
+            guards_passed=False,
+            cfg=cfg,
+        )
+        assert mode.mode == "trending"
+
+    def test_alt_at_049_rejects_tighter(self):
+        """ASIAN_LONDON_TRANSITION=0.50 tighter — 0.49 rejected
+        where previous global 0.45 would have passed.
+        """
+        cfg = _make_cfg_with_thresholds({
+            "ASIAN_LONDON_TRANSITION": 0.50,
+        })
+        mode = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.49,
+            regime="trending",
+            session="ASIAN_LONDON_TRANSITION",
+            range_bounds=None,
+            guards_passed=False,
+            cfg=cfg,
+        )
+        assert mode.mode == "v1_passthrough"
+
+    def test_alt_at_050_passes(self):
+        """ASIAN_LONDON_TRANSITION=0.50 boundary — >= triggers trending."""
+        cfg = _make_cfg_with_thresholds({
+            "ASIAN_LONDON_TRANSITION": 0.50,
+        })
+        mode = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.50,
+            regime="trending",
+            session="ASIAN_LONDON_TRANSITION",
+            range_bounds=None,
+            guards_passed=False,
+            cfg=cfg,
+        )
+        assert mode.mode == "trending"
+
+    def test_late_ny_049_rejects(self):
+        """LATE NY=0.50 tighter — mirror ALT rejection path."""
+        cfg = _make_cfg_with_thresholds({
+            "LATE NY": 0.50,
+        })
+        mode = route_trading_mode(
+            ai_direction="bearish",
+            ai_confidence=0.49,
+            regime="trending",
+            session="LATE NY",
+            range_bounds=None,
+            guards_passed=False,
+            cfg=cfg,
+        )
+        assert mode.mode == "v1_passthrough"
+
+    def test_xau_prod_cfg_has_expected_thresholds(self):
+        """Production XAU config ships with S3 per-session thresholds.
+
+        Prevents regression where config drift silently removes the dict.
+        """
+        from smc.instruments import get_instrument_config
+        cfg = get_instrument_config("XAUUSD")
+        assert cfg.mode_router_thresholds is not None
+        assert cfg.mode_router_thresholds["LONDON"] == 0.45
+        assert cfg.mode_router_thresholds["LONDON/NY OVERLAP"] == 0.40
+        assert cfg.mode_router_thresholds["ASIAN_LONDON_TRANSITION"] == 0.50
+        assert cfg.mode_router_thresholds["LATE NY"] == 0.50
+        # ASIAN_CORE intentionally omitted (hard-blocked upstream)
+        assert "ASIAN_CORE" not in cfg.mode_router_thresholds
+
+    def test_btc_prod_cfg_has_expected_thresholds(self):
+        """Production BTC config ships with HIGH_VOL/LOW_VOL thresholds."""
+        from smc.instruments import get_instrument_config
+        cfg = get_instrument_config("BTCUSD")
+        assert cfg.mode_router_thresholds is not None
+        assert cfg.mode_router_thresholds["HIGH_VOL"] == 0.45
+        assert cfg.mode_router_thresholds["LOW_VOL"] == 0.50

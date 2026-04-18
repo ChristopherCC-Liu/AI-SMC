@@ -60,3 +60,10 @@ class InstrumentConfig:
     # Quota / halt
     use_asian_quota: bool
     consec_loss_limit: int
+
+    # Mode router — S3 session-adaptive ai_confidence threshold.
+    # dict[session_name, threshold]. None → all sessions use the single
+    # module-level default in mode_router.py. Missing session key → same
+    # fallback to the module default. Permits per-session tightening or
+    # widening without code changes.
+    mode_router_thresholds: dict[str, float] | None = None

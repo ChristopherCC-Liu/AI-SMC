@@ -95,6 +95,19 @@ XAUUSD_CONFIG = InstrumentConfig(
     weekend_flag_active=False,
     use_asian_quota=True,
     consec_loss_limit=3,
+    # Audit R3 S3 — session-adaptive ai_confidence cutoff for trending path.
+    # ASIAN_CORE is hard-blocked by asian_core_session_name gate so it is
+    # absent from this map (threshold value would be unreachable).
+    # LON/NY OVERLAP widest (0.40) — cleanest trending, highest liquidity.
+    # LONDON / NEW YORK mid (0.45) — session primary with some event noise.
+    # ASIAN_LONDON_TRANSITION / LATE NY tightest (0.50) — low liquidity, noisier AI.
+    mode_router_thresholds={
+        "ASIAN_LONDON_TRANSITION": 0.50,
+        "LONDON": 0.45,
+        "LONDON/NY OVERLAP": 0.40,
+        "NEW YORK": 0.45,
+        "LATE NY": 0.50,
+    },
 )
 
 SYMBOL_REGISTRY["XAUUSD"] = XAUUSD_CONFIG

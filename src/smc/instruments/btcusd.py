@@ -47,6 +47,13 @@ BTCUSD_CONFIG = InstrumentConfig(
     weekend_flag_active=True,
     use_asian_quota=False,
     consec_loss_limit=3,
+    # Audit R3 S3 — session-adaptive ai_confidence cutoff.
+    # HIGH_VOL 0.45 matches XAU LONDON (EU/NA liquidity overlap).
+    # LOW_VOL 0.50 tightens against 24/7 crypto whipsaws in thin hours.
+    mode_router_thresholds={
+        "HIGH_VOL": 0.45,
+        "LOW_VOL": 0.50,
+    },
 )
 
 SYMBOL_REGISTRY["BTCUSD"] = BTCUSD_CONFIG

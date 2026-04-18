@@ -22,6 +22,30 @@ from smc.strategy.range_types import RangeBounds, TradingMode
 
 __all__ = ["route_trading_mode"]
 
+# Audit R3 S3 — single fallback confidence threshold when cfg.mode_router_thresholds
+# is None OR the current session is not present in it. Round 5 T5 established
+# 0.45 globally after decision-reviewer surfaced 0.47 edge cases being blocked;
+# S3 per-session dict overrides this for tighter ALT/LATE_NY (0.50) and wider
+# LON/NY OVERLAP (0.40) while keeping 0.45 as the safe fallback.
+_DEFAULT_CONFIDENCE_THRESHOLD: float = 0.45
+
+
+def _resolve_confidence_threshold(
+    cfg: InstrumentConfig,
+    session: str,
+) -> float:
+    """Return the ai_confidence cutoff for this session.
+
+    Fallback order:
+      1. cfg.mode_router_thresholds[session] if key exists
+      2. _DEFAULT_CONFIDENCE_THRESHOLD (0.45)
+    Either a None map or a missing key lands on #2 so unfamiliar sessions
+    never crash — they just inherit the audit-R2 global default.
+    """
+    if cfg.mode_router_thresholds is None:
+        return _DEFAULT_CONFIDENCE_THRESHOLD
+    return cfg.mode_router_thresholds.get(session, _DEFAULT_CONFIDENCE_THRESHOLD)
+
 
 def route_trading_mode(
     ai_direction: str,
@@ -68,9 +92,12 @@ def route_trading_mode(
     # today's XAU ai_confidence=0.47 (bearish) was stuck below 0.5 → never
     # entered trending path. 0.45 lets edge-case convictions through; v1
     # 5-gate aggregator still filters false trends downstream.
+    # Audit R3 S3: threshold resolved per-session via cfg.mode_router_thresholds
+    # (LON/NY OVERLAP 0.40 wider, ALT/LATE_NY 0.50 tighter), with 0.45 fallback.
+    confidence_threshold = _resolve_confidence_threshold(cfg, session)
     if (
         ai_direction in ("bullish", "bearish")
-        and ai_confidence >= 0.45
+        and ai_confidence >= confidence_threshold
         and (cfg.asian_core_session_name is None or session != cfg.asian_core_session_name)
     ):
         return TradingMode(
