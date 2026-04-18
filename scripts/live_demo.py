@@ -189,6 +189,7 @@ def _migrate_legacy_xau_paths(symbol: str) -> None:
         "paused.flag",
         "trading_paused.flag",
         "range_cooldown_state.json",
+        "phase1a_breaker_state.json",
         "mt5_positions.json",
         "execution_circuit_open.flag",
     ]:
@@ -355,7 +356,7 @@ def _determine_v1_passthrough(setups, session):
 
 def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
                        range_trader, breakout_detector, session="", h1_df=None,
-                       htf_bias=None):
+                       htf_bias=None, cfg=None):
     """Ranging mode: breakout guard + mean-reversion setups at range boundaries.
 
     Returns (action, reason, best_setup). Round 4.6-F: session kwarg so
@@ -380,7 +381,7 @@ def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
     if range_setups and h1_df is not None:
         range_setups = tuple(
             s for s in range_setups
-            if check_range_guards(range_bounds, s, session, h1_df, htf_bias=htf_bias)
+            if check_range_guards(range_bounds, s, session, h1_df, htf_bias=htf_bias, cfg=cfg)
         )
 
     if range_setups:
@@ -403,7 +404,7 @@ def determine_action(setups, ai_analysis, regime, *,
                      h1_atr=0.0, price=0.0,
                      range_trader=None, breakout_detector=None,
                      asian_range_quota=None, phase1a_breaker=None,
-                     htf_bias=None):
+                     htf_bias=None, cfg=None):
     """Dual-mode action router: trending (v1 5-gate) or ranging (mean-reversion).
 
     Always detects range for display. Mode router decides which path runs.
@@ -411,7 +412,7 @@ def determine_action(setups, ai_analysis, regime, *,
     Round 5 T0 (P0-9): htf_bias piped to _determine_ranging → check_range_guards
     Guard 6 (HTF alignment). None is safe (backward-compat default).
     """
-    session, session_penalty = get_session_info()
+    session, session_penalty = get_session_info(cfg=cfg)
     ai_dir = ai_analysis.get("ai_direction", ai_analysis.get("direction", "neutral"))
     ai_conf = ai_analysis.get("ai_confidence", ai_analysis.get("confidence", 0.3))
     effective_conf = ai_conf - session_penalty
@@ -426,7 +427,7 @@ def determine_action(setups, ai_analysis, regime, *,
     # Previously guards_passed defaulted to False and ranging never activated.
     guards_passed = False
     if range_bounds is not None and h1_df is not None:
-        guards_passed = check_bounds_only_guards(range_bounds, session, h1_df)
+        guards_passed = check_bounds_only_guards(range_bounds, session, h1_df, cfg=cfg)
 
     # Route trading mode
     mode = route_trading_mode(
@@ -437,6 +438,7 @@ def determine_action(setups, ai_analysis, regime, *,
         range_bounds=range_bounds,
         guards_passed=guards_passed,
         current_price=price,
+        cfg=cfg,
     )
 
     if mode.mode == "trending":
@@ -456,7 +458,7 @@ def determine_action(setups, ai_analysis, regime, *,
         action, reason, best = _determine_ranging(
             price, mode.range_bounds, h1_snapshot, m15_snapshot, h1_atr,
             range_trader, breakout_detector, session=session, h1_df=h1_df,
-            htf_bias=htf_bias,
+            htf_bias=htf_bias, cfg=cfg,
         )
         return action, reason, best, mode
 
@@ -626,7 +628,13 @@ def main():
 
     detector = SMCDetector(swing_length=10)
     aggregator = MultiTimeframeAggregator(detector=detector, ai_regime_enabled=False)
-    range_trader = RangeTrader()
+    # Round 5 T3 (dual-symbol-audit P0): inject cfg + per-symbol cooldown path
+    # so BTC doesn't silently run XAU params (Donchian 48 vs 24, width 200pts vs
+    # 2% pct, boundary 0.30 vs 0.25, guards 800/400 vs 1500, RR 1.2 vs 1.5).
+    range_trader = RangeTrader(
+        cfg=cfg,
+        cooldown_state_path=DATA_ROOT / "range_cooldown_state.json",
+    )
     breakout_det = BreakoutDetector()
 
     JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -648,7 +656,11 @@ def main():
     # is_exhausted_today() always returns False because record_open never fires
     # (guarded by session in _ASIAN_SESSIONS, which is empty for BTC).
     asian_range_quota = AsianRangeQuota.load(state_path=ASIAN_QUOTA_PATH)
-    phase1a_breaker = Phase1aCircuitBreaker()
+    # Round 5 T3 (dual-symbol-audit P0): per-symbol breaker state file so
+    # XAU and BTC processes don't clobber each other's Phase 1a state.
+    phase1a_breaker = Phase1aCircuitBreaker(
+        state_path=DATA_ROOT / "phase1a_breaker_state.json",
+    )
     # Round 5 T1 F3: consecutive-loss halt (3 losses in a row → halt rest of
     # UTC day; WIN resets streak). DrawdownGuard is a %-based backstop.
     consec_halt = ConsecLossHalt(state_path=CONSEC_LOSS_PATH)
@@ -752,7 +764,7 @@ def main():
                 print(f"  AI Direction: {ai_dir.upper()} (cached)")
 
             # 4. Regime
-            regime = classify_regime(data.get(Timeframe.D1))
+            regime = classify_regime(data.get(Timeframe.D1), cfg=cfg)
             print(f"  Regime: {regime}")
 
             # 4b. Detect SMC snapshots for HTF bias + range detection
@@ -779,7 +791,7 @@ def main():
             print(f"  SMC Setups: {len(setups)}")
 
             # 6. Dual-mode action routing
-            session, _ = get_session_info()
+            session, _ = get_session_info(cfg=cfg)
             action, reason, best, mode = determine_action(
                 setups, ai_analysis, regime,
                 h1_df=h1_df,
@@ -792,6 +804,7 @@ def main():
                 asian_range_quota=asian_range_quota,
                 phase1a_breaker=phase1a_breaker,
                 htf_bias=htf_bias,
+                cfg=cfg,
             )
             # Round 5 T0 (P0-2b): quota record_open moved *after* successful
             # order_send below (inside LIVE_EXEC branch). MT5 failures no longer
@@ -1085,7 +1098,7 @@ def main():
                         "positions": [p.model_dump(mode="json") for p in broker_positions],
                     },
                 )
-                closed_deals = fetch_closed_pnl_since(mt5, last_reconcile_ts)
+                closed_deals = fetch_closed_pnl_since(mt5, last_reconcile_ts, magic=cfg.magic)
                 for deal in closed_deals:
                     pnl = float(deal.get("pnl_usd", 0.0))
                     daily_pnl += pnl
