@@ -36,7 +36,7 @@ param(
     [string]$InstallDir    = "C:\AI-SMC",
     [int]$StaleMinutes     = 20,
     [int]$GraceMinutes     = 10,
-    [ValidateSet("XAUUSD", "BTCUSD", "StrategyServer")]
+    [ValidateSet("XAUUSD", "BTCUSD", "StrategyServer", "DashboardWeb")]
     [string]$Symbol        = "XAUUSD"
 )
 
@@ -104,6 +104,53 @@ if ($Symbol -eq "StrategyServer") {
         Write-Log "  WMI query for uvicorn failed — $_"
     }
     Write-Log "StrategyServer: exiting 1 → Task Scheduler RestartOnFailure will restart"
+    exit 1
+}
+
+# ── DashboardWeb health check (early return) ─────────────────────────────────
+# Round 3 Sprint 2: mirror of StrategyServer probe for dashboard_server :8765.
+# Catches uvicorn freeze cases that don't trigger RestartOnFailure.
+if ($Symbol -eq "DashboardWeb") {
+    Write-Log "watchdog_smart tick"
+    Write-Log "DashboardWeb mode: checking http://127.0.0.1:8765/healthz"
+    $healthy = $false
+    try {
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8765/healthz" `
+                    -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+        if ($resp.StatusCode -eq 200 -and $resp.Content -match '"ok"\s*:\s*true') {
+            $healthy = $true
+        } else {
+            Write-Log "DashboardWeb UNHEALTHY: StatusCode=$($resp.StatusCode) body=$($resp.Content)"
+        }
+    } catch {
+        Write-Log "DashboardWeb UNREACHABLE: $_"
+    }
+
+    if ($healthy) {
+        Write-Log "DashboardWeb HEALTHY: /healthz ok"
+        exit 0
+    }
+
+    # Not healthy — kill python backing dashboard_server.py so Task Scheduler
+    # RestartOnFailure can revive it.  Note: dashboard_server.py is run via
+    # ``python scripts\dashboard_server.py`` (NOT ``uvicorn`` CLI), so match
+    # the filename in the command line rather than the ``uvicorn`` binary.
+    Write-Log "DashboardWeb DEAD/FROZEN: killing dashboard_server python"
+    try {
+        $procs = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction Stop |
+                 Where-Object { $_.CommandLine -and $_.CommandLine -match 'dashboard_server' }
+        foreach ($p in $procs) {
+            try {
+                Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
+                Write-Log "  killed dashboard_server PID $($p.ProcessId)"
+            } catch {
+                Write-Log "  could not kill PID $($p.ProcessId) — $_"
+            }
+        }
+    } catch {
+        Write-Log "  WMI query for dashboard_server python failed — $_"
+    }
+    Write-Log "DashboardWeb: exiting 1 → Task Scheduler RestartOnFailure will restart"
     exit 1
 }
 

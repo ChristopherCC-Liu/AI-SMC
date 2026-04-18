@@ -189,6 +189,46 @@
     </div>
   </div>
 
+  <!-- 卡片 2.3: 风控闸门 (Round 3 Sprint 2 /api/guards) -->
+  <div x-show="guards" class="card p-5 md:p-6 border-l-4" :style="{ borderLeftColor: guardsBorderColor }">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <div class="text-xs uppercase tracking-wider text-muted">风控闸门</div>
+        <div class="text-xs mt-0.5" :class="guards?.can_trade ? 'text-long' : 'text-short'" x-text="guardsOverallLabel"></div>
+      </div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div class="p-3 rounded-lg card-hi" :style="{ borderLeft: '3px solid ' + guardColor(guards?.consec_halt?.status) }">
+        <div class="text-xs text-muted mb-1">连亏止损</div>
+        <div class="num text-lg font-bold" :style="{ color: guardColor(guards?.consec_halt?.status) }">
+          <span x-text="guards?.consec_halt?.losses || 0"></span>/<span class="text-muted" x-text="guards?.consec_halt?.max_losses || 3"></span>
+        </div>
+        <div class="text-xs text-muted mt-1" x-text="guardLabel(guards?.consec_halt)"></div>
+      </div>
+      <div class="p-3 rounded-lg card-hi" :style="{ borderLeft: '3px solid ' + guardColor(guards?.phase1a_breaker?.status) }">
+        <div class="text-xs text-muted mb-1">Phase1a 断路器</div>
+        <div class="num text-lg font-bold" :style="{ color: guardColor(guards?.phase1a_breaker?.status) }">
+          <span x-text="guards?.phase1a_breaker?.losses || 0"></span> 单
+        </div>
+        <div class="text-xs text-muted mt-1">PnL $<span x-text="(guards?.phase1a_breaker?.pnl_usd ?? 0).toFixed(2)"></span></div>
+      </div>
+      <div class="p-3 rounded-lg card-hi" :style="{ borderLeft: '3px solid ' + guardColor(guards?.asian_range_quota?.status) }">
+        <div class="text-xs text-muted mb-1">Asian 配额</div>
+        <div class="num text-lg font-bold" :style="{ color: guardColor(guards?.asian_range_quota?.status) }" x-text="guards?.asian_range_quota?.exhausted ? '已用' : '可用'"></div>
+        <div class="text-xs text-muted mt-1" x-text="guards?.asian_range_quota?.last_open_date || '从未开过'"></div>
+      </div>
+      <div class="p-3 rounded-lg card-hi" :style="{ borderLeft: '3px solid ' + guardColor(guards?.drawdown_guard?.status) }">
+        <div class="text-xs text-muted mb-1">回撤保护</div>
+        <div class="num text-lg font-bold" :style="{ color: guardColor(guards?.drawdown_guard?.status) }">
+          <span x-show="guards?.drawdown_guard?.source === 'live_state'"><span x-text="(guards?.drawdown_guard?.daily_loss_pct ?? 0).toFixed(2)"></span>%</span>
+          <span x-show="guards?.drawdown_guard?.source !== 'live_state'">—</span>
+        </div>
+        <div class="text-xs text-muted mt-1" x-text="drawdownDetail"></div>
+      </div>
+    </div>
+    <div x-show="guards?.drawdown_guard?.rejection_reason" class="text-xs text-short mt-3" x-text="guards?.drawdown_guard?.rejection_reason"></div>
+  </div>
+
   <!-- 卡片 2.5: 策略建议手数 (audit-r2 R1) -->
   <div x-show="plannedLotDisplay" class="card p-5 md:p-6">
     <div class="flex items-center justify-between">
@@ -498,6 +538,8 @@
       halt: { tripped: false, consec_losses: 0, tripped_at: null },
       // Round 3 Sprint 1 daily digest: null until first fetch, then DailyDigest dict.
       digest: null,
+      // Round 3 Sprint 2 guards snapshot: null until first fetch.
+      guards: null,
       config: structuredClone(DEFAULT_CONFIG),
       loading: false,
       error: null,
@@ -542,11 +584,13 @@
         try {
           // Round 5 T1 F2: fetch /api/positions in parallel for real Hero data.
           // Round 3 Sprint 1: + /api/daily_digest for "今日概览" card.
-          const [sRes, jRes, pRes, dRes] = await Promise.all([
+          // Round 3 Sprint 2: + /api/guards for "风控闸门" traffic-light card.
+          const [sRes, jRes, pRes, dRes, gRes] = await Promise.all([
             fetch(`/api/state?symbol=${sym}`),
             fetch(`/api/journal?symbol=${sym}&limit=50`),
             fetch(`/api/positions?symbol=${sym}`),
             fetch(`/api/daily_digest?symbol=${sym}`),
+            fetch(`/api/guards?symbol=${sym}`),
           ]);
           if (sRes.ok) {
             const s = await sRes.json();
@@ -567,6 +611,9 @@
           }
           if (dRes && dRes.ok) {
             this.digest = await dRes.json();
+          }
+          if (gRes && gRes.ok) {
+            this.guards = await gRes.json();
           }
           this.error = null;
         } catch (e) {
@@ -781,6 +828,44 @@
       },
 
       get rangeBounds() { return this.state?.range_bounds || null; },
+
+      // Round 3 Sprint 2: guards traffic-light getters.
+      guardColor(status) {
+        if (status === "red") return "#EF4444";
+        if (status === "amber") return "#F59E0B";
+        if (status === "green") return "#10B981";
+        return "#94A3B8";  // unknown / null
+      },
+      get guardsBorderColor() {
+        if (!this.guards) return "#94A3B8";
+        // Red if any guard tripped; amber if any is warning; else green.
+        const statuses = [
+          this.guards.consec_halt?.status,
+          this.guards.phase1a_breaker?.status,
+          this.guards.asian_range_quota?.status,
+          this.guards.drawdown_guard?.status,
+        ];
+        if (statuses.includes("red")) return "#EF4444";
+        if (statuses.includes("amber")) return "#F59E0B";
+        return "#10B981";
+      },
+      get guardsOverallLabel() {
+        if (!this.guards) return "";
+        return this.guards.can_trade ? "允许开仓" : "已阻断开仓";
+      },
+      guardLabel(guard) {
+        if (!guard) return "";
+        if (guard.tripped) return "已触发";
+        if (guard.status === "amber") return "接近上限";
+        return "正常";
+      },
+      get drawdownDetail() {
+        const dd = this.guards?.drawdown_guard;
+        if (!dd) return "";
+        if (dd.source !== "live_state") return "未采集（Sprint 2 soft-dep）";
+        const limit = dd.max_daily_loss_pct;
+        return `/ 限额 ${limit}%`;
+      },
 
       // Round 3 Sprint 1: daily digest getters.
       get digestHaltActive() {

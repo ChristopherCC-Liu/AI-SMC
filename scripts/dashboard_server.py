@@ -153,6 +153,65 @@ def get_journal(
     return JSONResponse({"trades": trades})
 
 
+@app.get("/healthz")
+def healthz() -> JSONResponse:
+    """Round 3 Sprint 2: liveness probe for watchdog_smart DashboardWeb branch.
+
+    Returns 200 when:
+      - FastAPI process is responding
+      - JSON parser is working (round-trip check)
+      - Data root is accessible
+
+    Never calls MT5 or heavy aggregations so it stays cheap (<5ms).  Parallel
+    to strategy_server.py:/healthz (audit-r1 P0-2).
+    """
+    ok = True
+    probes: dict[str, object] = {}
+    try:
+        json.loads("{}")
+        probes["json_parser"] = "ok"
+    except Exception as exc:  # pragma: no cover — json.loads("{}") never fails
+        ok = False
+        probes["json_parser"] = f"fail: {exc}"
+    try:
+        probes["data_root_exists"] = DATA.exists()
+        if not DATA.exists():
+            ok = False
+    except Exception as exc:
+        ok = False
+        probes["data_root_exists"] = f"fail: {exc}"
+    payload = {
+        "ok": ok,
+        "service": "AI-SMC Dashboard",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "probes": probes,
+    }
+    return JSONResponse(payload, status_code=200 if ok else 503)
+
+
+@app.get("/api/guards")
+def get_guards(symbol: str = Query(default="XAUUSD")) -> JSONResponse:
+    """Round 3 Sprint 2: live guards traffic-light snapshot.
+
+    Returns 4 guard states (consec / phase1a / asian_quota / drawdown) with
+    per-guard status ``green`` / ``amber`` / ``red`` so the dashboard can
+    render "why can't I trade right now" at a glance.
+    """
+    from smc.instruments import get_instrument_config
+    from smc.monitor.guards_snapshot import build_guards_snapshot
+
+    root = _symbol_data_root(symbol)
+    # Per-symbol consec_loss_limit (R4) — fall back to 3 if cfg is missing
+    # (_symbol_data_root already normalises unknown symbols to XAUUSD).
+    try:
+        cfg = get_instrument_config(symbol)
+        consec_limit = getattr(cfg, "consec_loss_limit", 3)
+    except KeyError:
+        consec_limit = 3
+    snap = build_guards_snapshot(symbol, data_root=root, consec_loss_limit=consec_limit)
+    return JSONResponse(snap)
+
+
 @app.get("/api/daily_digest")
 def get_daily_digest(
     symbol: str = Query(default="XAUUSD"),

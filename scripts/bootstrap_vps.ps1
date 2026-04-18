@@ -16,6 +16,7 @@
       \AI-SMC-Watchdog                — XAUUSD three-axis watchdog (every 5 min)
       \AI-SMC-Watchdog-BTC            — BTCUSD three-axis watchdog (every 5 min)
       \AI-SMC-Watchdog-StrategyServer — FastAPI /healthz watchdog (every 5 min)
+      \AI-SMC-Watchdog-DashboardWeb   — Dashboard /healthz watchdog (every 5 min)
 
     All service tasks: BootTrigger + RestartOnFailure (PT5M, 10 retries)
                        + ExecutionTimeLimit PT0S (unlimited) + StartWhenAvailable
@@ -202,6 +203,10 @@ $tasks = @(
     @{
         Name    = "AI-SMC-Watchdog-StrategyServer"
         Xml     = Get-WatchdogTaskXml -Symbol "StrategyServer"
+    },
+    @{
+        Name    = "AI-SMC-Watchdog-DashboardWeb"
+        Xml     = Get-WatchdogTaskXml -Symbol "DashboardWeb"
     }
 )
 
