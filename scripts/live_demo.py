@@ -1132,12 +1132,34 @@ def main():
             if action.startswith("RANGE") and best is not None:
                 # Round 4.6-X (USER CRITICAL CATCH): MT5 order_send execution layer.
                 # 之前 Lead 严重失职 — journal 只写 "PAPER" 日志, 没 call MT5 API.
-                # 用户期望 "装 MT5 = 真实交易", 实际 MT5 0 positions. Fix:
-                # SMC_MT5_EXECUTE=1 env var 开启真实 order_send (TMGM Demo 安全).
-                # Stage 3: PAPER_MODE CLI flag short-circuits real order_send.
-                # SMC_MT5_EXECUTE=1 env var is the legacy live-execute switch;
-                # --paper overrides it to always stay in paper mode.
-                _mt5_execute = (not PAPER_MODE) and (os.environ.get("SMC_MT5_EXECUTE", "0") == "1")
+                # audit-r3 V1 (HIGH): Python order_send is permanently
+                # DISABLED.  The EA (mql5/AISMCReceiver.mq5) is the sole
+                # production execution path since audit-r1 Round 5 T5
+                # self-healing architecture refactor — it polls
+                # strategy_server /signal and executes via MT5's native
+                # CTrade.  If Python ALSO called order_send here, the
+                # account would receive **two** orders per cycle (Python
+                # + EA), doubling risk and corrupting consec_halt /
+                # phase1a_breaker reconcile math.
+                #
+                # SMC_MT5_EXECUTE env var used to gate the legacy live
+                # path; now kept only as an operator-misconfig detector.
+                # If someone exports it = 1, we emit a deprecation warning
+                # to structured logs so ops can catch the mistake.  The
+                # send_with_retry code path below is RETAINED (dormant)
+                # so a future roll-back from EA arch is a one-line flip.
+                _mt5_execute = False
+                if os.environ.get("SMC_MT5_EXECUTE", "0") == "1":
+                    log_warn(
+                        "smc_mt5_execute_deprecated",
+                        cycle=cycle,
+                        set_by_user=True,
+                        note=(
+                            "SMC_MT5_EXECUTE env var is deprecated; "
+                            "EA (AISMCReceiver.mq5) is the sole order path. "
+                            "Unset this var to silence this warning."
+                        ),
+                    )
                 _mt5_ticket: int | None = None
                 _mt5_send_retcode: int | None = None
                 _mt5_mode_tag = "PAPER"
