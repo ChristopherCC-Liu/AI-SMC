@@ -310,10 +310,13 @@ class TestContextFields:
 
 
 class TestModeRouterWithHysteresis:
-    def test_bar1_ranging_bar2_break_no_flip(
+    def test_bar1_ranging_commits_enter_bar2_break_starts_exit(
         self, sample_range_bounds: RangeBounds
     ) -> None:
-        """bar1 proposes ranging, bar2 breaks → committed mode stays v1_passthrough."""
+        """Audit R3 S5 asymmetric hysteresis:
+        - bar1 proposes ranging → enter 1-bar commits immediately
+        - bar2 proposes v1 (guards fail) → exit pending, not yet committed
+        """
         state = HysteresisState()
 
         mode1 = route_trading_mode(
@@ -325,7 +328,7 @@ class TestModeRouterWithHysteresis:
             guards_passed=True,
         )
         committed1 = state.update(mode1.mode)
-        assert committed1 == "v1_passthrough"  # pending, not committed yet
+        assert committed1 == "ranging"  # S5: enter commits in 1 bar
 
         mode2 = route_trading_mode(
             ai_direction="neutral",
@@ -333,10 +336,11 @@ class TestModeRouterWithHysteresis:
             regime="ranging",
             session="LONDON",
             range_bounds=sample_range_bounds,
-            guards_passed=False,  # guards fail → break
+            guards_passed=False,  # guards fail → v1_passthrough proposal
         )
         committed2 = state.update(mode2.mode)
-        assert committed2 == "v1_passthrough"  # no flip
+        assert committed2 == "ranging"  # exit needs 2 bars, only 1 so far
+        assert state.pending_mode == "v1_passthrough"
 
     def test_bar1_bar2_ranging_flips(
         self, sample_range_bounds: RangeBounds
