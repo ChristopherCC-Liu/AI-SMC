@@ -21,7 +21,9 @@ from pathlib import Path
 __all__ = ["ConsecLossHalt", "ConsecLossState"]
 
 DEFAULT_STATE_PATH = Path("data/consec_loss_state.json")
-_CONSEC_LIMIT = 3  # trip after 3 losses in a row
+# audit-r3 R4: default limit preserved for backward-compat; real value now
+# comes from cfg.consec_loss_limit per-instrument (XAU=3, BTC=3 today).
+_DEFAULT_CONSEC_LIMIT = 3
 
 
 @dataclass(frozen=True)
@@ -45,8 +47,16 @@ class ConsecLossHalt:
     halt is "today only" rather than permanent.
     """
 
-    def __init__(self, state_path: Path | str = DEFAULT_STATE_PATH) -> None:
+    def __init__(
+        self,
+        state_path: Path | str = DEFAULT_STATE_PATH,
+        *,
+        consec_limit: int = _DEFAULT_CONSEC_LIMIT,
+    ) -> None:
+        if consec_limit < 1:
+            raise ValueError(f"consec_limit must be >= 1, got {consec_limit}")
         self._state_path = Path(state_path)
+        self._consec_limit = int(consec_limit)
         self._state = self._load_state()
 
     def _load_state(self) -> ConsecLossState:
@@ -94,7 +104,7 @@ class ConsecLossHalt:
             new_streak = 0
 
         now_iso = datetime.now(tz=timezone.utc).isoformat()
-        trip = new_streak >= _CONSEC_LIMIT
+        trip = new_streak >= self._consec_limit
 
         self._state = ConsecLossState(
             consec_losses=new_streak,

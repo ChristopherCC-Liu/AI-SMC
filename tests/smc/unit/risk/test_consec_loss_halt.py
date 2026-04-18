@@ -130,3 +130,66 @@ def _advance_date_iso(iso: str, days: int) -> str:
     from datetime import date, timedelta
     d = date.fromisoformat(iso)
     return (d + timedelta(days=days)).isoformat()
+
+
+class TestConfigurableLimit:
+    """audit-r3 R4: consec_limit driven by cfg.consec_loss_limit (per-symbol)."""
+
+    def test_default_limit_is_3(self, tmp_path):
+        """Backward compat: no kwarg → 3 losses trip (previous hardcode)."""
+        h = ConsecLossHalt(state_path=tmp_path / "s.json")
+        h.record(-1.0)
+        h.record(-1.0)
+        assert not h.is_tripped()
+        h.record(-1.0)
+        assert h.is_tripped()
+
+    def test_custom_limit_2_trips_earlier(self, tmp_path):
+        h = ConsecLossHalt(state_path=tmp_path / "s.json", consec_limit=2)
+        h.record(-1.0)
+        assert not h.is_tripped()
+        h.record(-1.0)
+        assert h.is_tripped()
+
+    def test_custom_limit_5_trips_later(self, tmp_path):
+        h = ConsecLossHalt(state_path=tmp_path / "s.json", consec_limit=5)
+        for _ in range(4):
+            h.record(-1.0)
+        assert not h.is_tripped()
+        h.record(-1.0)
+        assert h.is_tripped()
+
+    def test_limit_one_trips_on_first_loss(self, tmp_path):
+        """Degenerate: limit=1 → any loss trips immediately."""
+        h = ConsecLossHalt(state_path=tmp_path / "s.json", consec_limit=1)
+        h.record(-0.01)
+        assert h.is_tripped()
+
+    def test_limit_zero_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="consec_limit must be >= 1"):
+            ConsecLossHalt(state_path=tmp_path / "s.json", consec_limit=0)
+
+    def test_limit_negative_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="consec_limit must be >= 1"):
+            ConsecLossHalt(state_path=tmp_path / "s.json", consec_limit=-1)
+
+    def test_win_between_losses_still_resets_regardless_of_limit(self, tmp_path):
+        """Streak semantics unchanged by limit — WIN resets."""
+        h = ConsecLossHalt(state_path=tmp_path / "s.json", consec_limit=5)
+        h.record(-1.0)
+        h.record(-1.0)
+        h.record(5.0)  # WIN — streak reset
+        h.record(-1.0)
+        assert not h.is_tripped()
+        assert h.snapshot().consec_losses == 1
+
+    def test_limit_read_from_instrument_config(self, tmp_path):
+        """Integration: cfg.consec_loss_limit drives the halt limit."""
+        from smc.instruments import get_instrument_config
+        cfg = get_instrument_config("XAUUSD")
+        h = ConsecLossHalt(state_path=tmp_path / "s.json", consec_limit=cfg.consec_loss_limit)
+        for _ in range(cfg.consec_loss_limit - 1):
+            h.record(-1.0)
+        assert not h.is_tripped()
+        h.record(-1.0)
+        assert h.is_tripped()

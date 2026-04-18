@@ -779,7 +779,12 @@ def main():
     )
     # Round 5 T1 F3: consecutive-loss halt (3 losses in a row → halt rest of
     # UTC day; WIN resets streak). DrawdownGuard is a %-based backstop.
-    consec_halt = ConsecLossHalt(state_path=CONSEC_LOSS_PATH)
+    # audit-r3 R4: consec_limit from cfg.consec_loss_limit (per-symbol).
+    # XAU=3, BTC=3 today but interface open for future per-instrument tuning.
+    consec_halt = ConsecLossHalt(
+        state_path=CONSEC_LOSS_PATH,
+        consec_limit=cfg.consec_loss_limit,
+    )
     drawdown_guard = DrawdownGuard(max_daily_loss_pct=3.0, max_drawdown_pct=10.0)
     # peak_balance and daily_pnl are tracked across cycles from reconciled
     # closes. Initialized from the current MT5 balance at startup so the
@@ -787,6 +792,15 @@ def main():
     _initial_balance = float(info.balance)
     peak_balance = _initial_balance
     daily_pnl = 0.0
+    # audit-r3 R3: track the UTC date for which peak_balance was last reset.
+    # On UTC 00:00 rollover we reset peak_balance to current balance so the
+    # drawdown guard reasons about *today's* peak, not historical all-time
+    # high.  Without reset, a bad week would bake a "ghost peak" into the
+    # guard indefinitely, producing spurious drawdown_guard trips even after
+    # the account recovers intra-day.  Mirrors Phase1aCircuitBreaker /
+    # ConsecLossHalt daily-reset semantics (UTC 0:00 boundary).
+    from datetime import date as _date
+    peak_balance_reset_date: _date = datetime.now(timezone.utc).date()
     # audit-r2 ops #4: reload persisted reconcile cursor so closed deals
     # processed pre-restart are NOT re-played into consec_halt /
     # phase1a_breaker / daily_pnl on startup.  Missing or corrupt cursor
@@ -813,6 +827,43 @@ def main():
         print(f"\n{'='*60}")
         print(f"[{now.strftime('%H:%M:%S')} UTC] CYCLE {cycle}")
         print(f"{'='*60}")
+
+        # audit-r3 R3: daily peak_balance reset at UTC 0:00 boundary.
+        # Keeps drawdown_guard.total_drawdown_pct reasoning about *today's*
+        # peak, preventing historical highs from spuriously tripping the
+        # %-based drawdown backstop after recovery.  Reset to current live
+        # balance (fall back to peak_balance if account_info fails).
+        #
+        # NOTE (decision-reviewer micro-suggestion): `peak_balance_reset_date`
+        # advances EVEN IF the balance probe fails.  This prevents a retry
+        # storm: without date advance, every cycle during an MT5 outage would
+        # re-enter this branch, call account_info() repeatedly, and flood
+        # structured logs / Telegram alerts.  Analog: k8s liveness probes
+        # have backoff, not hot-loop retry.  If the reset was imperfect today,
+        # tomorrow's boundary will try again cleanly.
+        _today_utc = now.date()
+        if _today_utc != peak_balance_reset_date:
+            _balance_info_success = False
+            try:
+                _reset_info = mt5.account_info()
+                if _reset_info is not None and float(_reset_info.balance) > 0:
+                    _reset_balance = float(_reset_info.balance)
+                    _balance_info_success = True
+                else:
+                    _reset_balance = peak_balance
+            except Exception:
+                _reset_balance = peak_balance
+            log_info(
+                "peak_balance_daily_reset",
+                cycle=cycle,
+                prev_peak=round(peak_balance, 2),
+                new_peak=round(_reset_balance, 2),
+                from_date=peak_balance_reset_date.isoformat(),
+                to_date=_today_utc.isoformat(),
+                balance_info_success=_balance_info_success,
+            )
+            peak_balance = _reset_balance
+            peak_balance_reset_date = _today_utc
 
         # audit-r2 ops #3: halt paths fall through to save_state so the
         # dashboard's "为什么不开仓" card surfaces the real reason (symmetry
