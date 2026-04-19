@@ -40,6 +40,7 @@ from smc.ai.cot_fetcher import (
 from smc.ai.external_context import (
     _DXY_TICKERS,
     _fetch_dxy,
+    _fetch_dxy_exchangerate_host,
     _fetch_dxy_stooq,
 )
 from smc.ai.macro_layer import MacroLayer
@@ -217,6 +218,88 @@ class TestDXYFetcherLive:
         assert value == pytest.approx(103.00)
         # 103.00 vs 103.40 = -0.39% < -0.3% threshold → falling
         assert direction == "falling"
+
+    # -----------------------------------------------------------------------
+    # exchangerate.host synthetic DXY fallback tests
+    # -----------------------------------------------------------------------
+
+    def test_dxy_exchangerate_host_success(self) -> None:
+        """Mock exchangerate.host JSON → synthetic DXY computed + direction derived."""
+        import math
+        import requests as _requests
+
+        # Realistic EUR, JPY, GBP, CAD, SEK, CHF rates (USD base)
+        # Day 1 (older): EUR slightly stronger → DXY slightly lower
+        # Day 2 (latest): EUR weaker vs USD → DXY rises (strengthening signal)
+        fake_json = {
+            "success": True,
+            "rates": {
+                "2026-04-14": {
+                    "EUR": 0.9200,   # 1 USD = 0.9200 EUR  → EUR/USD = 1.0870
+                    "JPY": 154.50,
+                    "GBP": 0.7900,   # 1 USD = 0.7900 GBP  → GBP/USD = 1.2658
+                    "CAD": 1.3600,
+                    "SEK": 10.50,
+                    "CHF": 0.9000,
+                },
+                "2026-04-15": {
+                    "EUR": 0.9350,   # 1 USD = 0.9350 EUR  → EUR/USD = 1.0695 (EUR weaker)
+                    "JPY": 155.80,   # USD/JPY higher → USD stronger
+                    "GBP": 0.7980,   # 1 USD = 0.7980 GBP  → GBP/USD = 1.2531 (GBP weaker)
+                    "CAD": 1.3750,
+                    "SEK": 10.65,
+                    "CHF": 0.9100,
+                },
+            },
+        }
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = fake_json
+
+        with patch.object(_requests, "get", return_value=mock_resp):
+            value, direction = _fetch_dxy_exchangerate_host()
+
+        # Value should be a plausible DXY level
+        assert value is not None
+        assert 80.0 < value < 130.0
+
+        # Manually verify formula for day 2 (latest)
+        eur_usd = 1.0 / 0.9350
+        usd_jpy = 155.80
+        gbp_usd = 1.0 / 0.7980
+        usd_cad = 1.3750
+        usd_sek = 10.65
+        usd_chf = 0.9100
+        expected = (
+            50.14348112
+            * math.pow(eur_usd, -0.576)
+            * math.pow(usd_jpy, 0.136)
+            * math.pow(gbp_usd, -0.119)
+            * math.pow(usd_cad, 0.091)
+            * math.pow(usd_sek, 0.042)
+            * math.pow(usd_chf, 0.036)
+        )
+        assert value == pytest.approx(expected, rel=1e-6)
+
+        # Day 2 USD is stronger than Day 1 → direction should be "strengthening"
+        assert direction == "strengthening"
+
+    def test_dxy_all_sources_fail_returns_none(self) -> None:
+        """yfinance + stooq + exchangerate.host all fail → (None, 'flat'), no exception."""
+        import requests as _requests
+
+        with (
+            patch("yfinance.Ticker", side_effect=Exception("YFRateLimitError")),
+            patch.object(
+                _requests,
+                "get",
+                side_effect=_requests.ConnectionError("all blocked"),
+            ),
+        ):
+            value, direction = _fetch_dxy()
+
+        assert value is None
+        assert direction == "flat"
 
 
 # ---------------------------------------------------------------------------

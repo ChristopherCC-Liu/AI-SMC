@@ -130,8 +130,15 @@ def _fetch_dxy() -> tuple[float | None, str]:
     The first ticker to return a non-empty history wins.  Each failure
     is logged at WARNING so a VPS-side outage can be diagnosed from logs.
 
+    Fallback chain:
+        1. yfinance DX-Y.NYB
+        2. yfinance DX=F
+        3. yfinance UUP
+        4. stooq.com CSV (may require API key — logs warning on failure)
+        5. exchangerate.host synthetic DXY (no auth, no key required)
+
     Returns (dxy_value, dxy_direction).  Direction is ``"flat"`` when all
-    tickers fail, mirroring legacy behaviour so downstream callers never
+    sources fail, mirroring legacy behaviour so downstream callers never
     have to handle a new error state.
     """
     last_exc: str | None = None
@@ -154,7 +161,7 @@ def _fetch_dxy() -> tuple[float | None, str]:
     else:
         logger.warning("DXY fetch: all tickers returned empty histories")
 
-    # Final fallback: stooq.com CSV endpoint (no auth, free)
+    # Fallback 4: stooq.com CSV endpoint (no auth, free — but may need API key on some IPs)
     stooq_value, stooq_direction = _fetch_dxy_stooq()
     if stooq_value is not None:
         logger.debug(
@@ -164,7 +171,19 @@ def _fetch_dxy() -> tuple[float | None, str]:
         )
         return stooq_value, stooq_direction
 
-    logger.warning("DXY fetch: stooq fallback also failed; returning (None, 'flat')")
+    logger.warning("DXY fetch: stooq fallback failed; trying exchangerate.host synthetic DXY")
+
+    # Fallback 5: exchangerate.host synthetic DXY (free, no auth required)
+    exr_value, exr_direction = _fetch_dxy_exchangerate_host()
+    if exr_value is not None:
+        logger.debug(
+            "DXY fetch: exchangerate.host synthetic fallback succeeded → value=%.4f direction=%s",
+            exr_value,
+            exr_direction,
+        )
+        return exr_value, exr_direction
+
+    logger.warning("DXY fetch: all sources failed (including exchangerate.host); returning (None, 'flat')")
     return None, "flat"
 
 
@@ -232,6 +251,134 @@ def _fetch_dxy_stooq() -> tuple[float | None, str]:
         return latest_close, direction
     except Exception as exc:  # noqa: BLE001
         logger.warning("DXY stooq fetch failed: %s", exc)
+        return None, "flat"
+
+
+def _fetch_dxy_exchangerate_host() -> tuple[float | None, str]:
+    """Compute a synthetic DXY from exchangerate.host free API (no auth required).
+
+    Uses the official ICE DXY formula::
+
+        DXY = 50.14348112
+              × EUR^(-0.576)
+              × JPY^(0.136)
+              × GBP^(-0.119)
+              × CAD^(0.091)
+              × SEK^(0.042)
+              × CHF^(0.036)
+
+    Where the exponent operands are the USD-quoted rates for each currency
+    pair (USD/JPY, USD/CAD, USD/SEK, USD/CHF) or the inverse (EUR/USD and
+    GBP/USD).
+
+    exchangerate.host returns ``{base: "USD", rates: {EUR: X, JPY: Y, ...}}``
+    where each value is "how many units of the foreign currency equal 1 USD".
+    For the DXY formula this means:
+    - EUR and GBP appear as USD-priced (EUR/USD = 1 / rates["EUR"]).
+    - JPY, CAD, SEK, CHF are already in USD-base form (USD/CCY = rates["CCY"]).
+
+    Accuracy note:
+        Synthetic DXY is typically within ±0.5% of the official ICE index,
+        which is sufficient for signal-level bias detection.
+
+    Returns
+    -------
+    (value, direction)
+        ``value`` is the synthetic DXY level for the latest available day.
+        ``direction`` is derived from a two-day comparison using the same
+        :data:`_DXY_DIRECTION_THRESHOLD_PCT` threshold as other fetchers.
+        Returns ``(None, "flat")`` on any failure.
+    """
+    try:
+        import math
+
+        import requests
+
+        today = datetime.now(tz=timezone.utc)
+        # Request the last 5 calendar days to ensure we have at least 2 business days
+        start_date = (today - timedelta(days=_DXY_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+        end_date = today.strftime("%Y-%m-%d")
+
+        url = "https://api.exchangerate.host/timeseries"
+        params = {
+            "start_date": start_date,
+            "end_date": end_date,
+            "base": "USD",
+            "symbols": "EUR,JPY,GBP,CAD,SEK,CHF",
+        }
+        headers = {
+            "User-Agent": (
+                "AI-SMC/1.0 (macro-data-fetcher; synthetic-DXY; "
+                "contact: operator)"
+            )
+        }
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        resp.raise_for_status()
+
+        data = resp.json()
+        if not data.get("success", False):
+            logger.warning("DXY exchangerate.host: API returned success=false")
+            return None, "flat"
+
+        rates_by_date: dict = data.get("rates", {})
+        if not rates_by_date:
+            logger.warning("DXY exchangerate.host: no rates in response")
+            return None, "flat"
+
+        sorted_dates = sorted(rates_by_date.keys())
+        if len(sorted_dates) < 1:
+            logger.warning("DXY exchangerate.host: empty dates list")
+            return None, "flat"
+
+        def _compute_dxy(rates: dict) -> float | None:
+            """Apply ICE DXY formula to a single day's rates dict."""
+            try:
+                eur_usd = 1.0 / float(rates["EUR"])   # EUR/USD (inverse of USD/EUR)
+                usd_jpy = float(rates["JPY"])          # USD/JPY direct
+                gbp_usd = 1.0 / float(rates["GBP"])   # GBP/USD (inverse of USD/GBP)
+                usd_cad = float(rates["CAD"])          # USD/CAD direct
+                usd_sek = float(rates["SEK"])          # USD/SEK direct
+                usd_chf = float(rates["CHF"])          # USD/CHF direct
+
+                dxy = (
+                    50.14348112
+                    * math.pow(eur_usd, -0.576)
+                    * math.pow(usd_jpy, 0.136)
+                    * math.pow(gbp_usd, -0.119)
+                    * math.pow(usd_cad, 0.091)
+                    * math.pow(usd_sek, 0.042)
+                    * math.pow(usd_chf, 0.036)
+                )
+                return dxy
+            except (KeyError, ValueError, ZeroDivisionError) as exc:
+                logger.warning("DXY exchangerate.host: formula error for rates=%s: %s", rates, exc)
+                return None
+
+        latest_rates = rates_by_date[sorted_dates[-1]]
+        latest_dxy = _compute_dxy(latest_rates)
+        if latest_dxy is None:
+            return None, "flat"
+
+        # Compute direction using previous day if available
+        if len(sorted_dates) >= 2:
+            prev_rates = rates_by_date[sorted_dates[-2]]
+            prev_dxy = _compute_dxy(prev_rates)
+            if prev_dxy is not None and prev_dxy > 0:
+                pct_change = ((latest_dxy - prev_dxy) / prev_dxy) * 100.0
+                if pct_change > _DXY_DIRECTION_THRESHOLD_PCT:
+                    direction = "strengthening"
+                elif pct_change < -_DXY_DIRECTION_THRESHOLD_PCT:
+                    direction = "weakening"
+                else:
+                    direction = "flat"
+            else:
+                direction = "flat"
+        else:
+            direction = "flat"
+
+        return latest_dxy, direction
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("DXY exchangerate.host fetch failed: %s", exc)
         return None, "flat"
 
 
