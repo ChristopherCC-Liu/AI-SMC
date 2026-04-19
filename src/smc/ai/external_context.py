@@ -20,6 +20,7 @@ Usage::
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 import threading
@@ -152,7 +153,86 @@ def _fetch_dxy() -> tuple[float | None, str]:
         logger.warning("DXY fetch: all tickers failed (last error: %s)", last_exc)
     else:
         logger.warning("DXY fetch: all tickers returned empty histories")
+
+    # Final fallback: stooq.com CSV endpoint (no auth, free)
+    stooq_value, stooq_direction = _fetch_dxy_stooq()
+    if stooq_value is not None:
+        logger.debug(
+            "DXY fetch: stooq fallback succeeded → value=%.4f direction=%s",
+            stooq_value,
+            stooq_direction,
+        )
+        return stooq_value, stooq_direction
+
+    logger.warning("DXY fetch: stooq fallback also failed; returning (None, 'flat')")
     return None, "flat"
+
+
+def _fetch_dxy_stooq() -> tuple[float | None, str]:
+    """Fetch DXY value and direction from stooq.com CSV endpoint.
+
+    Used as the ultimate fallback after all yfinance tickers fail.
+    No authentication required.
+
+    Endpoint::
+
+        https://stooq.com/q/d/l/?s=^dxy&d1=<YYYYMMDD>&d2=<YYYYMMDD>&i=d
+
+    Returns
+    -------
+    (value, direction)
+        ``value`` is the latest Close, ``direction`` is derived from the
+        last-two-close comparison (``"rising"`` / ``"falling"`` / ``"flat"``).
+        Returns ``(None, "flat")`` on any failure.
+    """
+    try:
+        import csv
+
+        import requests
+
+        today = datetime.now(tz=timezone.utc)
+        date_from = (today - timedelta(days=_DXY_LOOKBACK_DAYS + 2)).strftime("%Y%m%d")
+        date_to = today.strftime("%Y%m%d")
+        url = (
+            f"https://stooq.com/q/d/l/?s=^dxy"
+            f"&d1={date_from}&d2={date_to}&i=d"
+        )
+        headers = {
+            "User-Agent": (
+                "AI-SMC/1.0 (macro-data-fetcher; github.com/AI-SMC; "
+                "contact: operator)"
+            )
+        }
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+
+        reader = csv.DictReader(io.StringIO(resp.text))
+        rows = [row for row in reader if row.get("Close", "").strip()]
+        if len(rows) < 1:
+            logger.warning("DXY stooq: CSV returned no usable rows")
+            return None, "flat"
+
+        latest_close = float(rows[-1]["Close"])
+
+        if len(rows) >= 2:
+            prev_close = float(rows[-2]["Close"])
+            if prev_close > 0:
+                pct_change = ((latest_close - prev_close) / prev_close) * 100.0
+                if pct_change > _DXY_DIRECTION_THRESHOLD_PCT:
+                    direction = "rising"
+                elif pct_change < -_DXY_DIRECTION_THRESHOLD_PCT:
+                    direction = "falling"
+                else:
+                    direction = "flat"
+            else:
+                direction = "flat"
+        else:
+            direction = "flat"
+
+        return latest_close, direction
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("DXY stooq fetch failed: %s", exc)
+        return None, "flat"
 
 
 def _fetch_real_rate() -> float | None:

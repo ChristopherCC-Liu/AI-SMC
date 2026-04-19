@@ -40,6 +40,7 @@ from smc.ai.cot_fetcher import (
 from smc.ai.external_context import (
     _DXY_TICKERS,
     _fetch_dxy,
+    _fetch_dxy_stooq,
 )
 from smc.ai.macro_layer import MacroLayer
 from smc.ai.tips_fetcher import (
@@ -153,6 +154,69 @@ class TestDXYFetcherLive:
 
         assert value is None
         assert direction == "flat"
+
+    # -----------------------------------------------------------------------
+    # stooq.com fallback tests
+    # -----------------------------------------------------------------------
+
+    def test_dxy_stooq_success_path(self) -> None:
+        """stooq returns valid CSV → (value, direction) parsed correctly."""
+        import requests as _requests
+
+        fake_csv = (
+            "Date,Open,High,Low,Close,Volume\n"
+            "2026-04-14,104.10,104.30,103.90,104.20,0\n"
+            "2026-04-15,104.20,104.50,104.10,104.60,0\n"
+        )
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.text = fake_csv
+
+        with patch.object(_requests, "get", return_value=mock_resp):
+            value, direction = _fetch_dxy_stooq()
+
+        # Latest close is 104.60
+        assert value == pytest.approx(104.60)
+        # 104.60 vs 104.20 = +0.38% > 0.3% threshold → rising
+        assert direction == "rising"
+
+    def test_dxy_stooq_fail_returns_none_flat(self) -> None:
+        """stooq network error → (None, 'flat'), no exception leaks out."""
+        import requests as _requests
+
+        with patch.object(
+            _requests,
+            "get",
+            side_effect=_requests.ConnectionError("stooq unreachable"),
+        ):
+            value, direction = _fetch_dxy_stooq()
+
+        assert value is None
+        assert direction == "flat"
+
+    def test_dxy_yfinance_all_fail_stooq_succeeds(self) -> None:
+        """yfinance all tickers fail with rate-limit → stooq fallback returns value."""
+        import requests as _requests
+
+        fake_csv = (
+            "Date,Open,High,Low,Close,Volume\n"
+            "2026-04-13,103.50,103.80,103.30,103.40,0\n"
+            "2026-04-14,103.40,103.60,103.10,103.00,0\n"
+        )
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.text = fake_csv
+
+        with (
+            patch("yfinance.Ticker", side_effect=Exception("YFRateLimitError")),
+            patch.object(_requests, "get", return_value=mock_resp),
+        ):
+            value, direction = _fetch_dxy()
+
+        # stooq latest close = 103.00
+        assert value == pytest.approx(103.00)
+        # 103.00 vs 103.40 = -0.39% < -0.3% threshold → falling
+        assert direction == "falling"
 
 
 # ---------------------------------------------------------------------------
