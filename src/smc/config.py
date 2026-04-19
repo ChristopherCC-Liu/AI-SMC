@@ -74,6 +74,31 @@ class SMCConfig(BaseSettings):
         description="MetaTrader 5 account login number.",
     )
 
+    @field_validator("macro_enabled", "mt5_mock", mode="before")
+    @classmethod
+    def _parse_bool_lenient(cls, v: object) -> object:
+        """Strip whitespace + tolerate loose boolean strings from bat env.
+
+        Windows `set VAR=false` ships with trailing whitespace/CR (`'false '`)
+        which pydantic's strict bool parser rejects. This validator strips
+        first, then normalises common truthy/falsy strings.
+        """
+        if isinstance(v, str):
+            stripped = v.strip().lower()
+            if stripped in {"true", "1", "yes", "on"}:
+                return True
+            if stripped in {"false", "0", "no", "off", ""}:
+                return False
+        return v
+
+    @field_validator("journal_suffix", mode="before")
+    @classmethod
+    def _parse_suffix_lenient(cls, v: object) -> object:
+        """Strip whitespace from journal_suffix env to handle Windows bat trailing space."""
+        if isinstance(v, str):
+            return v.strip()
+        return v
+
     @field_validator("mt5_login", mode="before")
     @classmethod
     def _parse_mt5_login_lenient(cls, v: object) -> object:
