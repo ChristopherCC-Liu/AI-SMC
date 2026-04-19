@@ -24,5 +24,7 @@ try:
     print(f"cfg.macro_enabled = {cfg.macro_enabled!r}")
     print(f"cfg.journal_suffix = {cfg.journal_suffix!r}")
     print(f"cfg.macro_magic = {cfg.macro_magic!r}")
+    key = cfg.fred_api_key.get_secret_value() if cfg.fred_api_key else ""
+    print(f"cfg.fred_api_key len = {len(key)}, first 8 = {key[:8]!r}")
 except Exception as e:
     print(f"SMCConfig EXCEPTION: {e}")
