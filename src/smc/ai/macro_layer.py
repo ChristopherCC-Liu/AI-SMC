@@ -8,12 +8,32 @@ Design principles:
     - Orthogonal to SMC: adds new signal dimensions, not re-tunes existing.
     - Graceful degradation: any fetcher failure → that source = 0.0.
     - Conservative: max absolute bias = 0.3 (cannot override strong SMC).
-    - Cache-first: reuses ``ExternalContextFetcher`` in-memory cache.
+    - Cache-first: 7-day Parquet cache for COT; 24h in-memory for DXY.
 
-Implementation status (Alt-B Round 4 MVP, 2026-04-19):
+Implementation status (Alt-B Round 4 W1D1-D3, 2026-04-19):
     - DXY source: implemented (reuses ``_fetch_dxy`` from external_context).
-    - COT source: stub (NotImplementedError) — see §2 of the plan doc.
-    - TIPS yield source: stub — see §3 of the plan doc.
+    - COT source: implemented via ``COTFetcher`` + 104-week rolling percentile.
+      Contrarian at extremes (>90th → -0.10, <10th → +0.10), mild momentum
+      in the 70th–90th / 10th–30th bands (±0.05), neutral in the middle.
+    - TIPS yield source: stub — see §3 of the plan doc (W1D3 scope).
+
+COT branch behaviour:
+    The COT component calls ``COTFetcher(cache_path=<cache_dir>/cot_gold_history.parquet).fetch()``
+    to obtain up to 104 weeks of COMEX Gold non-commercial net positioning data.
+    ``compute_cot_bias()`` converts the latest data point to a percentile rank
+    within the rolling window and maps it to a bias float per plan §2:
+
+    +-----------------------------------------------+--------+
+    | Condition (rolling 104-week percentile)        | Bias   |
+    +===============================================+========+
+    | pct_rank > 0.90  (crowded long)               | -0.10  |
+    | 0.70 < pct_rank ≤ 0.90  (extended long)       | +0.05  |
+    | 0.30 ≤ pct_rank ≤ 0.70  (neutral mid-range)   |  0.00  |
+    | 0.10 ≤ pct_rank < 0.30  (extended short)      | -0.05  |
+    | pct_rank < 0.10  (crowded short)              | +0.10  |
+    +-----------------------------------------------+--------+
+
+    Network failures or parse errors degrade to 0.0 (never raise).
 
 Usage::
 
@@ -30,6 +50,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from smc.ai.cot_fetcher import COTFetcher, compute_cot_bias
 from smc.ai.external_context import ExternalContextFetcher
 
 logger = logging.getLogger(__name__)
@@ -140,10 +161,6 @@ class MacroLayer:
     def _safe_cot_bias(self, instrument: str) -> float | None:
         try:
             return self._cot_bias(instrument)
-        except NotImplementedError:
-            # Expected during MVP phase — log once at debug, not warning.
-            logger.debug("COT source not yet implemented; contributing 0.0")
-            return None
         except Exception:  # noqa: BLE001
             logger.debug("COT bias fetch failed", exc_info=True)
             return None
@@ -170,8 +187,49 @@ class MacroLayer:
     # ------------------------------------------------------------------
 
     def _cot_bias(self, instrument: str) -> float:
-        """Compute COT positioning bias.  Not yet implemented (see plan §2)."""
-        raise NotImplementedError("COT fetcher scheduled for W1D1–D2")
+        """Fetch COT data and compute contrarian/momentum bias.
+
+        Fetches up to 104 weeks of COMEX Gold (XAU) non-commercial net
+        positioning from CFTC via ``COTFetcher``.  Maps the latest data
+        point's 104-week percentile rank to a bias float per plan §2:
+
+        - >90th percentile (crowded long)  → -0.10  contrarian bearish
+        - >70th percentile (extended long) → +0.05  mild momentum
+        - <10th percentile (crowded short) → +0.10  contrarian bullish
+        - <30th percentile (extended short) → -0.05 mild bearish lean
+        - 30th–70th (neutral mid-range)    →  0.0   no signal
+
+        Only supports XAUUSD.  Returns 0.0 without error for other
+        instruments.  Cache lives at ``<cache_dir>/cot_gold_history.parquet``,
+        refreshed when latest cached row is older than 7 days.
+
+        Parameters
+        ----------
+        instrument:
+            Trading instrument identifier (e.g. "XAUUSD").
+
+        Returns
+        -------
+        float
+            COT bias in [-0.10, +0.10].
+
+        Raises
+        ------
+        RuntimeError
+            If COT data fetch returns no rows or bias computation fails.
+        """
+        if instrument.upper() != "XAUUSD":
+            logger.debug("COT bias only supported for XAUUSD; got %s", instrument)
+            return 0.0
+
+        cache_path = self._cache_dir / "cot_gold_history.parquet"
+        fetcher = COTFetcher(cache_path=cache_path)
+        history_df = fetcher.fetch()
+
+        if history_df is None or history_df.is_empty():
+            raise RuntimeError("COT fetch returned no data")
+
+        return compute_cot_bias(history_df)
 
     def _yield_bias(self) -> float:
         """Compute real-yield change bias.  Not yet implemented (see plan §3)."""
