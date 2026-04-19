@@ -67,6 +67,28 @@ class SMCConfig(BaseSettings):
         default=0,
         description="MetaTrader 5 account login number.",
     )
+
+    @field_validator("mt5_login", mode="before")
+    @classmethod
+    def _parse_mt5_login_lenient(cls, v: object) -> object:
+        """Treat comment placeholders or non-numeric strings as 0.
+
+        `.env.production` template historically shipped with a comment
+        like `# Your MT5 demo account number` as the literal value,
+        which pydantic would reject. This validator normalises such
+        placeholders to 0 so the rest of the config loads; callers
+        should use `has_mt5_credentials()` to check whether MT5 is
+        actually configured before attempting connection.
+        """
+        if isinstance(v, str):
+            stripped = v.strip()
+            if not stripped or stripped.startswith("#"):
+                return 0
+            try:
+                return int(stripped)
+            except ValueError:
+                return 0
+        return v
     mt5_password: SecretStr = Field(
         default=SecretStr(""),
         description="MetaTrader 5 account password.",
