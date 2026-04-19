@@ -38,6 +38,7 @@ class SMCConfig(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        populate_by_name=True,
     )
 
     # ------------------------------------------------------------------
@@ -283,6 +284,87 @@ class SMCConfig(BaseSettings):
             "write to separate journals: journal/ vs journal_macro/."
         ),
     )
+
+    # ------------------------------------------------------------------
+    # Dual-Magic A/B (audit-r4 v5 Option B)
+    # ------------------------------------------------------------------
+    macro_magic: int = Field(
+        default=19760428,
+        description=(
+            "Magic number used by the treatment (macro) leg on the same TMGM Demo "
+            "account.  Control leg uses cfg.magic (XAU=19760418, BTC=19760419); "
+            "treatment leg overrides to this value so broker reconcile can split "
+            "closed deals per-leg.  Set SMC_MACRO_MAGIC to override."
+        ),
+    )
+    # NB: declared as plain str so pydantic-settings does not pre-parse it
+    # as JSON (which would crash on malformed values).  We parse + validate
+    # in the public accessor instead, yielding the sanitised dict.
+    # Field name directly matches env var: SMC_VIRTUAL_BALANCE_SPLIT.
+    virtual_balance_split_raw: str = Field(
+        default='{"": 0.5, "_macro": 0.5}',
+        validation_alias="SMC_VIRTUAL_BALANCE_SPLIT",
+        description=(
+            "Virtual balance split per journal_suffix for dual-magic sizing (JSON "
+            "dict).  Each leg sees mt5_balance * split[suffix] when computing "
+            "position size, preventing treatment leg from over-sizing using the "
+            "full account equity shared with control.  Default 50/50.  Invalid "
+            "JSON / out-of-range values fall back to the 50/50 default."
+        ),
+    )
+
+    @property
+    def virtual_balance_split(self) -> dict[str, float]:
+        """Parse + sanitise the split dict.  Invalid values fail back to 50/50."""
+        raw = self.virtual_balance_split_raw
+        fallback = {"": 0.5, "_macro": 0.5}
+        if isinstance(raw, dict):
+            parsed = raw  # already a dict (e.g. init-time override)
+        else:
+            import json as _json
+            stripped = str(raw).strip() if raw is not None else ""
+            if not stripped:
+                return fallback
+            try:
+                parsed = _json.loads(stripped)
+            except (ValueError, TypeError):
+                return fallback
+        if not isinstance(parsed, dict) or not parsed:
+            return fallback
+        out: dict[str, float] = {}
+        for key, val in parsed.items():
+            try:
+                f = float(val)
+            except (TypeError, ValueError):
+                f = 0.5
+            if f <= 0.0 or f > 1.0:
+                f = 0.5
+            out[str(key)] = f
+        return out if out else fallback
+
+    def virtual_balance_for(self, suffix: str, mt5_balance: float) -> float:
+        """Compute virtual balance for the given suffix.
+
+        Looks up ``virtual_balance_split[suffix]`` (defaults to 0.5 for
+        unknown suffixes so a typo never silently over-sizes), then returns
+        ``mt5_balance * split``.  Returns 0.0 when mt5_balance is None or
+        non-positive (fail-closed).
+        """
+        if mt5_balance is None or mt5_balance <= 0:
+            return 0.0
+        split = self.virtual_balance_split.get(suffix, 0.5)
+        return float(mt5_balance) * float(split)
+
+    def magic_for(self, instrument_magic: int, suffix: str) -> int:
+        """Resolve the magic number to use for the given (instrument, suffix).
+
+        Control leg (suffix="") uses the instrument-specific magic from cfg.magic.
+        Treatment leg (suffix != "") uses macro_magic so broker reconcile can
+        split deals per leg on the same TMGM Demo account.
+        """
+        if not suffix:
+            return int(instrument_magic)
+        return int(self.macro_magic)
 
     # ------------------------------------------------------------------
     # LLM (Phase 3+)

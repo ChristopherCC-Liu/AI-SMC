@@ -1,19 +1,31 @@
 @echo off
-REM Round 4 Alt-B W3: A/B parallel paper trading — treatment leg (macro overlay ON).
+REM Round 4 Alt-B W3 / audit-r4 v5 Option B: dual-magic A/B on same TMGM Demo.
 REM Deployed to C:\AI-SMC\scripts\start_live_macro.bat and registered as Task Scheduler
 REM `\AI-SMC-Live-Macro` task with BootTrigger only.
 REM
 REM Process B (treatment): SMC_MACRO_ENABLED=true, SMC_JOURNAL_SUFFIX=_macro
 REM  → journals go to data\XAUUSD\journal_macro\live_trades.jsonl
 REM  → live state at data\XAUUSD\live_state_macro.json
+REM  → magic=19760428 (vs control 19760418) routes orders per-leg
+REM  → virtual balance 50% of MT5 equity via SMCConfig.virtual_balance_split
 REM
 REM Process A (control) is start_live.bat / AI-SMC-Live — no env overrides.
-REM After 30 days compare journal/ vs journal_macro/ via scripts\ab_compare.py.
+REM Both legs write signals into strategy_server /signal array; single EA
+REM instance on XAUUSD chart polls the array and OrderSends with each signal's
+REM magic.  After 30 days compare journal/ vs journal_macro/ via
+REM scripts\ab_compare.py.
+REM
+REM IMPORTANT — EA re-compile required: mql5\AISMCReceiver.mq5 v2.00 must be
+REM compiled in MetaEditor and re-attached to the XAUUSD chart.
 
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 set PYTHONUNBUFFERED=1
 set SMC_MACRO_ENABLED=true
 set SMC_JOURNAL_SUFFIX=_macro
+REM Optional: override virtual balance split.  Default is 50/50.
+REM set SMC_VIRTUAL_BALANCE_SPLIT={"": 0.5, "_macro": 0.5}
+REM Optional: override treatment-leg magic (default 19760428).
+REM set SMC_MACRO_MAGIC=19760428
 cd /d C:\AI-SMC
 .venv\Scripts\python.exe scripts\live_demo.py >> logs\live_macro_stdout.log 2>> logs\live_macro_stderr.log

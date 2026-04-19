@@ -193,3 +193,51 @@ class TestConfigurableLimit:
         assert not h.is_tripped()
         h.record(-1.0)
         assert h.is_tripped()
+
+
+class TestPerSuffixStateFileIsolation:
+    """audit-r4 v5 Option B: control + treatment legs share the same TMGM Demo
+    account but need independent halt state.  ConsecLossHalt is already
+    state_path-driven, so per-leg isolation is achieved purely by the caller
+    passing distinct paths.  These tests pin that behaviour.
+    """
+
+    def test_two_instances_with_distinct_paths_are_isolated(self, tmp_path):
+        """Control path and treatment path maintain independent streaks."""
+        control_path = tmp_path / "consec_loss_state.json"
+        treatment_path = tmp_path / "consec_loss_state_macro.json"
+
+        control = ConsecLossHalt(state_path=control_path)
+        treatment = ConsecLossHalt(state_path=treatment_path)
+
+        # Trip control with 3 losses
+        control.record(-1.0)
+        control.record(-1.0)
+        control.record(-1.0)
+        assert control.is_tripped()
+
+        # Treatment is unaffected — still fresh, still tradeable
+        assert not treatment.is_tripped()
+        assert treatment.snapshot().consec_losses == 0
+
+        # Treatment can take its own losses independently
+        treatment.record(-5.0)
+        assert treatment.snapshot().consec_losses == 1
+        assert not treatment.is_tripped()
+
+    def test_distinct_suffix_paths_write_distinct_files(self, tmp_path):
+        """Naming pattern: data/<sym>/consec_loss_state{suffix}.json."""
+        control_path = tmp_path / "consec_loss_state.json"
+        treatment_path = tmp_path / "consec_loss_state_macro.json"
+
+        control = ConsecLossHalt(state_path=control_path)
+        treatment = ConsecLossHalt(state_path=treatment_path)
+        control.record(-1.0)
+        treatment.record(-2.0)
+
+        assert control_path.exists()
+        assert treatment_path.exists()
+        # Different files → different content
+        c_content = control_path.read_text()
+        t_content = treatment_path.read_text()
+        assert c_content != t_content

@@ -43,13 +43,17 @@ def _early_symbol_arg() -> str:
 
 
 _SYMBOL_EARLY = _early_symbol_arg()
+# audit-r4 v5 Option B: per-suffix PID file so control + treatment processes
+# don't deadlock each other (both run on same host, same symbol, different
+# journal_suffix via SMC_JOURNAL_SUFFIX env var).
+_SUFFIX_EARLY = os.environ.get("SMC_JOURNAL_SUFFIX", "")
 _PID_FILE = os.path.realpath(
     os.path.join(
         os.path.dirname(os.path.realpath(__file__)),
         "..",
         "data",
         _SYMBOL_EARLY,
-        "live_demo.pid",
+        f"live_demo{_SUFFIX_EARLY}.pid",
     )
 )
 
@@ -685,21 +689,35 @@ def main():
     _path_cfg = _SMCConfigPaths()
     _journal_suffix: str = _path_cfg.journal_suffix  # "" or e.g. "_macro"
 
+    # audit-r4 v5 Option B: resolve effective magic for this leg.
+    # Control (suffix="") → cfg.magic (XAU=19760418, BTC=19760419).
+    # Treatment (suffix="_macro") → cfg.macro_magic (default 19760428).
+    # Same TMGM Demo account; different magic lets broker reconcile split legs.
+    _effective_magic: int = _path_cfg.magic_for(cfg.magic, _journal_suffix)
+
     _journal_dir = DATA_ROOT / f"journal{_journal_suffix}"
     _journal_dir.mkdir(parents=True, exist_ok=True)
     JOURNAL_PATH = _journal_dir / "live_trades.jsonl"
     STATE_PATH = DATA_ROOT / f"live_state{_journal_suffix}.json"
     AI_PATH = DATA_ROOT / "ai_analysis.json"
-    PAUSE_FLAG_PATH = DATA_ROOT / "trading_paused.flag"
-    MT5_POSITIONS_PATH = DATA_ROOT / "mt5_positions.json"
-    CONSEC_LOSS_PATH = DATA_ROOT / "consec_loss_state.json"
-    ASIAN_QUOTA_PATH = DATA_ROOT / "asian_range_quota_state.json"
+    # audit-r4 v5 Option B: per-suffix pause flag so control leg and treatment
+    # leg can be paused independently via the dashboard kill switch.
+    PAUSE_FLAG_PATH = DATA_ROOT / f"trading_paused{_journal_suffix}.flag"
+    MT5_POSITIONS_PATH = DATA_ROOT / f"mt5_positions{_journal_suffix}.json"
+    # audit-r4 v5 Option B: per-suffix risk state files so control + treatment
+    # legs track halt / quota / breaker independently on the same TMGM Demo
+    # account.  Control (suffix="") writes to <name>.json; treatment
+    # (suffix="_macro") writes to <name>_macro.json.  Backward-compat: control
+    # leg paths are byte-identical to pre-Option-B behaviour.
+    CONSEC_LOSS_PATH = DATA_ROOT / f"consec_loss_state{_journal_suffix}.json"
+    ASIAN_QUOTA_PATH = DATA_ROOT / f"asian_range_quota_state{_journal_suffix}.json"
     # Round 5 T2 Stage 5: per-symbol circuit breaker flag so XAU and BTC
     # processes each own their execution circuit independently.
-    CIRCUIT_FLAG_PATH = DATA_ROOT / "execution_circuit_open.flag"
+    CIRCUIT_FLAG_PATH = DATA_ROOT / f"execution_circuit_open{_journal_suffix}.flag"
     # audit-r2 ops #4: reconcile cursor — prevents double-counting of
     # closed deals across restarts (silent bug surfaced by ops-sustain).
-    RECONCILE_TS_PATH = DATA_ROOT / "last_reconcile_ts.json"
+    RECONCILE_TS_PATH = DATA_ROOT / f"last_reconcile_ts{_journal_suffix}.json"
+    PHASE1A_BREAKER_PATH = DATA_ROOT / f"phase1a_breaker_state{_journal_suffix}.json"
 
     print(f"[{datetime.now()}] AI-SMC Live Trading Loop Starting...")
     print("=" * 60)
@@ -806,8 +824,10 @@ def main():
     asian_range_quota = AsianRangeQuota.load(state_path=ASIAN_QUOTA_PATH)
     # Round 5 T3 (dual-symbol-audit P0): per-symbol breaker state file so
     # XAU and BTC processes don't clobber each other's Phase 1a state.
+    # audit-r4 v5 Option B: also per-suffix so control and treatment don't
+    # clobber on same TMGM Demo account.
     phase1a_breaker = Phase1aCircuitBreaker(
-        state_path=DATA_ROOT / "phase1a_breaker_state.json",
+        state_path=PHASE1A_BREAKER_PATH,
     )
     # Round 5 T1 F3: consecutive-loss halt (3 losses in a row → halt rest of
     # UTC day; WIN resets streak). DrawdownGuard is a %-based backstop.
@@ -1119,10 +1139,32 @@ def main():
             except Exception as _bal_exc:
                 log_warn("balance_probe_error", exc=str(_bal_exc)[:120])
 
+            # audit-r4 v5 Option B: virtual balance split prevents treatment
+            # leg from over-sizing using the full shared account equity.
+            # Control (suffix="") sees 50% of mt5 balance; treatment
+            # (suffix="_macro") sees the other 50% (configurable via
+            # SMC_VIRTUAL_BALANCE_SPLIT).  When split=1.0 for a given suffix,
+            # this matches pre-Option-B behaviour exactly (single-leg mode).
+            _virtual_balance_usd: float | None
+            if _live_balance_usd is None:
+                _virtual_balance_usd = None
+            else:
+                _virtual_balance_usd = _path_cfg.virtual_balance_for(
+                    _journal_suffix, _live_balance_usd,
+                )
+                log_info(
+                    "virtual_balance_applied",
+                    cycle=cycle,
+                    suffix=_journal_suffix,
+                    mt5_balance=round(_live_balance_usd, 2),
+                    virtual_balance=round(_virtual_balance_usd, 2),
+                    split=_path_cfg.virtual_balance_split.get(_journal_suffix, 0.5),
+                )
+
             planned_lots = compute_live_position_size(
                 best,
                 cfg=cfg,
-                balance_usd=_live_balance_usd,
+                balance_usd=_virtual_balance_usd,
                 risk_pct=1.0,
                 blocked_reason=None,  # gate will set blocked_reason below
             )
@@ -1344,7 +1386,7 @@ def main():
                         "sl": best.stop_loss,
                         "tp": best.take_profit,
                         "deviation": dyn_deviation,
-                        "magic": cfg.magic,
+                        "magic": _effective_magic,
                         "comment": f"AI-SMC {best.trigger[:15]}",
                         "type_time": mt5.ORDER_TIME_GTC,
                         "type_filling": mt5.ORDER_FILLING_IOC,
@@ -1460,6 +1502,11 @@ def main():
                         ) if abs(best.entry_price - best.stop_loss) > 0 else 0.0,
                         "htf_bias_conf": round(float(getattr(htf_bias, "confidence", 0.0) or 0.0), 3),
                         "htf_bias_tier": htf_bias_tier(float(getattr(htf_bias, "confidence", 0.0) or 0.0)),
+                        # audit-r4 v5 Option B: dual-magic audit fields for A/B analysis.
+                        "journal_suffix": _journal_suffix,
+                        "magic": _effective_magic,
+                        "account_balance_usd": round(_live_balance_usd, 2) if _live_balance_usd is not None else None,
+                        "virtual_balance_usd": round(_virtual_balance_usd, 2) if _virtual_balance_usd is not None else None,
                     }
                     with open(JOURNAL_PATH, "a") as f:
                         f.write(json.dumps(log_entry) + "\n")
@@ -1504,6 +1551,11 @@ def main():
                         "macro_bias_value": round(macro_bias_value, 4),
                         "macro_enabled": _macro_enabled,
                         "macro_components": dict(_macro_components),
+                        # audit-r4 v5 Option B: dual-magic audit fields for A/B analysis.
+                        "journal_suffix": _journal_suffix,
+                        "magic": _effective_magic,
+                        "account_balance_usd": round(_live_balance_usd, 2) if _live_balance_usd is not None else None,
+                        "virtual_balance_usd": round(_virtual_balance_usd, 2) if _virtual_balance_usd is not None else None,
                     }
                     with open(JOURNAL_PATH, "a") as f:
                         f.write(json.dumps(log_entry) + "\n")
@@ -1513,7 +1565,7 @@ def main():
             # records closed-trade P&L into the consec-loss halt + Phase1a
             # breaker + daily_pnl running total for DrawdownGuard backstop.
             try:
-                broker_positions = fetch_broker_positions(mt5, symbol=cfg.mt5_path, magic=cfg.magic)
+                broker_positions = fetch_broker_positions(mt5, symbol=cfg.mt5_path, magic=_effective_magic)
                 atomic_write_json(
                     MT5_POSITIONS_PATH,
                     {
@@ -1521,7 +1573,7 @@ def main():
                         "positions": [p.model_dump(mode="json") for p in broker_positions],
                     },
                 )
-                closed_deals = fetch_closed_pnl_since(mt5, last_reconcile_ts, magic=cfg.magic)
+                closed_deals = fetch_closed_pnl_since(mt5, last_reconcile_ts, magic=_effective_magic)
                 for deal in closed_deals:
                     pnl = float(deal.get("pnl_usd", 0.0))
                     daily_pnl += pnl
@@ -1606,9 +1658,17 @@ def main():
             # the _live_balance_usd already probed in the main body; fall
             # through to peak_balance; NEVER default to a literal ($10k) —
             # oversizing on a $1k demo would trigger one-tick liquidation.
-            _balance_for_sizing = _locs.get("_live_balance_usd", None)
-            if _balance_for_sizing is None and peak_balance:
-                _balance_for_sizing = float(peak_balance)
+            # audit-r4 v5 Option B: prefer the pre-computed _virtual_balance_usd
+            # so save_state sees the same per-leg budget the pre-write gate used.
+            _balance_for_sizing = _locs.get("_virtual_balance_usd", None)
+            if _balance_for_sizing is None:
+                _mt5_balance_fallback = _locs.get("_live_balance_usd", None)
+                if _mt5_balance_fallback is None and peak_balance:
+                    _mt5_balance_fallback = float(peak_balance)
+                if _mt5_balance_fallback is not None:
+                    _balance_for_sizing = _path_cfg.virtual_balance_for(
+                        _journal_suffix, _mt5_balance_fallback,
+                    )
             try:
                 save_state(
                     _locs.get("cycle", cycle),

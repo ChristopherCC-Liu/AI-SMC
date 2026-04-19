@@ -51,6 +51,12 @@ class TradeRow(NamedTuple):
     direction: str   # long / short / unknown
     pnl_units: float  # approximated from result or rr_ratio
     is_win: bool
+    # audit-r4 v5 Option B: balance snapshot for dual-magic A/B analysis.
+    # Populated from journal fields when present; None when journal predates
+    # Option B (backward-compat).
+    account_balance_usd: float | None = None
+    virtual_balance_usd: float | None = None
+    magic: int | None = None
 
 
 class LegStats(NamedTuple):
@@ -76,6 +82,26 @@ def _parse_time(raw: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _parse_optional_float(raw: object) -> float | None:
+    """Parse to float or None — tolerant of string / None / missing fields."""
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_optional_int(raw: object) -> int | None:
+    """Parse to int or None — tolerant of string / None / missing fields."""
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_trade_action(action: str) -> bool:
@@ -167,6 +193,9 @@ def load_journal(path: Path, cutoff_days: int | None = None) -> list[TradeRow]:
                 direction=direction,
                 pnl_units=pnl_units,
                 is_win=is_win,
+                account_balance_usd=_parse_optional_float(obj.get("account_balance_usd")),
+                virtual_balance_usd=_parse_optional_float(obj.get("virtual_balance_usd")),
+                magic=_parse_optional_int(obj.get("magic")),
             ))
 
     rows.sort(key=lambda r: r.time)
@@ -240,8 +269,37 @@ def _fmt_pct(v: float) -> str:
     return f"{v:.1%}"
 
 
-def _summary_table(label_a: str, stats_a: LegStats, label_b: str, stats_b: LegStats) -> str:
-    """Return a Markdown table comparing two legs."""
+def _latest_balance_snapshot(rows: list[TradeRow]) -> tuple[str, str]:
+    """Return (account_balance_str, virtual_balance_str) from latest trade row.
+
+    Empty journals or legacy rows (pre-Option-B, no balance fields) yield
+    ``("n/a", "n/a")`` so the markdown renders cleanly.
+    """
+    if not rows:
+        return ("n/a", "n/a")
+    # Most recent first
+    sorted_rows = sorted(rows, key=lambda r: r.time, reverse=True)
+    for r in sorted_rows:
+        if r.account_balance_usd is not None or r.virtual_balance_usd is not None:
+            acc = f"${r.account_balance_usd:.2f}" if r.account_balance_usd is not None else "n/a"
+            vir = f"${r.virtual_balance_usd:.2f}" if r.virtual_balance_usd is not None else "n/a"
+            return (acc, vir)
+    return ("n/a", "n/a")
+
+
+def _summary_table(
+    label_a: str, stats_a: LegStats, label_b: str, stats_b: LegStats,
+    rows_a: list[TradeRow] | None = None, rows_b: list[TradeRow] | None = None,
+) -> str:
+    """Return a Markdown table comparing two legs.
+
+    audit-r4 v5 Option B: includes account-balance and virtual-balance
+    snapshots from the latest trade in each leg so dual-magic A/B runs
+    can quickly confirm the virtual-balance split was honoured.
+    """
+    acc_a, vir_a = _latest_balance_snapshot(rows_a or [])
+    acc_b, vir_b = _latest_balance_snapshot(rows_b or [])
+
     rows = [
         ("Trade count",   str(stats_a.trade_count),               str(stats_b.trade_count)),
         ("Win count",     str(stats_a.win_count),                  str(stats_b.win_count)),
@@ -251,6 +309,8 @@ def _summary_table(label_a: str, stats_a: LegStats, label_b: str, stats_b: LegSt
         ("Avg PnL (R)",   f"{stats_a.avg_pnl:+.3f}",              f"{stats_b.avg_pnl:+.3f}"),
         ("Gross wins",    f"{stats_a.gross_wins:.3f}",             f"{stats_b.gross_wins:.3f}"),
         ("Gross losses",  f"{stats_a.gross_losses:.3f}",           f"{stats_b.gross_losses:.3f}"),
+        ("Account balance (latest)", acc_a, acc_b),
+        ("Virtual balance (latest)", vir_a, vir_b),
     ]
 
     col_w = max(len(label_a), len(label_b), 12)
@@ -319,7 +379,7 @@ def build_report(
         f"",
         f"## Overall Summary",
         f"",
-        _summary_table(label_a, stats_a, label_b, stats_b),
+        _summary_table(label_a, stats_a, label_b, stats_b, rows_a=rows_a, rows_b=rows_b),
         f"",
         f"## Weekly Rolling Comparison",
         f"",

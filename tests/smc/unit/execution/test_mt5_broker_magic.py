@@ -178,3 +178,52 @@ class TestXauBtcIsolation:
         # ambiguous — one broker couldn't tell its own orders from the other's.
         assert xau_broker._magic != MT5BrokerPort._DEFAULT_MAGIC
         assert btc_broker._magic != MT5BrokerPort._DEFAULT_MAGIC
+
+
+# ---------------------------------------------------------------------------
+# audit-r4 v5 Option B: dual-magic (control + treatment) on same account
+# ---------------------------------------------------------------------------
+
+class TestDualMagicRouting:
+    """Treatment-leg magic (19760428) must flow via cfg override so control
+    and treatment can coexist on the same TMGM Demo account."""
+
+    def test_treatment_magic_19760428_propagates_into_send_order(self, mt5_stub):
+        """BrokerPort with cfg.magic=19760428 sends orders with magic=19760428."""
+        from smc.execution.executor import MT5BrokerPort
+        from smc.execution.types import OrderRequest
+
+        cfg = _FakeCfg(magic=19760428)  # treatment leg
+        broker = MT5BrokerPort(login=1, password="x", server="y", cfg=cfg)
+        result = MagicMock()
+        result.retcode = MT5BrokerPort._TRADE_RETCODE_DONE
+        result.order = 42
+        result.price = 2350.0
+        result.volume = 0.05
+        mt5_stub.order_send.return_value = result
+
+        broker.send_order(
+            OrderRequest(
+                direction="long", lots=0.05,
+                entry_price=2350.0, stop_loss=2340.0, take_profit_1=2370.0,
+                instrument="XAUUSD",
+            )
+        )
+        payload = mt5_stub.order_send.call_args[0][0]
+        assert payload["magic"] == 19760428
+
+    def test_control_vs_treatment_magics_differ(self, mt5_stub):
+        """Distinct magics guarantee broker reconcile can split legs."""
+        from smc.execution.executor import MT5BrokerPort
+
+        control = MT5BrokerPort(
+            login=1, password="x", server="y",
+            cfg=_FakeCfg(magic=19760418),  # XAU control
+        )
+        treatment = MT5BrokerPort(
+            login=1, password="x", server="y",
+            cfg=_FakeCfg(magic=19760428),  # macro treatment
+        )
+        assert control._magic != treatment._magic
+        assert control._magic == 19760418
+        assert treatment._magic == 19760428

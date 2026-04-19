@@ -248,3 +248,107 @@ class TestDegenerateInputs:
             best, cfg=_BadCfg(), balance_usd=10_000.0, risk_pct=1.0, blocked_reason=None
         )
         assert lot == 0.0
+
+
+# ---------------------------------------------------------------------------
+# audit-r4 v5 Option B: virtual balance split for dual-magic legs
+# ---------------------------------------------------------------------------
+
+class TestVirtualBalanceSplitSizing:
+    """SMCConfig.virtual_balance_for(suffix, mt5_balance) must scale the
+    balance that compute_live_position_size sees, cutting the per-leg lot
+    size proportionally.  This prevents the treatment leg from over-sizing
+    using the full shared account equity."""
+
+    def test_control_leg_sized_against_half_balance(self, monkeypatch):
+        """Control (suffix="") at default 50/50 sees balance/2 → half the lot."""
+        monkeypatch.delenv("SMC_VIRTUAL_BALANCE_SPLIT", raising=False)
+        from smc.config import SMCConfig
+        cfg_app = SMCConfig()
+        cfg = get_instrument_config("XAUUSD")
+        best = _FakeRangeSetup(entry_price=2350.0, stop_loss=2348.0)  # 200 pt
+
+        # Full balance sizing: 1% of $10k = $100 / (200 pt * $1) = 0.5 lot
+        lot_full = compute_live_position_size(
+            best, cfg=cfg, balance_usd=10_000.0, risk_pct=1.0, blocked_reason=None
+        )
+        # Virtual balance control leg: $10k * 0.5 = $5k → 0.25 lot
+        vb_control = cfg_app.virtual_balance_for("", 10_000.0)
+        lot_control = compute_live_position_size(
+            best, cfg=cfg, balance_usd=vb_control, risk_pct=1.0, blocked_reason=None
+        )
+        assert vb_control == 5_000.0
+        assert lot_control == pytest.approx(lot_full / 2, abs=0.01)
+
+    def test_treatment_leg_sized_against_half_balance(self, monkeypatch):
+        """Treatment (suffix="_macro") at default 50/50 also sees balance/2."""
+        monkeypatch.delenv("SMC_VIRTUAL_BALANCE_SPLIT", raising=False)
+        from smc.config import SMCConfig
+        cfg_app = SMCConfig()
+        cfg = get_instrument_config("XAUUSD")
+        best = _FakeRangeSetup(entry_price=2350.0, stop_loss=2348.0)
+
+        vb_treat = cfg_app.virtual_balance_for("_macro", 10_000.0)
+        lot_treat = compute_live_position_size(
+            best, cfg=cfg, balance_usd=vb_treat, risk_pct=1.0, blocked_reason=None
+        )
+        assert vb_treat == 5_000.0
+        assert lot_treat == pytest.approx(0.25, abs=0.01)
+
+    def test_uneven_split_70_30(self, monkeypatch):
+        """Uneven split gives control 70% and treatment 30% of the balance."""
+        monkeypatch.setenv(
+            "SMC_VIRTUAL_BALANCE_SPLIT",
+            '{"": 0.7, "_macro": 0.3}',
+        )
+        from smc.config import SMCConfig
+        cfg_app = SMCConfig()
+        cfg = get_instrument_config("XAUUSD")
+        best = _FakeRangeSetup(entry_price=2350.0, stop_loss=2348.0)
+
+        vb_control = cfg_app.virtual_balance_for("", 10_000.0)
+        vb_treat = cfg_app.virtual_balance_for("_macro", 10_000.0)
+        assert vb_control == 7_000.0
+        assert vb_treat == 3_000.0
+
+        lot_control = compute_live_position_size(
+            best, cfg=cfg, balance_usd=vb_control, risk_pct=1.0, blocked_reason=None
+        )
+        lot_treat = compute_live_position_size(
+            best, cfg=cfg, balance_usd=vb_treat, risk_pct=1.0, blocked_reason=None
+        )
+        # Full-balance 1% of $10k = 0.5 lot.  vb scales proportionally.
+        assert lot_control == pytest.approx(0.35, abs=0.01)
+        assert lot_treat == pytest.approx(0.15, abs=0.01)
+
+    def test_demo_1000_usd_dual_leg_sizing_capped(self, monkeypatch):
+        """Real scenario: $1000.67 TMGM demo → each leg ~$500 virtual.
+
+        Regression guard: the treatment leg must NOT treat the full $1000 as
+        its own budget; that would double the effective account risk.
+        """
+        monkeypatch.delenv("SMC_VIRTUAL_BALANCE_SPLIT", raising=False)
+        from smc.config import SMCConfig
+        cfg_app = SMCConfig()
+        cfg = get_instrument_config("XAUUSD")
+        best = _FakeRangeSetup(entry_price=2350.0, stop_loss=2347.0)  # 300 pt
+
+        control_vb = cfg_app.virtual_balance_for("", 1000.67)
+        treatment_vb = cfg_app.virtual_balance_for("_macro", 1000.67)
+        # Both should be ~$500.
+        assert control_vb == pytest.approx(500.335, abs=0.01)
+        assert treatment_vb == pytest.approx(500.335, abs=0.01)
+
+        lot = compute_live_position_size(
+            best, cfg=cfg, balance_usd=control_vb, risk_pct=1.0, blocked_reason=None
+        )
+        # 1% of $500 = $5 / (300 pt * $1/pt) = 0.016... → rounded to 0.01 or 0.02
+        assert lot > 0.0
+        assert lot < 0.05  # sanity: dual-leg sizing on $1k demo stays tiny
+
+    def test_unknown_suffix_still_halves_balance(self):
+        """A typo'd suffix defaults to 0.5 split so the leg doesn't silently
+        see the full account."""
+        from smc.config import SMCConfig
+        cfg_app = SMCConfig()
+        assert cfg_app.virtual_balance_for("_typo", 1000.0) == 500.0
