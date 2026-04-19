@@ -94,6 +94,10 @@ class MultiTimeframeAggregator:
         self._regime_cache = regime_cache
         self._zone_cooldowns: dict[tuple[float, float, str], datetime] = {}
         self._active_zones: set[tuple[float, float, str]] = set()
+        # Round 4 Alt-B W2: optional macro overlay bias ∈ [-0.3, +0.3].
+        # Set by live_demo.py via set_macro_bias() at the start of each cycle.
+        # Default 0.0 = no-op; backward-compatible with all existing callers.
+        self._macro_bias: float = 0.0
         # If the detector was not created with a swing_length_map,
         # inject the default one so all aggregator pipelines benefit.
         if not detector.swing_length_map:
@@ -156,6 +160,22 @@ class MultiTimeframeAggregator:
     def clear_active_zones(self) -> None:
         """Clear all active zone tracking. Called between walk-forward windows."""
         self._active_zones.clear()
+
+    def set_macro_bias(self, macro_bias: float) -> None:
+        """Set the macro overlay bias for the next ``generate_setups`` call.
+
+        Called by ``live_demo.py`` at the start of each cycle (when
+        ``macro_enabled=True``) to inject the macro signal from
+        ``MacroLayer.compute_macro_bias``.  The value is forwarded to
+        ``score_confluence`` as the ``macro_bias`` argument.
+
+        Parameters
+        ----------
+        macro_bias:
+            Aggregated macro bias ∈ [-0.3, +0.3].  0.0 means no overlay
+            (backward-compatible default).
+        """
+        self._macro_bias = float(macro_bias)
 
     def generate_setups(
         self,
@@ -324,8 +344,8 @@ class MultiTimeframeAggregator:
                 zone_rejects["trigger_filter"] += 1
                 continue
 
-            # Step 5: Score confluence
-            conf_score = score_confluence(bias, zone, entry)
+            # Step 5: Score confluence (+ optional macro overlay bias)
+            conf_score = score_confluence(bias, zone, entry, macro_bias=self._macro_bias)
 
             if conf_score < min_confluence:
                 zone_rejects["confluence_low"] += 1

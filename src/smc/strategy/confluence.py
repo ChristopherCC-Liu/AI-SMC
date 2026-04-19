@@ -172,6 +172,7 @@ def score_confluence(
     bias: BiasDirection,
     zone: TradeZone,
     entry: EntrySignal,
+    macro_bias: float = 0.0,
 ) -> float:
     """Compute a multi-factor confluence score for a trade setup.
 
@@ -183,11 +184,27 @@ def score_confluence(
         H1 trade zone from ``scan_zones``.
     entry:
         M15 entry signal from ``check_entry``.
+    macro_bias:
+        Optional macro overlay contribution in [-0.3, +0.3].  Added to the
+        weighted confluence sum in a direction-aware manner before clamping.
+        When the SMC bias direction and macro bias sign agree the score is
+        boosted; when they disagree the score is penalised.  Default ``0.0``
+        means no overlay — backward-compatible no-op.
 
     Returns
     -------
     float
         Confluence score in [0.0, 1.0]. Only setups >= 0.45 are tradeable.
+
+    Notes
+    -----
+    Direction-aware bonus logic (Alt-B Round 4 W2):
+
+    * ``bias_sign = +1`` if SMC bias is bullish, ``-1`` if bearish, ``0`` if neutral.
+    * ``directional_bonus = bias_sign * macro_bias``
+    * Aligned (same sign):  adds positive bonus → higher score.
+    * Opposed (opposite sign): subtracts → lower score.
+    * Neutral SMC bias: ``bias_sign = 0`` → macro_bias has no effect (no phantom signal).
     """
     htf_score = _score_htf_alignment(bias)
     zone_score = _score_zone_quality(zone)
@@ -202,5 +219,11 @@ def score_confluence(
         + _W_RR_RATIO * rr_score
         + _W_LIQUIDITY * liq_score
     )
+
+    # Directional macro bonus: applied only when SMC bias has a direction.
+    # bias_sign encodes agreement/disagreement with the macro signal.
+    if macro_bias != 0.0 and bias.direction != "neutral":
+        bias_sign = 1.0 if bias.direction == "bullish" else -1.0
+        raw += bias_sign * macro_bias
 
     return round(min(1.0, max(0.0, raw)), 3)

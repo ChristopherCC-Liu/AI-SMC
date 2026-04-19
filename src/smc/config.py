@@ -228,6 +228,28 @@ class SMCConfig(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # Macro Overlay (Round 4 Alt-B)
+    # ------------------------------------------------------------------
+    macro_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable macro overlay (COT/TIPS/DXY) in confluence scoring.  "
+            "Default False for production safety during paper A/B testing.  "
+            "Set SMC_MACRO_ENABLED=true (or ENABLE_MACRO=1 via shell alias) "
+            "to activate the treatment leg."
+        ),
+    )
+    macro_cache_ttl_hours: int = Field(
+        default=24,
+        ge=1,
+        description="TTL for macro data cache in hours. 24h suits weekly COT + daily yields.",
+    )
+    fred_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="FRED API key for TIPS real-yield source (DFII10 series).",
+    )
+
+    # ------------------------------------------------------------------
     # LLM (Phase 3+)
     # ------------------------------------------------------------------
     anthropic_api_key: SecretStr = Field(

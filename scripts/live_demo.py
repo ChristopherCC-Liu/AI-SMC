@@ -157,6 +157,8 @@ from smc.risk.consec_loss_halt import ConsecLossHalt
 from smc.risk.drawdown_guard import DrawdownGuard
 from smc.risk.margin_cap import check_margin_cap
 from smc.risk.live_position_sizer import compute_live_position_size
+# Round 4 Alt-B W2: macro overlay (COT / TIPS / DXY)
+from smc.ai.macro_layer import MacroLayer
 
 # ---------------------------------------------------------------------------
 # Per-symbol data paths (populated in main() after argparse).
@@ -744,6 +746,29 @@ def main():
 
     detector = SMCDetector(swing_length=10)
     aggregator = MultiTimeframeAggregator(detector=detector, ai_regime_enabled=False)
+
+    # Round 4 Alt-B W2: load SMCConfig for macro overlay settings.
+    # SMCConfig reads env vars (SMC_* prefix) and .env.  InstrumentConfig (cfg)
+    # is per-symbol; SMCConfig carries cross-cutting settings like macro_enabled.
+    from smc.config import SMCConfig as _SMCConfig
+    _smc_cfg = _SMCConfig()
+    _macro_flag: bool = _smc_cfg.macro_enabled
+    _fred_key_val: str = _smc_cfg.fred_api_key.get_secret_value()
+
+    # Round 4 Alt-B W2: initialise MacroLayer once per process.
+    # Cache is per-symbol so XAUUSD and BTCUSD processes don't race on
+    # the same Parquet files.
+    macro_layer = MacroLayer(
+        cache_dir=DATA_ROOT / "macro",
+        fred_api_key=_fred_key_val or None,
+        cache_ttl_hours=_smc_cfg.macro_cache_ttl_hours,
+    )
+    log_info(
+        "macro_layer_init",
+        macro_enabled=_macro_flag,
+        cache_dir=str(DATA_ROOT / "macro"),
+    )
+
     # Round 5 T3 (dual-symbol-audit P0): inject cfg + per-symbol cooldown path
     # so BTC doesn't silently run XAU params (Donchian 48 vs 24, width 200pts vs
     # 2% pct, boundary 0.30 vs 0.25, guards 800/400 vs 1500, RR 1.2 vs 1.5).
@@ -997,6 +1022,46 @@ def main():
             h4_snapshot = detector.detect(h4_df, Timeframe.H4) if h4_df is not None and len(h4_df) > 0 else None
             htf_bias = compute_htf_bias(d1_snapshot, h4_snapshot)
             h1_atr = aggregator._compute_h1_atr(h1_df)
+
+            # 5a. Round 4 Alt-B W2: compute macro overlay bias (config-gated).
+            # Runs BEFORE generate_setups so macro_bias is available for scoring.
+            # Failure is non-fatal: log warning and proceed with 0.0 (baseline mode).
+            _macro_enabled = _macro_flag
+            macro_bias_value: float = 0.0
+            _macro_components: dict = {"dxy": 0.0, "cot": 0.0, "yield": 0.0}
+            if _macro_enabled:
+                try:
+                    _mb = macro_layer.compute_macro_bias(instrument=cfg.symbol)
+                    macro_bias_value = _mb.total_bias
+                    _macro_components = {
+                        "dxy": _mb.dxy_bias,
+                        "cot": _mb.cot_bias,
+                        "yield": _mb.yield_bias,
+                    }
+                    log_info(
+                        "macro_bias_computed",
+                        cycle=cycle,
+                        total_bias=round(macro_bias_value, 4),
+                        direction=_mb.direction,
+                        sources_available=_mb.sources_available,
+                        cot=_mb.cot_bias,
+                        yield_b=_mb.yield_bias,
+                        dxy=_mb.dxy_bias,
+                    )
+                    print(
+                        f"  Macro bias: {macro_bias_value:+.4f} "
+                        f"(dir={_mb.direction}, sources={_mb.sources_available})"
+                    )
+                except Exception as _macro_exc:
+                    log_warn(
+                        "macro_bias_fetch_failed",
+                        cycle=cycle,
+                        exc=str(_macro_exc)[:120],
+                    )
+                    macro_bias_value = 0.0
+
+            # 5b. Thread macro_bias into aggregator for this cycle.
+            aggregator.set_macro_bias(macro_bias_value)
 
             # 5. Strategy (v1 trending setups — always generated)
             setups = aggregator.generate_setups(data, price)
@@ -1428,6 +1493,10 @@ def main():
                         "htf_bias_conf": round(float(getattr(htf_bias, "confidence", 0.0) or 0.0), 3),
                         "htf_bias_tier": htf_bias_tier(float(getattr(htf_bias, "confidence", 0.0) or 0.0)),
                         "position_size_lots": _journal_lots,
+                        # Round 4 Alt-B W2: macro overlay fields for A/B analysis
+                        "macro_bias_value": round(macro_bias_value, 4),
+                        "macro_enabled": _macro_enabled,
+                        "macro_components": dict(_macro_components),
                     }
                     with open(JOURNAL_PATH, "a") as f:
                         f.write(json.dumps(log_entry) + "\n")
