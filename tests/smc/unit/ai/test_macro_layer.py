@@ -53,10 +53,17 @@ def _make_external_context(
 
 
 class TestComputeMacroBias:
-    def test_all_sources_fail_returns_neutral(self, tmp_path) -> None:
-        """When all 3 sources fail (COT/yield NotImplemented, DXY unavailable)
-        the layer must return neutral bias with 0 sources, never raise."""
+    def test_all_sources_fail_returns_neutral(self, tmp_path, monkeypatch) -> None:
+        """When all 3 sources fail (COT fetch returns None, TIPS returns [],
+        DXY unavailable) the layer must return neutral bias with 0 sources,
+        never raise.
+
+        COT and TIPS are explicitly stubbed to None/[] so this is a genuine
+        unit test — no network dependency.
+        """
         layer = MacroLayer(cache_dir=tmp_path)
+        monkeypatch.setattr(layer, "_safe_cot_bias", lambda _: None)
+        monkeypatch.setattr(layer, "_safe_yield_bias", lambda: None)
         with patch.object(
             layer._external,
             "fetch",
@@ -71,9 +78,14 @@ class TestComputeMacroBias:
         assert bias.yield_bias == 0.0
         assert bias.dxy_bias == 0.0
 
-    def test_dxy_weakening_contributes_positive_bias(self, tmp_path) -> None:
-        """USD weakening → gold bullish → positive bias."""
+    def test_dxy_weakening_contributes_positive_bias(self, tmp_path, monkeypatch) -> None:
+        """USD weakening → gold bullish → positive bias.
+
+        COT and TIPS stubbed so only DXY contributes.
+        """
         layer = MacroLayer(cache_dir=tmp_path)
+        monkeypatch.setattr(layer, "_safe_cot_bias", lambda _: None)
+        monkeypatch.setattr(layer, "_safe_yield_bias", lambda: None)
         with patch.object(
             layer._external,
             "fetch",
@@ -81,15 +93,17 @@ class TestComputeMacroBias:
         ):
             bias = layer.compute_macro_bias("XAUUSD")
 
-        assert bias.sources_available == 1  # only DXY implemented
+        assert bias.sources_available == 1  # only DXY in this scenario
         assert bias.dxy_bias == 0.05
         assert bias.total_bias == 0.05
         # 0.05 is exactly at the direction threshold → neutral
         assert bias.direction == "neutral"
 
-    def test_dxy_strengthening_contributes_negative_bias(self, tmp_path) -> None:
+    def test_dxy_strengthening_contributes_negative_bias(self, tmp_path, monkeypatch) -> None:
         """USD strengthening → gold bearish → negative bias."""
         layer = MacroLayer(cache_dir=tmp_path)
+        monkeypatch.setattr(layer, "_safe_cot_bias", lambda _: None)
+        monkeypatch.setattr(layer, "_safe_yield_bias", lambda: None)
         with patch.object(
             layer._external,
             "fetch",
@@ -101,9 +115,11 @@ class TestComputeMacroBias:
         assert bias.total_bias == -0.05
         assert bias.direction == "neutral"  # at threshold, not beyond
 
-    def test_dxy_flat_contributes_zero(self, tmp_path) -> None:
+    def test_dxy_flat_contributes_zero(self, tmp_path, monkeypatch) -> None:
         """Flat DXY → zero bias but source is still counted as available."""
         layer = MacroLayer(cache_dir=tmp_path)
+        monkeypatch.setattr(layer, "_safe_cot_bias", lambda _: None)
+        monkeypatch.setattr(layer, "_safe_yield_bias", lambda: None)
         with patch.object(
             layer._external,
             "fetch",
@@ -116,9 +132,11 @@ class TestComputeMacroBias:
         assert bias.direction == "neutral"
         assert bias.sources_available == 1  # DXY fetched successfully, even if 0
 
-    def test_result_is_frozen_dataclass(self, tmp_path) -> None:
+    def test_result_is_frozen_dataclass(self, tmp_path, monkeypatch) -> None:
         """MacroBias must be immutable per project coding-style rules."""
         layer = MacroLayer(cache_dir=tmp_path)
+        monkeypatch.setattr(layer, "_safe_cot_bias", lambda _: None)
+        monkeypatch.setattr(layer, "_safe_yield_bias", lambda: None)
         with patch.object(
             layer._external,
             "fetch",

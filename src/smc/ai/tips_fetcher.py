@@ -5,11 +5,19 @@ Constant Maturity) observations from the FRED API, computes a
 20-day directional change, and maps it to a bias float in
 [-0.10, +0.10].
 
-Data source:
+Primary source:
     FRED API:   https://api.stlouisfed.org/fred/series/observations
     Series:     DFII10
-    Auth:       FRED_API_KEY environment variable (free key)
+    Auth:       FRED_API_KEY environment variable
+                (free registration: https://fred.stlouisfed.org/docs/api/api_key.html)
     Cost:       Free.
+
+Fallback source (no API key needed):
+    yfinance TIP ETF ("TIP", iShares TIPS Bond ETF).  When FRED is
+    unreachable or no key is configured, the fetcher pulls 30 trading
+    days of TIP closes and converts them into a synthetic real-yield
+    series.  TIP price is inversely correlated with real yields, so we
+    invert the change to preserve the DFII10 sign convention.
 
 Signal math (per plan §3):
     recent_5d_avg  = mean(newest 5 valid observations)
@@ -25,7 +33,9 @@ Signal math (per plan §3):
 
 Cache strategy:
     Parquet file at ``data/macro/tips_history.parquet``.
-    Refreshed once per UTC calendar day.
+    Refreshed once per UTC calendar day.  The cache stores a ``source``
+    marker ("fred" or "tip_etf_proxy") so operators can tell which
+    backend produced the on-disk series.
 
 Usage::
 
@@ -75,6 +85,22 @@ _STRONG_RISE_THRESHOLD = 0.25    # yields up 25bp → gold strongly bearish
 
 # Cache refresh: once per UTC calendar day
 _CACHE_TTL_HOURS = 24
+
+# yfinance fallback: TIP ETF (iShares TIPS Bond Fund).  Price is inversely
+# correlated with real yields — when yields fall, TIP rises.  We invert the
+# percentage-point change so the synthetic series points in the same
+# direction as DFII10 (yield-level delta in pp).
+_TIP_ETF_TICKER = "TIP"
+# Magnitude scale: TIP daily % changes run ~0.05–0.5%.  Mapping ``-1 * pct``
+# to pp units keeps the downstream thresholds (±0.10, ±0.25) meaningful —
+# a 0.3% TIP price move typically corresponds to ~0.10 pp real-yield move
+# on the 10Y.  This is an intentionally conservative proxy, not a replacement
+# for the true DFII10 series.
+_TIP_ETF_HISTORY_PERIOD = "30d"
+
+# Cache provenance markers
+_SOURCE_FRED = "fred"
+_SOURCE_TIP_PROXY = "tip_etf_proxy"
 
 
 def compute_tips_yield_change(history: list[float]) -> float | None:
@@ -185,9 +211,14 @@ class TIPSFetcher:
     def fetch_history(self, days: int | None = None) -> list[float]:
         """Return DFII10 values in newest-first order.
 
-        Loads from Parquet cache when still fresh (same UTC day).
-        On cache miss or stale, fetches from FRED.  On any FRED failure,
-        returns stale cache if available, else empty list.
+        Loads from Parquet cache when still fresh (same UTC day).  On
+        cache miss or stale data, attempts the following sources in order:
+
+        1. FRED DFII10 — requires ``FRED_API_KEY``.
+        2. yfinance TIP ETF proxy — always attempted if FRED is
+           unavailable.  Produces a synthetic real-yield series with the
+           same sign convention as DFII10.
+        3. Stale on-disk cache (if present) as last resort.
 
         Parameters
         ----------
@@ -199,7 +230,7 @@ class TIPSFetcher:
         list[float]
             Values in newest-first order, with ``"."`` missing entries
             already removed.  May be shorter than ``days`` when data
-            is unavailable.
+            is unavailable.  Empty list only when every source failed.
         """
         limit = days or self._days
 
@@ -208,22 +239,34 @@ class TIPSFetcher:
             logger.debug("TIPS: returning fresh cache (%d rows)", len(cached))
             return self._extract_values(cached, limit)
 
-        if not self._api_key:
-            logger.debug("TIPS: no FRED_API_KEY; returning stale cache or empty list")
-            if cached is not None:
-                return self._extract_values(cached, limit)
-            return []
+        # --- Primary: FRED DFII10 -----------------------------------------
+        if self._api_key:
+            logger.debug("TIPS: fetching from FRED API (series=%s, limit=%d)", _SERIES_ID, limit)
+            fresh = self._fetch_from_fred(limit)
+            if fresh:
+                self._save_cache(fresh, source=_SOURCE_FRED)
+                return fresh
+            logger.warning("TIPS: FRED returned no usable data; attempting yfinance TIP ETF fallback")
+        else:
+            logger.warning(
+                "TIPS: FRED_API_KEY not configured; using yfinance TIP ETF fallback. "
+                "Register a free key at https://fred.stlouisfed.org/docs/api/api_key.html "
+                "for a more precise real-yield signal."
+            )
 
-        logger.debug("TIPS: fetching from FRED API (series=%s, limit=%d)", _SERIES_ID, limit)
-        fresh = self._fetch_from_fred(limit)
-        if fresh is None:
-            if cached is not None:
-                logger.warning("TIPS: FRED fetch failed; returning stale cache (%d rows)", len(cached))
-                return self._extract_values(cached, limit)
-            return []
+        # --- Fallback: yfinance TIP ETF proxy -----------------------------
+        proxy = self._fetch_from_tip_etf(limit)
+        if proxy:
+            self._save_cache(proxy, source=_SOURCE_TIP_PROXY)
+            return proxy
 
-        self._save_cache(fresh)
-        return fresh
+        # --- Last resort: stale cache -------------------------------------
+        if cached is not None:
+            logger.warning("TIPS: all live fetchers failed; returning stale cache (%d rows)", len(cached))
+            return self._extract_values(cached, limit)
+
+        logger.warning("TIPS: all sources failed (FRED + TIP ETF + cache); returning empty list")
+        return []
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -243,10 +286,74 @@ class TIPSFetcher:
             }
             resp = requests.get(_FRED_URL, params=params, timeout=self._fetch_timeout)
             resp.raise_for_status()
-            return self._parse_fred_response(resp.json())
-        except Exception:
-            logger.debug("TIPS: FRED fetch failed", exc_info=True)
+            parsed = self._parse_fred_response(resp.json())
+            if parsed is None:
+                logger.warning("TIPS: FRED response parsed to no usable observations")
+            return parsed
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("TIPS: FRED fetch failed (series=%s): %s", _SERIES_ID, exc)
             return None
+
+    def _fetch_from_tip_etf(self, limit: int) -> list[float] | None:
+        """Return a synthetic DFII10-like series derived from TIP ETF closes.
+
+        TIP (iShares TIPS Bond ETF) closes move inversely with real yields.
+        We convert each daily close into a day-over-day percentage change,
+        invert the sign so a rising real-yield maps to a positive number
+        (matching FRED convention), and return the newest-first list.
+
+        The resulting series is expressed in percentage points of daily
+        real-yield delta — small but ordinally comparable to DFII10 daily
+        changes.  The downstream :func:`compute_tips_yield_change` 5d/10d
+        averaging amplifies the signal into the ±0.10 / ±0.25 pp bands.
+
+        Returns
+        -------
+        list[float] | None
+            Newest-first list, or None when yfinance is unavailable /
+            returned insufficient rows.
+        """
+        try:
+            import yfinance as yf  # type: ignore[import-untyped]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("TIPS: yfinance unavailable for TIP-ETF fallback: %s", exc)
+            return None
+
+        try:
+            ticker = yf.Ticker(_TIP_ETF_TICKER)
+            hist = ticker.history(period=_TIP_ETF_HISTORY_PERIOD)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("TIPS: yfinance TIP history fetch failed: %s", exc)
+            return None
+
+        if hist is None or getattr(hist, "empty", True) or "Close" not in hist.columns:
+            logger.warning("TIPS: yfinance returned empty TIP ETF history")
+            return None
+
+        closes = [float(c) for c in hist["Close"].tolist() if c is not None]
+        if len(closes) < 2:
+            logger.warning("TIPS: TIP ETF history too short (%d rows)", len(closes))
+            return None
+
+        # closes are oldest-first from yfinance; convert to day-over-day
+        # percentage change then invert sign so "yields up → positive".
+        deltas: list[float] = []
+        for i in range(1, len(closes)):
+            prev = closes[i - 1]
+            curr = closes[i]
+            if prev <= 0:
+                continue
+            pct_change = (curr - prev) / prev * 100.0  # percent of price
+            # Invert sign: TIP up ⇒ yields down ⇒ negative yield delta
+            deltas.append(-pct_change)
+
+        if len(deltas) < 2:
+            logger.warning("TIPS: TIP ETF delta series too short after cleaning")
+            return None
+
+        # Return newest-first to match FRED's sort order.
+        newest_first = list(reversed(deltas))
+        return newest_first[:limit]
 
     @staticmethod
     def _parse_fred_response(data: dict) -> list[float] | None:
@@ -284,8 +391,8 @@ class TIPSFetcher:
             import polars as pl
 
             return pl.read_parquet(self._cache_path)
-        except Exception:
-            logger.debug("TIPS: cache read failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("TIPS: cache read failed at %s: %s", self._cache_path, exc)
             return None
 
     @staticmethod
@@ -306,8 +413,19 @@ class TIPSFetcher:
         except Exception:
             return True
 
-    def _save_cache(self, values: list[float]) -> None:
-        """Persist values list to Parquet with a fetch-timestamp row."""
+    def _save_cache(self, values: list[float], *, source: str = _SOURCE_FRED) -> None:
+        """Persist values list to Parquet with a fetch-timestamp row.
+
+        Parameters
+        ----------
+        values:
+            Newest-first numeric series to persist.
+        source:
+            Origin marker — either :data:`_SOURCE_FRED` or
+            :data:`_SOURCE_TIP_PROXY`.  Stored in a column alongside the
+            values so operators can inspect provenance via ``polars`` or
+            ``parquet-tools``.
+        """
         try:
             import polars as pl
 
@@ -316,12 +434,18 @@ class TIPSFetcher:
                 {
                     "value": values,
                     "fetched_at_utc": [now_str] * len(values),
+                    "source": [source] * len(values),
                 }
             )
             df.write_parquet(self._cache_path)
-            logger.debug("TIPS: saved %d rows to cache at %s", len(values), self._cache_path)
-        except Exception:
-            logger.debug("TIPS: cache write failed", exc_info=True)
+            logger.debug(
+                "TIPS: saved %d rows to cache at %s (source=%s)",
+                len(values),
+                self._cache_path,
+                source,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("TIPS: cache write failed at %s: %s", self._cache_path, exc)
 
     @staticmethod
     def _extract_values(df: pl.DataFrame, limit: int) -> list[float]:

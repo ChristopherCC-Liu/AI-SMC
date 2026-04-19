@@ -46,6 +46,17 @@ _VIX_ELEVATED = 30.0
 _DXY_LOOKBACK_DAYS = 5
 _DXY_DIRECTION_THRESHOLD_PCT = 0.3
 
+# yfinance ticker fallback chain for DXY.
+#   DX-Y.NYB — ICE Dollar Index spot (primary, 1st-party Yahoo listing)
+#   DX=F     — ICE Dollar Index front-month future (backup, sometimes delisted)
+#   UUP      — Invesco DB US Dollar Index Bullish Fund ETF (ETF proxy,
+#              positively correlated with DXY; used only as last resort).
+#
+# If a VPS IP is rate-limited or blocked from one Yahoo backend (404 /
+# empty frame), the next ticker is attempted.  Each failure is logged at
+# WARNING so operators can diagnose which specific source broke.
+_DXY_TICKERS: tuple[str, ...] = ("DX-Y.NYB", "DX=F", "UUP")
+
 
 def _classify_vix_regime(vix: float) -> str:
     """Classify VIX level into a regime category."""
@@ -74,53 +85,88 @@ def _fetch_vix() -> tuple[float | None, str | None]:
         ticker = yf.Ticker("^VIX")
         hist = ticker.history(period="1d")
         if hist.empty:
+            logger.warning("VIX fetch: yfinance returned empty history for ^VIX")
             return None, None
         vix = float(hist["Close"].iloc[-1])
         return vix, _classify_vix_regime(vix)
-    except Exception:
-        logger.debug("VIX fetch failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("VIX fetch failed (yfinance ^VIX): %s", exc)
         return None, None
 
 
-def _fetch_dxy() -> tuple[float | None, str]:
-    """Fetch DXY value and direction via yfinance.
+def _fetch_dxy_single(ticker_symbol: str) -> tuple[float | None, str]:
+    """Attempt a DXY fetch from one yfinance ticker.
 
-    Returns (dxy_value, dxy_direction).  Direction is determined by
-    comparing the latest close to the close N days ago.
+    Returns (value, direction).  Value is None if the ticker produced
+    no rows.  Direction follows the same 5-day lookback rule as
+    :func:`_fetch_dxy`.
     """
-    try:
-        import yfinance as yf  # noqa: F811
+    import yfinance as yf  # noqa: F811
 
-        ticker = yf.Ticker("DX-Y.NYB")
-        hist = ticker.history(period="10d")
-        if hist.empty or len(hist) < 2:
-            return None, "flat"
-        current = float(hist["Close"].iloc[-1])
-        lookback_idx = max(0, len(hist) - _DXY_LOOKBACK_DAYS - 1)
-        previous = float(hist["Close"].iloc[lookback_idx])
-        if previous <= 0:
-            return current, "flat"
-        pct_change = ((current - previous) / previous) * 100.0
-        if pct_change > _DXY_DIRECTION_THRESHOLD_PCT:
-            direction = "strengthening"
-        elif pct_change < -_DXY_DIRECTION_THRESHOLD_PCT:
-            direction = "weakening"
-        else:
-            direction = "flat"
-        return current, direction
-    except Exception:
-        logger.debug("DXY fetch failed", exc_info=True)
+    ticker = yf.Ticker(ticker_symbol)
+    hist = ticker.history(period="10d")
+    if hist.empty or len(hist) < 2:
         return None, "flat"
+    current = float(hist["Close"].iloc[-1])
+    lookback_idx = max(0, len(hist) - _DXY_LOOKBACK_DAYS - 1)
+    previous = float(hist["Close"].iloc[lookback_idx])
+    if previous <= 0:
+        return current, "flat"
+    pct_change = ((current - previous) / previous) * 100.0
+    if pct_change > _DXY_DIRECTION_THRESHOLD_PCT:
+        direction = "strengthening"
+    elif pct_change < -_DXY_DIRECTION_THRESHOLD_PCT:
+        direction = "weakening"
+    else:
+        direction = "flat"
+    return current, direction
+
+
+def _fetch_dxy() -> tuple[float | None, str]:
+    """Fetch DXY value and direction via yfinance with ticker fallback chain.
+
+    Tries tickers in :data:`_DXY_TICKERS` order (DX-Y.NYB → DX=F → UUP).
+    The first ticker to return a non-empty history wins.  Each failure
+    is logged at WARNING so a VPS-side outage can be diagnosed from logs.
+
+    Returns (dxy_value, dxy_direction).  Direction is ``"flat"`` when all
+    tickers fail, mirroring legacy behaviour so downstream callers never
+    have to handle a new error state.
+    """
+    last_exc: str | None = None
+    for ticker_symbol in _DXY_TICKERS:
+        try:
+            value, direction = _fetch_dxy_single(ticker_symbol)
+            if value is not None:
+                logger.debug("DXY fetch: %s → value=%.4f direction=%s", ticker_symbol, value, direction)
+                return value, direction
+            logger.warning(
+                "DXY fetch: yfinance returned empty history for ticker %s",
+                ticker_symbol,
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_exc = f"{ticker_symbol}: {exc}"
+            logger.warning("DXY fetch failed (yfinance %s): %s", ticker_symbol, exc)
+
+    if last_exc is not None:
+        logger.warning("DXY fetch: all tickers failed (last error: %s)", last_exc)
+    else:
+        logger.warning("DXY fetch: all tickers returned empty histories")
+    return None, "flat"
 
 
 def _fetch_real_rate() -> float | None:
     """Fetch US 10Y real rate from FRED (DFII10 series).
 
-    Requires FRED_API_KEY environment variable.  Returns None if
-    unavailable.
+    Requires ``FRED_API_KEY`` environment variable (free registration at
+    https://fred.stlouisfed.org/docs/api/api_key.html).  Returns None if
+    the key is missing or FRED is unreachable — callers that need a
+    yields-adjacent signal should use :class:`smc.ai.tips_fetcher.TIPSFetcher`
+    which provides a yfinance TIP-ETF fallback.
     """
     api_key = os.environ.get("FRED_API_KEY", "")
     if not api_key:
+        logger.debug("FRED real rate: FRED_API_KEY env var not set; skipping")
         return None
     try:
         import requests
@@ -138,13 +184,14 @@ def _fetch_real_rate() -> float | None:
         data = resp.json()
         observations = data.get("observations", [])
         if not observations:
+            logger.warning("FRED real rate: DFII10 response had no observations")
             return None
         value = observations[0].get("value", ".")
         if value == ".":
             return None
         return float(value)
-    except Exception:
-        logger.debug("FRED real rate fetch failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("FRED real rate fetch failed (DFII10): %s", exc)
         return None
 
 

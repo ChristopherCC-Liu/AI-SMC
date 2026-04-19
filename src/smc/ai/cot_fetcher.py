@@ -5,10 +5,20 @@ Fetches weekly COT data from the CFTC Socrata Open Data API
 percentage for XAU/COMEX futures.
 
 Data source:
-    Socrata endpoint: https://publicreporting.cftc.gov/resource/gpe5-46if.json
-    Market code:      088691 (GOLD - COMMODITY EXCHANGE INC.)
-    Release cadence:  Tuesday ~3:30pm ET for prior-Tuesday data (3-day lag)
+    Socrata endpoint: https://publicreporting.cftc.gov/resource/6dca-aqww.json
+                      (Legacy Futures-Only, weekly, includes COMEX Gold)
+    Filter field:     ``cftc_contract_market_code='088691'``
+                      (NOT ``cftc_commodity_code``; that field holds the
+                      group code "088" and returns 0 rows in this dataset.)
+    Release cadence:  Friday ~3:30pm ET for Tuesday-close data (3-day lag)
     Cost:             Free, no API key, no published rate limit.
+
+Historical note:
+    An earlier release pointed at the ``gpe5-46if`` (Traders in Financial
+    Futures) endpoint, which does NOT include physical commodities such as
+    gold — every call silently returned 0 rows.  The combination of wrong
+    endpoint + wrong field name + debug-only logging caused the gold signal
+    to be permanently neutral with no operator signal.
 
 Cache strategy:
     Parquet file at ``data/macro/cot_gold_history.parquet``.
@@ -36,11 +46,19 @@ __all__ = ["COTFetcher", "compute_cot_bias", "compute_cot_net_long_pct"]
 
 logger = logging.getLogger(__name__)
 
-# CFTC Socrata Open Data endpoint — Financial Futures Disaggregated
-_CFTC_URL = "https://publicreporting.cftc.gov/resource/gpe5-46if.json"
+# CFTC Socrata Open Data endpoint — Legacy Futures-Only report (includes
+# COMEX Gold).  Documented at
+# https://publicreporting.cftc.gov/d/6dca-aqww.
+_CFTC_URL = "https://publicreporting.cftc.gov/resource/6dca-aqww.json"
 
-# COMEX Gold CFTC market code
+# COMEX Gold contract-market code (stored in ``cftc_contract_market_code``)
 _GOLD_MARKET_CODE = "088691"
+
+# Polite User-Agent: CFTC Socrata does not require it, but some proxies
+# and CDNs reject default ``python-requests/*`` clients.  Identifying as
+# a known application makes audits easier and prevents 403 on strict
+# edge networks.
+_USER_AGENT = "AI-SMC/1.0 (macro overlay; +https://github.com/ChristopherCC-Liu/AI-SMC)"
 
 # Rolling window for percentile calculation (104 weeks ≈ 2 years)
 _ROLLING_WINDOW = 104
@@ -236,8 +254,8 @@ class COTFetcher:
             import polars as pl
 
             return pl.read_parquet(self._cache_path)
-        except Exception:
-            logger.debug("COT: cache read failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("COT: cache read failed at %s: %s", self._cache_path, exc)
             return None
 
     def _cache_needs_refresh(self, df: pl.DataFrame) -> bool:
@@ -269,12 +287,18 @@ class COTFetcher:
             return True
 
     def _fetch_from_cftc(self) -> pl.DataFrame | None:
-        """Fetch raw COT rows from CFTC Socrata, return parsed DataFrame."""
+        """Fetch raw COT rows from CFTC Socrata, return parsed DataFrame.
+
+        Uses the Legacy Futures-Only endpoint (6dca-aqww) filtered by
+        ``cftc_contract_market_code`` to isolate COMEX Gold.  Any HTTP,
+        JSON, or parse failure is logged at WARNING so operators can
+        diagnose VPS-side issues from logs alone.
+        """
         try:
             import requests
 
             params = {
-                "$where": f"cftc_commodity_code='{_GOLD_MARKET_CODE}'",
+                "$where": f"cftc_contract_market_code='{_GOLD_MARKET_CODE}'",
                 "$order": "report_date_as_yyyy_mm_dd DESC",
                 "$limit": str(_FETCH_LIMIT),
                 "$select": ",".join([
@@ -284,12 +308,34 @@ class COTFetcher:
                     "open_interest_all",
                 ]),
             }
-            resp = requests.get(_CFTC_URL, params=params, timeout=self._fetch_timeout)
+            headers = {
+                "User-Agent": _USER_AGENT,
+                "Accept": "application/json",
+            }
+            resp = requests.get(
+                _CFTC_URL,
+                params=params,
+                headers=headers,
+                timeout=self._fetch_timeout,
+            )
             resp.raise_for_status()
             rows = resp.json()
-            return self._parse_rows(rows)
-        except Exception:
-            logger.debug("COT: CFTC fetch failed", exc_info=True)
+            if not isinstance(rows, list):
+                logger.warning("COT: unexpected response shape from CFTC: %r", type(rows).__name__)
+                return None
+            if not rows:
+                logger.warning(
+                    "COT: CFTC returned 0 rows for contract_market_code=%s on %s",
+                    _GOLD_MARKET_CODE,
+                    _CFTC_URL,
+                )
+                return None
+            parsed = self._parse_rows(rows)
+            if parsed is None:
+                logger.warning("COT: parse yielded no records from %d raw rows", len(rows))
+            return parsed
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("COT: CFTC fetch failed (%s): %s", _CFTC_URL, exc)
             return None
 
     def _parse_rows(self, rows: list[dict]) -> pl.DataFrame | None:
@@ -389,7 +435,7 @@ class COTFetcher:
         try:
             combined.write_parquet(self._cache_path)
             logger.debug("COT: saved %d rows to cache at %s", len(combined), self._cache_path)
-        except Exception:
-            logger.debug("COT: cache write failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("COT: cache write failed at %s: %s", self._cache_path, exc)
 
         return combined
