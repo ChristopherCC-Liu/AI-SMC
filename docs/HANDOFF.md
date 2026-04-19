@@ -1,8 +1,54 @@
 # AI-SMC Developer Handoff
 
-**As of Sprint 10 — April 2026**
+**As of Sprint 10 — April 2026** | **Round 4 Re-Baseline — 2026-04-19**
 
 This document is the single source of truth for a developer taking over the AI-SMC project. Read this before touching any code.
+
+---
+
+## ⚠️ Round 4 Honest Re-Baseline (2026-04-19)
+
+**TL;DR**: The "PF 1.09–1.66" figure earlier in this document is **statistically misleading**. The production v10_v1 strategy's pooled performance across 15 walk-forward windows and 56 trades is **+$6.05 total PnL, PF 1.086** — statistically indistinguishable from zero. The PF 1.66 was a 45-trade small-sample window that regressed toward noise as the sample expanded.
+
+### Corrections to claims below
+
+| Section | Original Claim | Honest 2026 Re-baseline |
+|---------|---------------|------------------------|
+| L42 "Performance Expectations" | "Typical range: PF 1.09–1.66, WR 40–57%" | **Pooled production: PF 1.086, +$6.05 across 56 trades / 15 windows. 95% CI on WR: [28%, 54%]** |
+| L165 "Gate v10 v1 baseline" | "PF 1.09–1.66" | **Mean 1.086; individual windows span 0.6 to 3.9 but small-sample variance dominates** |
+| L281 "Gate 3 PF ≥ 1.3 over 60 days" | Suggested requirement | **Statistically incoherent — 10–30 trades over 60 days cannot estimate PF within ±0.4. Honest Gate 3 requires 12+ months live or 200+ trades** |
+
+### Why the earlier numbers were over-stated
+
+SMC directional mean-reversion on XAUUSD with current alpha architecture is **selection bias, not prediction**:
+
+1. `avg_win / avg_loss = 1.55` (asymmetric payoff) combined with restrictive RR gate produces apparent PF > 1
+2. Relaxing filters (Sprint 8 v8_v2, 135 trades) **collapses PF to 0.655, WR 28.9%** — confirming no directional edge
+3. The strategy harvests the asymmetric payoff behind the gate; remove the gate, expose a coin flip
+4. 5 structural weaknesses cannot be parameter-fixed:
+   - Selection bias masquerading as alpha
+   - Small-sample: 56 trades / 4 years → wide CI
+   - SMC is public/commoditized (YouTube 5M+ views, unmaintained PyPI lib used verbatim)
+   - 900s M15 cycle is adverse environment vs microsecond HFT flows
+   - Zero macro/fundamental dimension (real yields, DXY, COT positioning, ETF flows invisible)
+
+### Round 4 direction
+
+AI-SMC v1 is being **demoted from primary strategy to paper-only Alpha-C sleeve** pending Round 4 outcome. Retail ceiling for this architecture is Sharpe 0.5–0.8 and 15% annualized — **respectable engineering outcome, not a generational-wealth strategy**.
+
+The Round 4 strategic review (`.scratch/round4/ROUND-4-DECISION-v2.md`, 4 Opus subagent debate) recommends:
+
+1. **Alt B (1-month macro overlay fix)**: Wire the dormant `ai_regime_enabled` pipeline + COT + real-yield + DXY data into confluence. If PF moves from 1.086 → 1.25+ with larger trade count, SMC earns Alpha-C slot.
+2. **Alt A (pivot to SPX VRP @ IBKR)**: Blocked for $1000 account — PDT $25k requirement.
+3. **$1000 capital adaptation**: Continue AI-SMC Alpha-C paper + micro crypto funding arb probe ($500 allocation) + Alt B macro fix in parallel.
+
+### References
+
+- Full Round 4 debate artifacts: `.scratch/round4/`
+- Round 2 summary: `.scratch/audit-r2/summary.md`
+- Honest critique: `.scratch/round4/ai-smc-ceiling-critique.md`
+
+**If you're reading this doc in 2026+**: trust `.scratch/round4/ROUND-4-DECISION-v2.md` over the text below when they conflict. This preface is the Round 4 ground truth.
 
 ---
 
