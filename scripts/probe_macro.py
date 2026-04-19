@@ -113,16 +113,26 @@ def probe_tips_fetcher() -> None:
 def probe_dxy_fetcher() -> None:
     print()
     print("=" * 60)
-    print("DXY (ExternalContextFetcher)")
+    print("DXY (_fetch_dxy module-level + ExternalContextFetcher)")
     print("=" * 60)
+    try:
+        from smc.ai.external_context import _fetch_dxy
+
+        value, direction = _fetch_dxy()
+        print(f"  _fetch_dxy() returned: value={value!r}, direction={direction!r}")
+    except Exception as e:
+        print(f"  _fetch_dxy EXCEPTION: {e}")
+        traceback.print_exc()
+
     try:
         from smc.ai.external_context import ExternalContextFetcher
 
         fetcher = ExternalContextFetcher()
-        dxy = fetcher.fetch_dxy()
-        print(f"  fetch_dxy() returned: {dxy!r}")
+        ctx = fetcher.fetch()
+        print(f"  fetcher.fetch().dxy_value: {ctx.dxy_value!r}")
+        print(f"  fetcher.fetch().dxy_direction: {ctx.dxy_direction!r}")
     except Exception as e:
-        print(f"  EXCEPTION: {e}")
+        print(f"  fetcher.fetch() EXCEPTION: {e}")
         traceback.print_exc()
 
 
