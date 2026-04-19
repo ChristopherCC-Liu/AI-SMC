@@ -115,6 +115,22 @@ def probe_dxy_fetcher() -> None:
     print("=" * 60)
     print("DXY (_fetch_dxy module-level + ExternalContextFetcher)")
     print("=" * 60)
+
+    # Raw stooq test first to isolate network layer
+    try:
+        import requests
+        import datetime
+
+        today = datetime.date.today()
+        start = today - datetime.timedelta(days=7)
+        url = f"https://stooq.com/q/d/l/?s=^dxy&d1={start:%Y%m%d}&d2={today:%Y%m%d}&i=d"
+        print(f"  raw stooq URL: {url}")
+        r = requests.get(url, headers={"User-Agent": "AI-SMC/1.0"}, timeout=15)
+        print(f"  stooq status: {r.status_code}")
+        print(f"  stooq body[:300]: {r.text[:300]!r}")
+    except Exception as e:
+        print(f"  raw stooq EXCEPTION: {e}")
+
     try:
         from smc.ai.external_context import _fetch_dxy
 
