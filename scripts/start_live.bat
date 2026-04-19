@@ -11,5 +11,10 @@ set PYTHONIOENCODING=utf-8
 set PYTHONUNBUFFERED=1
 REM Round 4.6-X (USER CATCH): enable real MT5 order_send (demo account safe).
 set SMC_MT5_EXECUTE=1
+REM Round 4 v5 Option B: explicit override to prevent inheriting user-level
+REM SMC_MACRO_ENABLED=true set for treatment leg. Control MUST stay macro OFF
+REM to maintain the A/B baseline. Suffix empty = control journal path.
+set SMC_MACRO_ENABLED=false
+set SMC_JOURNAL_SUFFIX=
 cd /d C:\AI-SMC
 .venv\Scripts\python.exe scripts\live_demo.py >> logs\live_stdout.log 2>> logs\live_stderr.log
