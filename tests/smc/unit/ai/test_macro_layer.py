@@ -1,4 +1,4 @@
-"""Unit tests for smc.ai.macro_layer — Alt-B macro overlay W1D1-D3.
+"""Unit tests for smc.ai.macro_layer — Alt-B macro overlay W1D1-D5.
 
 Covers:
     - MacroLayer.compute_macro_bias aggregation math
@@ -7,9 +7,10 @@ Covers:
     - DXY source wiring through ExternalContextFetcher
     - Direction classification thresholds
     - COT fetcher: parse logic, signal math, network fallback (plan §2)
+    - TIPS real-yield fetcher: FRED parse, 20d formula, signal mapping,
+      network fallback (plan §3)
 
-COT source is now fully implemented.
-TIPS yield source is still a stub (NotImplementedError) — tests land in W1D3.
+All 3 macro sources are now fully implemented.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import pytest
 from smc.ai.cot_fetcher import COTFetcher, compute_cot_bias, compute_cot_net_long_pct
 from smc.ai.macro_layer import MacroBias, MacroLayer
 from smc.ai.models import ExternalContext
+from smc.ai.tips_fetcher import TIPSFetcher, compute_tips_bias, compute_tips_yield_change
 
 
 def _make_external_context(
@@ -177,11 +179,19 @@ class TestStubbedSourcesGracefulDegrade:
             with pytest.raises(RuntimeError, match="COT fetch returned no data"):
                 layer._cot_bias("XAUUSD")
 
-    def test_yield_bias_raises_not_implemented(self, tmp_path) -> None:
-        """TIPS yield source is intentionally stubbed until W1D3."""
+    def test_yield_bias_raises_runtime_on_empty_data(self, tmp_path) -> None:
+        """TIPS source raises RuntimeError when fetcher returns empty list.
+
+        No network + no FRED key + empty cache dir → TIPSFetcher returns []
+        → _yield_bias raises RuntimeError.
+        """
         layer = MacroLayer(cache_dir=tmp_path)
-        with pytest.raises(NotImplementedError):
-            layer._yield_bias()
+        with patch("smc.ai.macro_layer.TIPSFetcher") as mock_cls:
+            mock_instance = MagicMock()
+            mock_instance.fetch_history.return_value = []
+            mock_cls.return_value = mock_instance
+            with pytest.raises(RuntimeError, match="TIPS fetch returned no data"):
+                layer._yield_bias()
 
     def test_safe_cot_returns_none_on_fetch_failure(self, tmp_path) -> None:
         """Safe wrapper converts RuntimeError (no COT data) to None cleanly."""
@@ -193,9 +203,14 @@ class TestStubbedSourcesGracefulDegrade:
             result = layer._safe_cot_bias("XAUUSD")
         assert result is None
 
-    def test_safe_yield_returns_none(self, tmp_path) -> None:
+    def test_safe_yield_returns_none_when_no_data(self, tmp_path) -> None:
+        """_safe_yield_bias returns None when TIPSFetcher returns empty list."""
         layer = MacroLayer(cache_dir=tmp_path)
-        assert layer._safe_yield_bias() is None
+        with patch("smc.ai.macro_layer.TIPSFetcher") as mock_cls:
+            mock_instance = MagicMock()
+            mock_instance.fetch_history.return_value = []
+            mock_cls.return_value = mock_instance
+            assert layer._safe_yield_bias() is None
 
 
 # ---------------------------------------------------------------------------
@@ -450,5 +465,156 @@ class TestCOTNetworkFailFallback:
                     bias = layer.compute_macro_bias("XAUUSD")
 
         assert bias.cot_bias == 0.0
+        assert bias.sources_available == 0
+        assert bias.total_bias == 0.0
+
+
+# ---------------------------------------------------------------------------
+# TIPS real-yield fetcher — parse, formula, signal mapping, fallback (plan §3)
+# ---------------------------------------------------------------------------
+
+
+def _make_fred_observations(values: list[float | str]) -> dict:
+    """Build a mock FRED API JSON response from a list of values.
+
+    Parameters
+    ----------
+    values:
+        List of values (newest-first).  Use ``"."`` to simulate FRED
+        missing-value markers.
+    """
+    obs = []
+    for i, v in enumerate(values):
+        obs.append({
+            "realtime_start": "2026-01-01",
+            "realtime_end": "2026-04-19",
+            "date": f"2026-04-{19 - i:02d}",
+            "value": str(v),
+        })
+    return {"observations": obs}
+
+
+class TestTIPSFetcherParsesFredJson:
+    def test_tips_fetcher_parses_fred_json(self, tmp_path) -> None:
+        """Mock FRED JSON with 25 observations; verify parse returns expected floats.
+
+        Tests that:
+        - ``"."`` missing-value markers are skipped
+        - Values are returned newest-first as floats
+        - List length matches number of valid (non-``"."``) entries
+        """
+        raw_values: list[float | str] = [2.5, 2.4, ".", 2.3, 2.2,  # indices 0-4 (5 valid)
+                                          2.1, 2.0, 1.9, 1.8, 1.7,  # indices 5-9
+                                          1.6, 1.5, 1.4, 1.3, 1.2,  # indices 10-14
+                                          1.1, 1.0, 0.9, 0.8, 0.7,  # indices 15-19
+                                          0.6, 0.5, 0.4, 0.3, 0.2]  # indices 20-24
+        mock_data = _make_fred_observations(raw_values)
+        # 25 raw entries - 1 "." = 24 valid
+        result = TIPSFetcher._parse_fred_response(mock_data)
+        assert result is not None
+        assert len(result) == 24
+        # First value should be the most recent non-"." value (2.5)
+        assert abs(result[0] - 2.5) < 1e-9
+        # All values are floats
+        assert all(isinstance(v, float) for v in result)
+
+
+class TestTIPSRealYieldChange20d:
+    def test_tips_real_yield_change_20d_formula(self) -> None:
+        """Verify the 20d change formula: recent_5d_avg - older_20d_avg.
+
+        Build a synthetic 30-observation series (newest-first):
+        - indices 0–4  (recent 5d):  all 3.0 → avg = 3.0
+        - indices 15–24 (older 10d): all 2.0 → avg = 2.0
+        - expected change: 3.0 - 2.0 = +1.0 pp (yields rose → bearish)
+        """
+        history = (
+            [3.0] * 5   # recent indices 0–4
+            + [2.5] * 10  # intermediate indices 5–14
+            + [2.0] * 10  # older indices 15–24
+            + [1.5] * 5   # extra beyond window
+        )
+        change = compute_tips_yield_change(history)
+        assert change is not None
+        assert abs(change - 1.0) < 1e-9
+
+    def test_tips_yield_change_returns_none_when_history_too_short(self) -> None:
+        """Fewer than 25 values → older window (indices 15-24) is incomplete → None."""
+        history = [2.0] * 10  # only 10 values; older window starts at idx 15
+        change = compute_tips_yield_change(history)
+        assert change is None
+
+
+class TestTIPSStrongRiseReturnsBearishBias:
+    def test_tips_strong_rise_returns_bearish_bias(self) -> None:
+        """Real yield rising ≥ 0.25 pp → -0.10 (gold bearish).
+
+        Construct a history where recent avg = 2.50 and older avg = 2.00,
+        giving change = +0.50 pp ≥ +0.25 threshold → -0.10.
+        """
+        history = (
+            [2.50] * 5   # recent 5d
+            + [2.25] * 10  # intermediate
+            + [2.00] * 10  # older 10d
+        )
+        bias = compute_tips_bias(history)
+        assert bias == -0.10
+
+    def test_tips_mild_rise_returns_mild_bearish_bias(self) -> None:
+        """Real yield rising ≥ 0.10 pp but < 0.25 pp → -0.05."""
+        history = (
+            [2.15] * 5
+            + [2.05] * 10
+            + [2.00] * 10
+        )
+        bias = compute_tips_bias(history)
+        assert bias == -0.05
+
+
+class TestTIPSStrongFallReturnsBullishBias:
+    def test_tips_strong_fall_returns_bullish_bias(self) -> None:
+        """Real yield falling ≤ -0.25 pp → +0.10 (gold bullish).
+
+        Construct a history where recent avg = 1.50 and older avg = 2.00,
+        giving change = -0.50 pp ≤ -0.25 threshold → +0.10.
+        """
+        history = (
+            [1.50] * 5   # recent 5d
+            + [1.75] * 10  # intermediate
+            + [2.00] * 10  # older 10d
+        )
+        bias = compute_tips_bias(history)
+        assert bias == +0.10
+
+    def test_tips_mild_fall_returns_mild_bullish_bias(self) -> None:
+        """Real yield falling ≤ -0.10 pp but > -0.25 pp → +0.05."""
+        history = (
+            [1.85] * 5
+            + [1.92] * 10
+            + [2.00] * 10
+        )
+        bias = compute_tips_bias(history)
+        assert bias == +0.05
+
+
+class TestTIPSNetworkFailReturnsZero:
+    def test_tips_network_fail_returns_zero(self, tmp_path) -> None:
+        """Network failure + no FRED key + empty cache → _yield_bias raises
+        RuntimeError → _safe_yield_bias returns None → macro_layer contributes 0.0.
+
+        End-to-end path through MacroLayer with COT and DXY also patched out.
+        """
+        layer = MacroLayer(cache_dir=tmp_path, fred_api_key=None)
+
+        with patch("smc.ai.macro_layer.TIPSFetcher") as mock_tips_cls:
+            mock_tips = MagicMock()
+            mock_tips.fetch_history.return_value = []
+            mock_tips_cls.return_value = mock_tips
+
+            with patch.object(layer, "_safe_cot_bias", return_value=None):
+                with patch.object(layer, "_safe_dxy_bias", return_value=None):
+                    bias = layer.compute_macro_bias("XAUUSD")
+
+        assert bias.yield_bias == 0.0
         assert bias.sources_available == 0
         assert bias.total_bias == 0.0

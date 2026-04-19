@@ -8,14 +8,17 @@ Design principles:
     - Orthogonal to SMC: adds new signal dimensions, not re-tunes existing.
     - Graceful degradation: any fetcher failure → that source = 0.0.
     - Conservative: max absolute bias = 0.3 (cannot override strong SMC).
-    - Cache-first: 7-day Parquet cache for COT; 24h in-memory for DXY.
+    - Cache-first: 7-day Parquet cache for COT; daily Parquet for TIPS; 24h in-memory for DXY.
 
-Implementation status (Alt-B Round 4 W1D1-D3, 2026-04-19):
+Implementation status (Alt-B Round 4 W1D1-D5, 2026-04-19):
     - DXY source: implemented (reuses ``_fetch_dxy`` from external_context).
     - COT source: implemented via ``COTFetcher`` + 104-week rolling percentile.
       Contrarian at extremes (>90th → -0.10, <10th → +0.10), mild momentum
       in the 70th–90th / 10th–30th bands (±0.05), neutral in the middle.
-    - TIPS yield source: stub — see §3 of the plan doc (W1D3 scope).
+    - TIPS yield source: implemented via ``TIPSFetcher`` + FRED DFII10 series.
+      Computes ``recent_5d_avg - older_20d_avg`` in pp; inverse-correlation
+      mapping: yield rise → bearish gold, yield fall → bullish gold.
+      Thresholds: ±0.10 pp mild, ±0.25 pp strong.  1-day Parquet cache.
 
 COT branch behaviour:
     The COT component calls ``COTFetcher(cache_path=<cache_dir>/cot_gold_history.parquet).fetch()``
@@ -35,6 +38,29 @@ COT branch behaviour:
 
     Network failures or parse errors degrade to 0.0 (never raise).
 
+TIPS real-yield branch behaviour:
+    The TIPS component calls ``TIPSFetcher(cache_path=<cache_dir>/tips_history.parquet).fetch_history(30)``
+    to obtain up to 30 daily DFII10 observations.  Computes::
+
+        real_yield_change = mean(history[0:5]) - mean(history[15:25])
+
+    where history is sorted newest-first and ``"."`` missing values are removed.
+    Gold is inversely correlated with real yields (Erb & Harvey 2013):
+
+    +-----------------------------------+--------+
+    | Condition (pp change)             | Bias   |
+    +===================================+========+
+    | change ≤ -0.25 (sharp fall)       | +0.10  |
+    | change ≤ -0.10 (mild fall)        | +0.05  |
+    | change ≥ +0.25 (sharp rise)       | -0.10  |
+    | change ≥ +0.10 (mild rise)        | -0.05  |
+    | else (neutral)                    |  0.00  |
+    +-----------------------------------+--------+
+
+    Requires ``FRED_API_KEY`` env var.  Missing key or network failure
+    degrades to 0.0 (never raise).  1-day Parquet cache at
+    ``data/macro/tips_history.parquet``.
+
 Usage::
 
     layer = MacroLayer()
@@ -52,6 +78,7 @@ from typing import Literal
 
 from smc.ai.cot_fetcher import COTFetcher, compute_cot_bias
 from smc.ai.external_context import ExternalContextFetcher
+from smc.ai.tips_fetcher import TIPSFetcher, compute_tips_bias
 
 logger = logging.getLogger(__name__)
 
@@ -168,9 +195,6 @@ class MacroLayer:
     def _safe_yield_bias(self) -> float | None:
         try:
             return self._yield_bias()
-        except NotImplementedError:
-            logger.debug("Yield source not yet implemented; contributing 0.0")
-            return None
         except Exception:  # noqa: BLE001
             logger.debug("Real yield bias fetch failed", exc_info=True)
             return None
@@ -232,8 +256,40 @@ class MacroLayer:
         return compute_cot_bias(history_df)
 
     def _yield_bias(self) -> float:
-        """Compute real-yield change bias.  Not yet implemented (see plan §3)."""
-        raise NotImplementedError("Real yield fetcher scheduled for W1D3")
+        """Fetch DFII10 history and compute 20-day real-yield change bias.
+
+        Fetches up to 30 daily DFII10 observations from FRED via
+        ``TIPSFetcher``.  Computes the difference between the 5-day
+        recent average and a 10-day older average (indices 15–24 newest-first)
+        and maps it to a bias per plan §3.
+
+        Only meaningful for gold (XAUUSD).  Non-gold instruments can call
+        this safely — the signal is instrument-agnostic at fetch time and
+        callers are responsible for XAUUSD gating.
+
+        Returns
+        -------
+        float
+            Bias in [-0.10, +0.10].  Positive = real yields falling =
+            bullish gold.
+
+        Raises
+        ------
+        RuntimeError
+            If TIPS fetcher returns an empty list (no API key, no cache,
+            and no network).
+        """
+        cache_path = self._cache_dir / "tips_history.parquet"
+        fetcher = TIPSFetcher(
+            cache_path=cache_path,
+            fred_api_key=self._fred_api_key,
+        )
+        history = fetcher.fetch_history()
+
+        if not history:
+            raise RuntimeError("TIPS fetch returned no data")
+
+        return compute_tips_bias(history)
 
     def _dxy_bias(self) -> float:
         """Compute DXY change bias by reusing ExternalContext fetcher.
