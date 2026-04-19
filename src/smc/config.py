@@ -39,6 +39,11 @@ class SMCConfig(BaseSettings):
         case_sensitive=False,
         extra="ignore",
         populate_by_name=True,
+        # Windows .bat `set VAR=VAL` historically ships trailing whitespace
+        # up to `&&` line continuation or EOL, producing 'false ' (with space)
+        # that pydantic strict bool_parser rejects. Strip all leading/trailing
+        # whitespace on string inputs before type coercion.
+        str_strip_whitespace=True,
     )
 
     # ------------------------------------------------------------------
