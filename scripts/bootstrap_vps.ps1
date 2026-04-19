@@ -9,11 +9,13 @@
     and watchdogs fire every 5 minutes.
 
     Tasks registered:
-      \AI-SMC-Live                    — XAUUSD live_demo signal loop
+      \AI-SMC-Live                    — XAUUSD live_demo signal loop (control, macro OFF)
+      \AI-SMC-Live-Macro              — XAUUSD live_demo signal loop (treatment, macro ON)
       \AI-SMC-Live-BTC                — BTCUSD live_demo signal loop
       \AI-SMC-StrategyServer          — FastAPI signal server (port 8080)
       \AI-SMC-DashboardWeb            — Dashboard web server (port 8765)
       \AI-SMC-Watchdog                — XAUUSD three-axis watchdog (every 5 min)
+      \AI-SMC-Watchdog-LiveMacro      — XAUUSD macro leg watchdog (every 5 min)
       \AI-SMC-Watchdog-BTC            — BTCUSD three-axis watchdog (every 5 min)
       \AI-SMC-Watchdog-StrategyServer — FastAPI /healthz watchdog (every 5 min)
       \AI-SMC-Watchdog-DashboardWeb   — Dashboard /healthz watchdog (every 5 min)
@@ -175,6 +177,13 @@ $tasks = @(
                       -WorkingDir $InstallDir
     },
     @{
+        # Round 4 Alt-B W3: treatment leg — macro overlay ON, journal_macro/
+        Name    = "AI-SMC-Live-Macro"
+        Xml     = Get-ServiceTaskXml `
+                      -Command  "$InstallDir\scripts\start_live_macro.bat" `
+                      -WorkingDir $InstallDir
+    },
+    @{
         Name    = "AI-SMC-Live-BTC"
         Xml     = Get-ServiceTaskXml `
                       -Command  "$InstallDir\scripts\start_live_btc_signal_only.bat" `
@@ -195,6 +204,11 @@ $tasks = @(
     @{
         Name    = "AI-SMC-Watchdog"
         Xml     = Get-WatchdogTaskXml -Symbol "XAUUSD"
+    },
+    @{
+        # Round 4 Alt-B W3: treatment-leg watchdog — monitors live_state_macro.json
+        Name    = "AI-SMC-Watchdog-LiveMacro"
+        Xml     = Get-WatchdogTaskXml -Symbol "LiveMacro"
     },
     @{
         Name    = "AI-SMC-Watchdog-BTC"

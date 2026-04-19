@@ -36,7 +36,7 @@ param(
     [string]$InstallDir    = "C:\AI-SMC",
     [int]$StaleMinutes     = 20,
     [int]$GraceMinutes     = 10,
-    [ValidateSet("XAUUSD", "BTCUSD", "StrategyServer", "DashboardWeb")]
+    [ValidateSet("XAUUSD", "BTCUSD", "StrategyServer", "DashboardWeb", "LiveMacro")]
     [string]$Symbol        = "XAUUSD"
 )
 
@@ -45,9 +45,18 @@ $ErrorActionPreference = "Continue"
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-$dataRoot = Join-Path $InstallDir "data\$Symbol"
-$pidPath  = Join-Path $dataRoot  "live_demo.pid"
-$statePath = Join-Path $dataRoot "live_state.json"
+# Round 4 Alt-B W3: LiveMacro watches the macro treatment leg.
+# Its process is still live_demo.py (XAUUSD) but with SMC_JOURNAL_SUFFIX=_macro,
+# so the state file is live_state_macro.json (not live_state.json).
+if ($Symbol -eq "LiveMacro") {
+    $dataRoot  = Join-Path $InstallDir "data\XAUUSD"
+    $pidPath   = Join-Path $dataRoot  "live_demo.pid"   # shared with control (process-match uses env-var filter)
+    $statePath = Join-Path $dataRoot  "live_state_macro.json"
+} else {
+    $dataRoot  = Join-Path $InstallDir "data\$Symbol"
+    $pidPath   = Join-Path $dataRoot  "live_demo.pid"
+    $statePath = Join-Path $dataRoot  "live_state.json"
+}
 $logDir   = Join-Path $InstallDir "logs"
 $logPath  = Join-Path $logDir ("watchdog_{0}_smart.log" -f $Symbol.ToLower())
 
@@ -157,6 +166,11 @@ if ($Symbol -eq "DashboardWeb") {
 # ── Axis 1: process alive ─────────────────────────────────────────────────────
 # XAU default: live_demo.py without --symbol BTCUSD
 # BTC: live_demo.py with --symbol BTCUSD (or --symbol XAUUSD)
+# LiveMacro: live_demo.py (XAUUSD) with SMC_JOURNAL_SUFFIX=_macro env var.
+#   Because both XAU control and XAU macro processes share the same command line,
+#   we treat *any* XAUUSD live_demo process as "alive" for Axis 1 — the real
+#   health signal is the live_state_macro.json freshness check (Axis 3).
+#   On STALE we restart via Start-ScheduledTask AI-SMC-Live-Macro (not kill-all).
 
 Write-Log "watchdog_smart tick"
 
@@ -167,7 +181,7 @@ try {
     $allProcs = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction Stop |
                 Where-Object { $_.CommandLine -and $_.CommandLine -match 'live_demo' }
 
-    if ($Symbol -eq "XAUUSD") {
+    if ($Symbol -eq "XAUUSD" -or $Symbol -eq "LiveMacro") {
         $procs = $allProcs | Where-Object { $_.CommandLine -notmatch 'BTCUSD' }
     } else {
         $procs = $allProcs | Where-Object { $_.CommandLine -match $Symbol }
@@ -190,6 +204,17 @@ try {
 
 # ── Early exit on DEAD ────────────────────────────────────────────────────────
 if (-not $procAlive) {
+    # Round 4 Alt-B W3: LiveMacro — no XAUUSD live_demo process at all.
+    # Trigger the macro task explicitly so control leg is not affected.
+    if ($Symbol -eq "LiveMacro") {
+        Write-Log "LiveMacro DEAD: starting AI-SMC-Live-Macro task"
+        try {
+            Start-ScheduledTask -TaskName "AI-SMC-Live-Macro" -ErrorAction Stop
+            Write-Log "  AI-SMC-Live-Macro task started"
+        } catch {
+            Write-Log "  failed to start AI-SMC-Live-Macro — $_"
+        }
+    }
     Write-Log "DEAD: exiting 1 → Task Scheduler RestartOnFailure will restart"
     exit 1
 }
@@ -248,6 +273,21 @@ if ($stateFresh) {
 
 # Process is alive but state is stale → frozen/deadlocked process
 Write-Log "STALE: process alive but live_state.json age exceeds threshold → killing"
+
+# Round 4 Alt-B W3: LiveMacro has its own Task Scheduler entry.
+# We restart it via Start-ScheduledTask so the control leg (XAUUSD) keeps running.
+# Control/BTC/other symbols fall through to the existing kill-all logic.
+if ($Symbol -eq "LiveMacro") {
+    Write-Log "LiveMacro STALE: restarting AI-SMC-Live-Macro task (preserves control leg)"
+    try {
+        Start-ScheduledTask -TaskName "AI-SMC-Live-Macro" -ErrorAction Stop
+        Write-Log "  AI-SMC-Live-Macro task restarted"
+    } catch {
+        Write-Log "  failed to restart AI-SMC-Live-Macro via schtasks — $_"
+    }
+    Write-Log "LiveMacro: exiting 1 → RestartOnFailure also monitors watchdog task"
+    exit 1
+}
 
 try {
     $killProcs = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction Stop |

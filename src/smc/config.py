@@ -250,6 +250,19 @@ class SMCConfig(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # A/B Paper Trading (Round 4 Alt-B W3)
+    # ------------------------------------------------------------------
+    journal_suffix: str = Field(
+        default="",
+        description=(
+            "Suffix appended to the journal directory name and live_state filename.  "
+            "Empty string (default) → data/{symbol}/journal/ and live_state.json.  "
+            "Set SMC_JOURNAL_SUFFIX=_macro for the treatment leg so both processes "
+            "write to separate journals: journal/ vs journal_macro/."
+        ),
+    )
+
+    # ------------------------------------------------------------------
     # LLM (Phase 3+)
     # ------------------------------------------------------------------
     anthropic_api_key: SecretStr = Field(

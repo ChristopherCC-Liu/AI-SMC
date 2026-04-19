@@ -677,9 +677,18 @@ def main():
     global JOURNAL_PATH, STATE_PATH, AI_PATH, PAUSE_FLAG_PATH, MT5_POSITIONS_PATH
     DATA_ROOT = Path("data") / SYMBOL
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
-    (DATA_ROOT / "journal").mkdir(parents=True, exist_ok=True)
-    JOURNAL_PATH = DATA_ROOT / "journal" / "live_trades.jsonl"
-    STATE_PATH = DATA_ROOT / "live_state.json"
+
+    # Round 4 Alt-B W3: A/B suffix so process A (control) and process B
+    # (treatment, SMC_MACRO_ENABLED=true) write to separate journals and
+    # live_state files without interfering with each other.
+    from smc.config import SMCConfig as _SMCConfigPaths
+    _path_cfg = _SMCConfigPaths()
+    _journal_suffix: str = _path_cfg.journal_suffix  # "" or e.g. "_macro"
+
+    _journal_dir = DATA_ROOT / f"journal{_journal_suffix}"
+    _journal_dir.mkdir(parents=True, exist_ok=True)
+    JOURNAL_PATH = _journal_dir / "live_trades.jsonl"
+    STATE_PATH = DATA_ROOT / f"live_state{_journal_suffix}.json"
     AI_PATH = DATA_ROOT / "ai_analysis.json"
     PAUSE_FLAG_PATH = DATA_ROOT / "trading_paused.flag"
     MT5_POSITIONS_PATH = DATA_ROOT / "mt5_positions.json"
@@ -747,11 +756,9 @@ def main():
     detector = SMCDetector(swing_length=10)
     aggregator = MultiTimeframeAggregator(detector=detector, ai_regime_enabled=False)
 
-    # Round 4 Alt-B W2: load SMCConfig for macro overlay settings.
-    # SMCConfig reads env vars (SMC_* prefix) and .env.  InstrumentConfig (cfg)
-    # is per-symbol; SMCConfig carries cross-cutting settings like macro_enabled.
-    from smc.config import SMCConfig as _SMCConfig
-    _smc_cfg = _SMCConfig()
+    # Round 4 Alt-B W2+W3: _path_cfg (SMCConfig) already loaded above for
+    # journal_suffix; reuse the same instance for macro overlay settings.
+    _smc_cfg = _path_cfg
     _macro_flag: bool = _smc_cfg.macro_enabled
     _fred_key_val: str = _smc_cfg.fred_api_key.get_secret_value()
 

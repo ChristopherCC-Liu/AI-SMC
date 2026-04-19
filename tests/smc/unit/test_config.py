@@ -1,4 +1,5 @@
-"""Unit tests for smc.config.SMCConfig — Round 4 Alt-B W2 macro_enabled fields.
+"""Unit tests for smc.config.SMCConfig — Round 4 Alt-B W2 macro_enabled fields
+and Round 4 Alt-B W3 journal_suffix field.
 
 Tests:
     - macro_enabled defaults to False
@@ -6,6 +7,8 @@ Tests:
     - ENABLE_MACRO=1 env var also sets macro_enabled=True (alias support)
     - macro_cache_ttl_hours default
     - fred_api_key default
+    - journal_suffix defaults to empty string
+    - SMC_JOURNAL_SUFFIX env var overrides journal_suffix
 """
 
 from __future__ import annotations
@@ -66,3 +69,23 @@ class TestSMCConfigMacroEnvOverride:
         from smc.config import SMCConfig
         cfg = SMCConfig()
         assert cfg.macro_enabled is False
+
+
+class TestSMCConfigJournalSuffix:
+    """journal_suffix field — Round 4 Alt-B W3 A/B path separation."""
+
+    def test_journal_suffix_default_empty(self, monkeypatch) -> None:
+        """journal_suffix defaults to '' (backward-compat control leg)."""
+        monkeypatch.delenv("SMC_JOURNAL_SUFFIX", raising=False)
+
+        from smc.config import SMCConfig
+        cfg = SMCConfig()
+        assert cfg.journal_suffix == ""
+
+    def test_journal_suffix_set_via_env(self, monkeypatch) -> None:
+        """SMC_JOURNAL_SUFFIX=_macro sets journal_suffix to '_macro'."""
+        monkeypatch.setenv("SMC_JOURNAL_SUFFIX", "_macro")
+
+        from smc.config import SMCConfig
+        cfg = SMCConfig()
+        assert cfg.journal_suffix == "_macro"
