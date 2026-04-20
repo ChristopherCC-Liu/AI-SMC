@@ -153,6 +153,8 @@ def _find_bos_in_zone(
 def _compute_sl_buffer(
     h1_atr: float,
     cfg: InstrumentConfig | None = None,
+    *,
+    sl_atr_multiplier_override: float | None = None,
 ) -> float:
     """Compute adaptive SL buffer from H1 ATR(14) in points.
 
@@ -161,13 +163,21 @@ def _compute_sl_buffer(
     this function returns only the ATR contribution — the pct check is
     done in _compute_sl where the price context is available.
 
+    ``sl_atr_multiplier_override`` lets the regime router widen/tighten SL
+    per regime without mutating the InstrumentConfig.
+
     When cfg is None, defaults to XAUUSD config (preserves backward compat).
     """
     if cfg is None:
         from smc.instruments import get_instrument_config
         cfg = get_instrument_config("XAUUSD")
     min_pts = cfg.sl_min_buffer_points if cfg.sl_min_buffer_points is not None else 0.0
-    return max(cfg.sl_atr_multiplier * h1_atr, min_pts)
+    multiplier = (
+        sl_atr_multiplier_override
+        if sl_atr_multiplier_override is not None
+        else cfg.sl_atr_multiplier
+    )
+    return max(multiplier * h1_atr, min_pts)
 
 
 def _compute_sl(
@@ -175,15 +185,22 @@ def _compute_sl(
     h1_atr: float,
     cfg: InstrumentConfig,
     price: float | None = None,
+    *,
+    sl_atr_multiplier_override: float | None = None,
 ) -> float:
     """Compute stop-loss price beyond zone boundary + ATR-adaptive buffer.
 
     XAU path: buffer in points → converted to price via cfg.point_size.
     BTC path: buffer = max(atr_contribution, pct_of_price); requires price.
+
+    ``sl_atr_multiplier_override`` is forwarded to both paths so regime
+    routing actually widens/tightens SL instead of being silently ignored.
     """
     if cfg.sl_min_buffer_points is not None:
         # XAU path: buffer in points → price units
-        buffer_value = _compute_sl_buffer(h1_atr, cfg) * cfg.point_size
+        buffer_value = _compute_sl_buffer(
+            h1_atr, cfg, sl_atr_multiplier_override=sl_atr_multiplier_override,
+        ) * cfg.point_size
     else:
         # BTC path: buffer is max(atr contribution, pct of price)
         assert cfg.sl_min_buffer_pct is not None, (
@@ -192,7 +209,12 @@ def _compute_sl(
         assert price is not None, (
             f"{cfg.symbol}: price required for pct-of-price SL buffer calculation"
         )
-        atr_contribution = cfg.sl_atr_multiplier * h1_atr * cfg.point_size
+        multiplier = (
+            sl_atr_multiplier_override
+            if sl_atr_multiplier_override is not None
+            else cfg.sl_atr_multiplier
+        )
+        atr_contribution = multiplier * h1_atr * cfg.point_size
         # sl_min_buffer_pct is stored as e.g. 0.3 meaning 0.3% of price
         pct_contribution = (cfg.sl_min_buffer_pct / 100.0) * price
         buffer_value = max(atr_contribution, pct_contribution)
@@ -337,7 +359,16 @@ def check_entry(
 
     # Compute entry parameters (Sprint 6: regime-configurable SL/TP)
     entry_price = current_price
-    stop_loss = _compute_sl(zone, h1_atr, cfg, price=current_price)
+    # Sentinel check: if caller left the default sentinel, respect
+    # cfg.sl_atr_multiplier; otherwise (regime router) use the override.
+    sl_mult_override = (
+        None if sl_atr_multiplier == _SL_ATR_MULTIPLIER else sl_atr_multiplier
+    )
+    stop_loss = _compute_sl(
+        zone, h1_atr, cfg,
+        price=current_price,
+        sl_atr_multiplier_override=sl_mult_override,
+    )
     risk_points = abs(entry_price - stop_loss) / cfg.point_size
 
     if risk_points == 0:

@@ -365,6 +365,27 @@ class TestATRAdaptiveSL:
 
         assert _compute_sl_buffer(0.0) == pytest.approx(200.0)
 
+    def test_compute_sl_buffer_regime_override_widens(self) -> None:
+        """Round 4 v5: regime override (e.g. ATH 0.9) actually widens buffer.
+
+        Bug fix: before v5 the sl_atr_multiplier kwarg on check_entry was
+        silently dropped at the _compute_sl boundary — the override never
+        reached _compute_sl_buffer so regime routing had zero effect on SL.
+        """
+        from smc.strategy.entry_trigger import _compute_sl_buffer
+
+        # ATR=500, base=0.75 → 375; ATH override 0.9 → 450
+        assert _compute_sl_buffer(500.0, sl_atr_multiplier_override=0.9) == pytest.approx(450.0)
+        # CONSOLIDATION override 0.6 → 300
+        assert _compute_sl_buffer(500.0, sl_atr_multiplier_override=0.6) == pytest.approx(300.0)
+
+    def test_compute_sl_buffer_override_still_respects_floor(self) -> None:
+        """Tightening override below floor still clamps to 200 pts."""
+        from smc.strategy.entry_trigger import _compute_sl_buffer
+
+        # 200 ATR × 0.6 = 120, floor is 200
+        assert _compute_sl_buffer(200.0, sl_atr_multiplier_override=0.6) == pytest.approx(200.0)
+
     def test_adaptive_sl_wider_than_old_fixed(
         self,
         m15_choch_in_zone_snapshot: SMCSnapshot,

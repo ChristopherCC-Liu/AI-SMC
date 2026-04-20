@@ -48,7 +48,11 @@ class TestTrendUpPreset:
         assert route("TREND_UP").enable_ob_test is True
 
     def test_sl_atr_multiplier(self) -> None:
-        assert route("TREND_UP").sl_atr_multiplier == 0.75
+        assert route("TREND_UP").sl_atr_multiplier == 0.75  # base
+
+    def test_tp1_rr_widened(self) -> None:
+        """Round 4 v5: TREND_UP widens TP to 3.0 to ride momentum."""
+        assert route("TREND_UP").tp1_rr == 3.0
 
     def test_max_concurrent(self) -> None:
         assert route("TREND_UP").max_concurrent == 3
@@ -85,25 +89,25 @@ class TestConsolidationPreset:
         """v7c fix: CONSOLIDATION allows all triggers (choch has 40% WR in ranging)."""
         assert len(route("CONSOLIDATION").allowed_triggers) == 5
 
-    def test_uses_base_sl(self) -> None:
-        """v7 fix: CONSOLIDATION uses Sprint 5 base SL, not wider."""
-        assert route("CONSOLIDATION").sl_atr_multiplier == 0.75
+    def test_tightened_sl(self) -> None:
+        """Round 4 v5: CONSOLIDATION tightens SL to 0.6 for range scalping."""
+        assert route("CONSOLIDATION").sl_atr_multiplier == 0.6
 
     def test_uses_base_concurrent(self) -> None:
-        """v7 fix: CONSOLIDATION uses Sprint 5 base concurrent, not reduced."""
+        """CONSOLIDATION uses Sprint 5 base concurrent (unchanged in v5)."""
         assert route("CONSOLIDATION").max_concurrent == 3
 
     def test_uses_base_confluence_floor(self) -> None:
-        """v7 fix: CONSOLIDATION uses Sprint 5 base floor, not raised."""
+        """CONSOLIDATION uses Sprint 5 base floor (unchanged in v5)."""
         assert route("CONSOLIDATION").confluence_floor == 0.45
 
     def test_uses_base_cooldown(self) -> None:
-        """v7 fix: CONSOLIDATION uses Sprint 5 base cooldown, not doubled."""
+        """CONSOLIDATION uses Sprint 5 base cooldown (unchanged in v5)."""
         assert route("CONSOLIDATION").zone_cooldown_hours == 24
 
-    def test_uses_base_tp(self) -> None:
-        """v7 fix: CONSOLIDATION uses Sprint 5 base TP, not lowered."""
-        assert route("CONSOLIDATION").tp1_rr == 2.5
+    def test_tightened_tp(self) -> None:
+        """Round 4 v5: CONSOLIDATION tightens TP to 2.0 for quick scalps."""
+        assert route("CONSOLIDATION").tp1_rr == 2.0
 
 
 class TestTransitionPreset:
@@ -143,16 +147,16 @@ class TestATHBreakoutPreset:
         triggers = route("ATH_BREAKOUT").allowed_triggers
         assert len(triggers) == 5
 
-    def test_uses_base_tp(self) -> None:
-        """v7 fix: ATH uses Sprint 5 base TP, not extended."""
-        assert route("ATH_BREAKOUT").tp1_rr == 2.5
+    def test_extended_tp(self) -> None:
+        """Round 4 v5: ATH extends TP to 3.5 to capture breakout impulse."""
+        assert route("ATH_BREAKOUT").tp1_rr == 3.5
 
-    def test_uses_base_sl(self) -> None:
-        """v7 fix: ATH uses Sprint 5 base SL."""
-        assert route("ATH_BREAKOUT").sl_atr_multiplier == 0.75
+    def test_widened_sl(self) -> None:
+        """Round 4 v5: ATH widens SL to 0.9 to survive post-breakout vol."""
+        assert route("ATH_BREAKOUT").sl_atr_multiplier == 0.9
 
     def test_uses_base_cooldown(self) -> None:
-        """v7 fix: ATH uses Sprint 5 base cooldown."""
+        """ATH uses Sprint 5 base cooldown (unchanged in v5)."""
         assert route("ATH_BREAKOUT").zone_cooldown_hours == 24
 
 
@@ -178,13 +182,30 @@ class TestPresetConsistency:
         for regime in ("CONSOLIDATION", "TRANSITION"):
             assert trend_count >= len(route(regime).allowed_triggers)
 
-    def test_all_regimes_share_base_sl_tp_concurrent_cooldown(self) -> None:
-        """v7 fix: All regimes use Sprint 5 base SL/TP/concurrent/cooldown."""
+    def test_all_regimes_share_base_concurrent_cooldown(self) -> None:
+        """All regimes share concurrent/cooldown (only SL/TP differentiated in v5)."""
         for regime, params in PRESETS.items():
-            assert params.sl_atr_multiplier == 0.75, f"{regime} SL != base"
-            assert params.tp1_rr == 2.5, f"{regime} TP != base"
             assert params.max_concurrent == 3, f"{regime} concurrent != base"
             assert params.zone_cooldown_hours == 24, f"{regime} cooldown != base"
+
+    def test_regime_specific_sl_tp_matrix(self) -> None:
+        """Round 4 v5: SL/TP differentiated per regime.
+
+        TRANSITION is the neutral baseline; trends widen TP, consolidation
+        tightens both, ATH widens both. Deltas kept conservative (±20%
+        SL, ±20-40% TP) until backtest validation extends the deltas.
+        """
+        expected: dict[MarketRegimeAI, tuple[float, float]] = {
+            "TREND_UP":      (0.75, 3.0),
+            "TREND_DOWN":    (0.75, 3.0),
+            "CONSOLIDATION": (0.60, 2.0),
+            "TRANSITION":    (0.75, 2.5),
+            "ATH_BREAKOUT":  (0.90, 3.5),
+        }
+        for regime, (sl, tp) in expected.items():
+            params = route(regime)
+            assert params.sl_atr_multiplier == sl, f"{regime} sl_mult"
+            assert params.tp1_rr == tp, f"{regime} tp1_rr"
 
     def test_only_transition_has_raised_floor(self) -> None:
         """Only TRANSITION has confluence_floor > 0.45 (raised to 0.55)."""
