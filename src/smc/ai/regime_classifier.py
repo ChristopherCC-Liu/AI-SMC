@@ -642,6 +642,11 @@ def _emit_telemetry(
 ) -> None:
     """Emit one ai_regime_classified event per classify_regime_ai call.
 
+    Also fires a Telegram critical alert whenever the debate path
+    produced the classification (``source == "ai_debate"``) so the
+    operator can see the AI's reasoning in real time. ATR fallbacks
+    and cache hits stay quiet to avoid channel spam.
+
     Never raises — telemetry must not break the classifier.
     """
     try:
@@ -649,15 +654,37 @@ def _emit_telemetry(
 
         from smc.monitor.structured_log import info as _log_info
 
+        elapsed_ms = int((_time.monotonic() - start_ts) * 1000)
+        reasoning = result.reasoning[:280] if result.reasoning else ""
+
         _log_info(
             "ai_regime_classified",
             regime=result.regime,
             source=result.source,
             direction=result.trend_direction,
             confidence=round(result.confidence, 3),
-            elapsed_ms=int((_time.monotonic() - start_ts) * 1000),
+            elapsed_ms=elapsed_ms,
             cost_usd=round(result.cost_usd, 4),
             ai_enabled=ai_enabled_flag,
+            reasoning=reasoning,
         )
+
+        # Telegram push for AI debate results only — ATR fallback would
+        # otherwise spam every 15 min with repetitive info.
+        if result.source == "ai_debate":
+            try:
+                from smc.monitor.critical_alerter import alert_critical
+
+                alert_critical(
+                    "ai_regime_debate_result",
+                    send_telegram=True,
+                    regime=result.regime,
+                    direction=result.trend_direction,
+                    confidence=round(result.confidence, 2),
+                    elapsed_s=round(elapsed_ms / 1000.0, 1),
+                    reasoning=reasoning,
+                )
+            except Exception:
+                pass
     except Exception:
         pass

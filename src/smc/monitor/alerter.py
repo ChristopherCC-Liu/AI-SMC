@@ -136,10 +136,15 @@ class TelegramAlerter:
             return False
 
         url = f"https://api.telegram.org/bot{self._bot_token}/sendMessage"
+        # Round 4 v5 (2026-04-20 post-mortem): parse_mode="HTML" breaks when
+        # messages contain '<' chars from Python tracebacks ("<frozen
+        # importlib._bootstrap>", "<module>"), inequalities ("MFE <0.10R"),
+        # or literal angle brackets in broker strings. Telegram's HTML parser
+        # then returns 400 "Unsupported start tag" and the whole alert
+        # silently drops. Plain text has no such footguns.
         payload = {
             "chat_id": self._chat_id,
-            "text": text,
-            "parse_mode": "HTML",
+            "text": text[:4000],  # Telegram hard limit 4096, leave margin
         }
 
         try:
