@@ -372,7 +372,7 @@ def _determine_v1_passthrough(setups, session):
 
 def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
                        range_trader, breakout_detector, session="", h1_df=None,
-                       htf_bias=None, cfg=None):
+                       htf_bias=None, cfg=None, m15_df=None):
     """Ranging mode: breakout guard + mean-reversion setups at range boundaries.
 
     Returns (action, reason, best_setup). Round 4.6-F: session kwarg so
@@ -390,6 +390,7 @@ def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
     range_setups = range_trader.generate_range_setups(
         h1_snapshot, m15_snapshot, price, range_bounds, h1_atr,
         session=session,
+        m15_df=m15_df,
     )
 
     # Round 4.6-K: setup-level guards (RR>=1.2, touches>=2) enforcement.
@@ -420,7 +421,7 @@ def determine_action(setups, ai_analysis, regime, *,
                      h1_atr=0.0, price=0.0,
                      range_trader=None, breakout_detector=None,
                      asian_range_quota=None, phase1a_breaker=None,
-                     htf_bias=None, cfg=None):
+                     htf_bias=None, cfg=None, m15_df=None):
     """Dual-mode action router: trending (v1 5-gate) or ranging (mean-reversion).
 
     Always detects range for display. Mode router decides which path runs.
@@ -474,7 +475,7 @@ def determine_action(setups, ai_analysis, regime, *,
         action, reason, best = _determine_ranging(
             price, mode.range_bounds, h1_snapshot, m15_snapshot, h1_atr,
             range_trader, breakout_detector, session=session, h1_df=h1_df,
-            htf_bias=htf_bias, cfg=cfg,
+            htf_bias=htf_bias, cfg=cfg, m15_df=m15_df,
         )
         return action, reason, best, mode
 
@@ -808,6 +809,7 @@ def main():
     range_trader = RangeTrader(
         cfg=cfg,
         cooldown_state_path=DATA_ROOT / "range_cooldown_state.json",
+        reversal_confirm_enabled=_path_cfg.range_reversal_confirm_enabled,
     )
     breakout_det = BreakoutDetector()
 
@@ -1117,6 +1119,7 @@ def main():
                 phase1a_breaker=phase1a_breaker,
                 htf_bias=htf_bias,
                 cfg=cfg,
+                m15_df=m15_df,
             )
             # Round 5 T0 (P0-2b): quota record_open moved *after* successful
             # order_send below (inside LIVE_EXEC branch). MT5 failures no longer
@@ -1217,6 +1220,47 @@ def main():
                             blocked_reason = "asian_quota:exhausted_today"
                     except Exception as _quota_exc:
                         log_warn("pre_write_quota_error", exc=str(_quota_exc)[:120])
+
+                # Gate 3 (Round 4 v5): max_concurrent_per_symbol hard cap.
+                # Prevents 2026-04-20 02:46-style disaster where 5 BUYs
+                # stacked in a declining window and all hit SL together.
+                if not blocked_reason:
+                    try:
+                        from smc.risk.concurrent_gates import check_concurrent_cap
+                        _open_positions = mt5.positions_get(symbol=cfg.mt5_path) or []
+                        _cap_result = check_concurrent_cap(
+                            _open_positions,
+                            magic=_effective_magic,
+                            max_concurrent=_path_cfg.max_concurrent_per_symbol,
+                        )
+                        if not _cap_result.can_trade:
+                            blocked_reason = f"{_cap_result.reason}:{_cap_result.detail}"
+                    except Exception as _cap_exc:
+                        log_warn("pre_write_concurrent_cap_error", exc=str(_cap_exc)[:120])
+
+                # Gate 4 (Round 4 v5): anti-stacking cooldown — even below
+                # the hard cap, require N minutes between same-direction
+                # entries on (symbol, magic).
+                if not blocked_reason and _path_cfg.anti_stack_cooldown_minutes > 0:
+                    try:
+                        from smc.risk.concurrent_gates import check_anti_stack_cooldown
+                        _want_dir = getattr(best, "direction", None)
+                        _now_ts = datetime.now(tz=timezone.utc)
+                        _cooldown = _path_cfg.anti_stack_cooldown_minutes
+                        _lookback = _now_ts - timedelta(minutes=_cooldown + 5)
+                        _recent_deals = mt5.history_deals_get(_lookback, _now_ts) or []
+                        _stack_result = check_anti_stack_cooldown(
+                            _recent_deals,
+                            symbol=cfg.mt5_path,
+                            magic=_effective_magic,
+                            direction=_want_dir or "",
+                            now=_now_ts,
+                            cooldown_minutes=_cooldown,
+                        )
+                        if not _stack_result.can_trade:
+                            blocked_reason = f"{_stack_result.reason}:{_stack_result.detail}"
+                    except Exception as _stack_exc:
+                        log_warn("pre_write_anti_stack_error", exc=str(_stack_exc)[:120])
 
             if blocked_reason:
                 action = "HOLD"

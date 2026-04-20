@@ -375,6 +375,53 @@ def _soft_reversal_3bar(
     return False
 
 
+def _last_bar_reversal_confirm(
+    m15_df: object,
+    direction: str,
+) -> bool:
+    """Round 4 v5 (Task #52): confirm last closed M15 bar shows reversal bias.
+
+    The existing ``_find_choch_in_zone`` + ``_soft_reversal_3bar`` let today's
+    5 stacked-BUY disasters through because structure signals can form at a
+    local bottom that is immediately violated by continued selling. Add a
+    cheap bar-close sanity check: the most recent closed M15 bar must itself
+    confirm the intended direction.
+
+    Conditions for acceptance:
+
+      long setup → last bar close > open (bullish candle) AND close > prior close
+      short setup → last bar close < open (bearish candle) AND close < prior close
+
+    Returns True when the M15 DataFrame is missing or has <2 bars (fail-open
+    to keep backward compat when callers don't thread the frame through).
+    """
+    if m15_df is None:
+        return True
+    if direction not in ("long", "short"):
+        return True
+    try:
+        n = len(m15_df)
+    except TypeError:
+        return True
+    if n < 2:
+        return True
+
+    # Last CLOSED bar is the penultimate row (live_demo strips the in-progress bar)
+    # but defensively accept either: check whichever row sits one before the end.
+    last = m15_df[-1]
+    prior = m15_df[-2]
+    try:
+        last_open = float(last["open"][0]) if hasattr(last["open"], "__getitem__") else float(last["open"])
+        last_close = float(last["close"][0]) if hasattr(last["close"], "__getitem__") else float(last["close"])
+        prior_close = float(prior["close"][0]) if hasattr(prior["close"], "__getitem__") else float(prior["close"])
+    except (KeyError, TypeError, ValueError, IndexError):
+        return True  # fail-open on unexpected schema
+
+    if direction == "long":
+        return last_close > last_open and last_close > prior_close
+    return last_close < last_open and last_close < prior_close
+
+
 # ---------------------------------------------------------------------------
 # RangeTrader class
 # ---------------------------------------------------------------------------
@@ -401,6 +448,7 @@ class RangeTrader:
         max_range_width: float | None = None,
         boundary_pct: float | None = None,
         cooldown_state_path: Optional[Path] = None,
+        reversal_confirm_enabled: bool = False,
     ) -> None:
         from smc.instruments import get_instrument_config
         if cfg is None:
@@ -434,6 +482,8 @@ class RangeTrader:
         # Round 5 T0 (P0-4): loaded from / persisted to JSON so restarts don't reset.
         self._last_setup_ts: dict[str, datetime] = {}
         self._load_cooldown_state()
+        # Round 4 v5 (Task #52): reversal-candle confirmation gate.
+        self._reversal_confirm_enabled: bool = reversal_confirm_enabled
 
     # ------------------------------------------------------------------
     # Cooldown persistence helpers (Round 5 T0, P0-4)
@@ -561,6 +611,8 @@ class RangeTrader:
         bounds: RangeBounds,
         h1_atr: float = 0.0,
         session: str = "",
+        *,
+        m15_df: object = None,
     ) -> tuple[RangeSetup, ...]:
         """Generate mean-reversion setups at range boundaries.
 
@@ -601,6 +653,7 @@ class RangeTrader:
                 m15_snapshot=m15_snapshot,
                 h1_atr=h1_atr,
                 boundary_pct=effective_boundary_pct,
+                m15_df=m15_df,
             )
             if long_setup is not None:
                 setups.append(long_setup)
@@ -615,6 +668,7 @@ class RangeTrader:
                 m15_snapshot=m15_snapshot,
                 h1_atr=h1_atr,
                 boundary_pct=effective_boundary_pct,
+                m15_df=m15_df,
             )
             if short_setup is not None:
                 setups.append(short_setup)
@@ -824,6 +878,7 @@ class RangeTrader:
         m15_snapshot: SMCSnapshot,
         h1_atr: float,
         boundary_pct: float | None = None,
+        m15_df: object = None,
     ) -> RangeSetup | None:
         """Build a single mean-reversion setup with M15 CHoCH confirmation.
 
@@ -872,6 +927,16 @@ class RangeTrader:
         # CHoCH 常缺, but 3-bar momentum reversal 可近似表达 reversal intent.
         if not _find_choch_in_zone(m15_snapshot, zone):
             if not _soft_reversal_3bar(m15_snapshot, direction):
+                return None
+
+        # Round 4 v5 (Task #52): bar-close reversal confirmation.
+        # 2026-04-20 post-mortem — 5 stacked BUYs passed the CHoCH/3-bar
+        # checks but all had MFE < 0.10R. The current M15 bar was itself
+        # bearish (price still falling into the support zone). Require the
+        # most recent closed bar to actually show the direction we intend.
+        # Fail-open if m15_df not threaded (backward compat).
+        if self._reversal_confirm_enabled and m15_df is not None:
+            if not _last_bar_reversal_confirm(m15_df, direction):
                 return None
 
         # SL: boundary +/- ATR-adaptive buffer

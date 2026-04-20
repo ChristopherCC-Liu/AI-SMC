@@ -74,7 +74,13 @@ class SMCConfig(BaseSettings):
         description="MetaTrader 5 account login number.",
     )
 
-    @field_validator("macro_enabled", "mt5_mock", "ai_regime_enabled", mode="before")
+    @field_validator(
+        "macro_enabled",
+        "mt5_mock",
+        "ai_regime_enabled",
+        "range_reversal_confirm_enabled",
+        mode="before",
+    )
     @classmethod
     def _parse_bool_lenient(cls, v: object) -> object:
         """Strip whitespace + tolerate loose boolean strings from bat env.
@@ -261,6 +267,36 @@ class SMCConfig(BaseSettings):
         ge=0.0,
         le=1.0,
         description="Minimum AI confidence to use AI regime. Below this, ATR fallback activates.",
+    )
+    max_concurrent_per_symbol: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description=(
+            "Hard cap on concurrent open positions per (symbol, magic) pair. "
+            "Round 4 v5: prevents the 5-stacked-BUY disaster from 2026-04-20 02:46. "
+            "Set to 1 to force one-position-per-symbol strict mode for A/B experiments."
+        ),
+    )
+    anti_stack_cooldown_minutes: int = Field(
+        default=30,
+        ge=0,
+        le=240,
+        description=(
+            "After opening a position, block further same-direction entries in "
+            "this (symbol, magic) for N minutes. 0 disables. Prevents rapid "
+            "same-direction stacking when max_concurrent_per_symbol > 1."
+        ),
+    )
+    range_reversal_confirm_enabled: bool = Field(
+        default=False,
+        description=(
+            "Round 4 v5 Task #52: require last closed M15 bar to confirm "
+            "intended direction (bullish close for long, bearish for short) "
+            "in addition to CHoCH/3-bar soft reversal. Addresses the "
+            "2026-04-20 post-mortem where 5 stacked BUYs passed existing "
+            "checks but had MFE < 0.10R (still-falling bars)."
+        ),
     )
     ath_reference_price: float = Field(
         default=3500.0,
