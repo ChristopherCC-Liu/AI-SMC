@@ -44,8 +44,23 @@ input int      RangingCooldownSec   = 300;   // 5 min — ranging: quick re-entr
 input int      TrendingCooldownSec  = 1800;  // 30 min — trending: avoid chasing
 input int      DirectionCooldownSec = 1800;  // DEPRECATED — kept for rollback only
 
+// Round 4 v5: trailing SL — backtest 2020-2024 showed
+// trail_points=50, trail_activate_r=0.5 gave PF 2.13 vs baseline 0.95.
+input bool     EnableTrailing       = true;
+input double   TrailActivateR       = 0.5;  // Start trailing at N x initial_risk profit
+input int      TrailDistancePoints  = 50;   // Trail SL this many points behind current
+input int      TrailingMinIntervalSec = 5;  // Debounce PositionModify calls per ticket
+
 // audit-r4 v5 Option B: max legs we track (control + treatment + headroom).
 #define AISMC_MAX_LEGS 8
+
+// Round 4 v5: per-ticket initial SL memo for R-based trailing activation.
+// 128 is generous — in practice mt5 positions count is low single digits.
+#define AISMC_MAX_TRACKED 128
+ulong    g_track_ticket    [AISMC_MAX_TRACKED];
+double   g_track_initial_sl[AISMC_MAX_TRACKED];
+datetime g_track_last_trail[AISMC_MAX_TRACKED];
+int      g_track_count = 0;
 
 CTrade         g_trade;
 datetime       g_last_poll_ts    = 0;
@@ -90,10 +105,141 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    if (!EnableTrading) return;
+
+   // Round 4 v5: trailing runs every tick, NOT gated by PollIntervalSec,
+   // so intra-bar price moves lock profits promptly. The debounce inside
+   // ManageTrailingStops prevents flooding PositionModify on the broker.
+   if (EnableTrailing) ManageTrailingStops();
+
    datetime now = TimeCurrent();
    if (now - g_last_poll_ts < PollIntervalSec) return;
    g_last_poll_ts = now;
    PollAndExecute();
+}
+
+
+// ---------------------------------------------------------------------
+// Round 4 v5: per-ticket state helpers for R-based trailing activation.
+// ---------------------------------------------------------------------
+
+int TrackedIndex(ulong ticket)
+{
+   for (int i = 0; i < g_track_count; i++)
+      if (g_track_ticket[i] == ticket) return i;
+   return -1;
+}
+
+
+double GetInitialSL(ulong ticket, double fallback_sl)
+{
+   int idx = TrackedIndex(ticket);
+   if (idx >= 0) return g_track_initial_sl[idx];
+   if (g_track_count >= AISMC_MAX_TRACKED) return fallback_sl;
+   g_track_ticket    [g_track_count] = ticket;
+   g_track_initial_sl[g_track_count] = fallback_sl;
+   g_track_last_trail[g_track_count] = 0;
+   g_track_count++;
+   return fallback_sl;
+}
+
+
+bool ShouldDebounce(ulong ticket, datetime now)
+{
+   int idx = TrackedIndex(ticket);
+   if (idx < 0) return false;
+   return (now - g_track_last_trail[idx]) < TrailingMinIntervalSec;
+}
+
+
+void MarkTrailed(ulong ticket, datetime now)
+{
+   int idx = TrackedIndex(ticket);
+   if (idx >= 0) g_track_last_trail[idx] = now;
+}
+
+
+void ManageTrailingStops()
+{
+   datetime now = TimeCurrent();
+   int total = PositionsTotal();
+   for (int i = total - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if (ticket == 0) continue;
+      if (!PositionSelectByTicket(ticket)) continue;
+
+      // Filter to AI-SMC-owned positions on this chart's symbol.
+      long magic = PositionGetInteger(POSITION_MAGIC);
+      if (magic != MagicXAU && magic != MagicBTC
+          && magic != MagicXAU + 10 && magic != MagicBTC + 10
+          && magic != 19760428)   // XAU treatment magic
+         continue;
+
+      string sym = PositionGetString(POSITION_SYMBOL);
+      if (sym != _Symbol) continue;
+
+      long   type       = PositionGetInteger(POSITION_TYPE);
+      double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+      double current_sl = PositionGetDouble(POSITION_SL);
+      double current_tp = PositionGetDouble(POSITION_TP);
+      double point      = SymbolInfoDouble(sym, SYMBOL_POINT);
+      if (point <= 0) continue;
+
+      double initial_sl = GetInitialSL(ticket, current_sl);
+
+      MqlTick last_tick;
+      if (!SymbolInfoTick(sym, last_tick)) continue;
+
+      double current_price = (type == POSITION_TYPE_BUY) ? last_tick.bid : last_tick.ask;
+      double profit_pts    = 0.0;
+      double initial_risk  = 0.0;
+
+      if (type == POSITION_TYPE_BUY)
+      {
+         profit_pts   = (current_price - open_price) / point;
+         initial_risk = (open_price   - initial_sl) / point;
+      }
+      else
+      {
+         profit_pts   = (open_price   - current_price) / point;
+         initial_risk = (initial_sl   - open_price)   / point;
+      }
+      if (initial_risk <= 0) continue;  // malformed — skip
+
+      double activate_pts = TrailActivateR * initial_risk;
+      if (profit_pts < activate_pts) continue;
+
+      double candidate_sl;
+      if (type == POSITION_TYPE_BUY)
+         candidate_sl = NormalizeDouble(current_price - TrailDistancePoints * point, _Digits);
+      else
+         candidate_sl = NormalizeDouble(current_price + TrailDistancePoints * point, _Digits);
+
+      // Monotonic — SL never moves against the position.
+      bool progress;
+      if (type == POSITION_TYPE_BUY)
+         progress = (candidate_sl > current_sl);
+      else
+         progress = (current_sl <= 0.0 || candidate_sl < current_sl);
+      if (!progress) continue;
+
+      if (ShouldDebounce(ticket, now)) continue;
+
+      g_trade.SetExpertMagicNumber((int)magic);
+      if (g_trade.PositionModify(ticket, candidate_sl, current_tp))
+      {
+         MarkTrailed(ticket, now);
+         if (VerboseLog)
+            PrintFormat("Trail ticket=%I64u mag=%d new_sl=%.2f profit=%.0fp (%.2fR)",
+                        ticket, magic, candidate_sl, profit_pts,
+                        profit_pts / initial_risk);
+      }
+      else if (VerboseLog)
+      {
+         PrintFormat("Trail FAIL ticket=%I64u rc=%d msg=%s",
+                     ticket, g_trade.ResultRetcode(), g_trade.ResultComment());
+      }
+   }
 }
 
 
