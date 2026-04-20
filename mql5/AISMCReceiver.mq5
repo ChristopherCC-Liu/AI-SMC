@@ -46,9 +46,16 @@ input int      DirectionCooldownSec = 1800;  // DEPRECATED — kept for rollback
 
 // Round 4 v5: trailing SL — backtest 2020-2024 showed
 // trail_points=50, trail_activate_r=0.5 gave PF 2.13 vs baseline 0.95.
+// Round 4 v5 HOTFIX (task #56 deep-dive): 2024 PF collapsed to 1.00
+// because fixed 50pt trail was 1/27 of the SL (median SL 1343 pts in
+// 2024). Winners locked in $0.50 profit vs avg loss $19.20 → net flat.
+// New default trails as a FRACTION of initial risk, so scales with SL.
+// Set TrailDistanceR > 0 for R-proportional (recommended).
+// Set TrailDistanceR = 0 to fall back to fixed TrailDistancePoints.
 input bool     EnableTrailing       = true;
 input double   TrailActivateR       = 0.5;  // Start trailing at N x initial_risk profit
-input int      TrailDistancePoints  = 50;   // Trail SL this many points behind current
+input double   TrailDistanceR       = 0.5;  // Trail N x initial_risk behind current (0 = use points)
+input int      TrailDistancePoints  = 50;   // Fallback fixed trail distance when TrailDistanceR == 0
 input int      TrailingMinIntervalSec = 5;  // Debounce PositionModify calls per ticket
 
 // audit-r4 v5 Option B: max legs we track (control + treatment + headroom).
@@ -209,11 +216,18 @@ void ManageTrailingStops()
       double activate_pts = TrailActivateR * initial_risk;
       if (profit_pts < activate_pts) continue;
 
+      // Round 4 v5 hotfix (task #56): R-proportional trail distance so
+      // a wide-SL trade (e.g. 1343 pts SL) trails by 672 pts — locking
+      // meaningful profit — instead of the old fixed 50 pts that
+      // would exit at 3.7% of the intended RR.
+      double trail_dist_pts = (TrailDistanceR > 0.0)
+                                ? TrailDistanceR * initial_risk
+                                : (double)TrailDistancePoints;
       double candidate_sl;
       if (type == POSITION_TYPE_BUY)
-         candidate_sl = NormalizeDouble(current_price - TrailDistancePoints * point, _Digits);
+         candidate_sl = NormalizeDouble(current_price - trail_dist_pts * point, _Digits);
       else
-         candidate_sl = NormalizeDouble(current_price + TrailDistancePoints * point, _Digits);
+         candidate_sl = NormalizeDouble(current_price + trail_dist_pts * point, _Digits);
 
       // Monotonic — SL never moves against the position.
       bool progress;
@@ -230,9 +244,9 @@ void ManageTrailingStops()
       {
          MarkTrailed(ticket, now);
          if (VerboseLog)
-            PrintFormat("Trail ticket=%I64u mag=%d new_sl=%.2f profit=%.0fp (%.2fR)",
+            PrintFormat("Trail ticket=%I64u mag=%d new_sl=%.2f profit=%.0fp (%.2fR) trail_dist=%.0fp",
                         ticket, magic, candidate_sl, profit_pts,
-                        profit_pts / initial_risk);
+                        profit_pts / initial_risk, trail_dist_pts);
       }
       else if (VerboseLog)
       {
