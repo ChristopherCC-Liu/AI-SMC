@@ -301,6 +301,41 @@ class TestClassifyRegimeAi:
         result = classify_regime_ai(d1, None, ai_enabled=False)
         assert result.source in ("atr_fallback", "default")
 
+    def test_telemetry_emits_event_per_call(self, monkeypatch) -> None:
+        """Every classify_regime_ai() call must emit one ai_regime_classified event."""
+        captured: list[tuple[str, dict]] = []
+
+        def _fake_info(event: str, **fields: object) -> None:
+            captured.append((event, dict(fields)))
+
+        import smc.monitor.structured_log as _slog
+        monkeypatch.setattr(_slog, "info", _fake_info)
+
+        d1 = _make_d1_df()
+        result = classify_regime_ai(d1, None, ai_enabled=False)
+
+        assert len(captured) == 1
+        event_name, fields = captured[0]
+        assert event_name == "ai_regime_classified"
+        assert fields["regime"] == result.regime
+        assert fields["source"] == result.source
+        assert fields["ai_enabled"] is False
+        assert fields["elapsed_ms"] >= 0
+        assert fields["cost_usd"] == 0.0
+
+    def test_telemetry_never_breaks_classifier(self, monkeypatch) -> None:
+        """Broken telemetry must not propagate to the caller."""
+        def _boom(*_a: object, **_kw: object) -> None:
+            raise RuntimeError("telemetry dead")
+
+        import smc.monitor.structured_log as _slog
+        monkeypatch.setattr(_slog, "info", _boom)
+
+        d1 = _make_d1_df()
+        # Must not raise
+        result = classify_regime_ai(d1, None, ai_enabled=False)
+        assert result.source in ("atr_fallback", "default")
+
     def test_reasoning_under_300_chars(self):
         d1 = _make_d1_df()
         result = classify_regime_ai(d1, None)

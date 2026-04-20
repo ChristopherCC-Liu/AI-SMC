@@ -523,16 +523,25 @@ def classify_regime_ai(
     AIRegimeAssessment
         Frozen assessment with regime, parameters, and metadata.
     """
+    import time as _time
+
+    start_ts = _time.monotonic()
+    result: AIRegimeAssessment
+
     # Step 0: Cache lookup (backtest mode — zero computation cost)
     if cache is not None and cache_ts is not None:
         cached = cache.lookup(cache_ts)
         if cached is not None:
-            return cached
+            result = cached
+            _emit_telemetry(result, start_ts, ai_enabled_flag=ai_enabled)
+            return result
         # Cache miss (ts before cache range) → fall through to live path
 
     # Insufficient data → immediate default
     if d1_df is None or d1_df.is_empty():
-        return _default_assessment()
+        result = _default_assessment()
+        _emit_telemetry(result, start_ts, ai_enabled_flag=ai_enabled)
+        return result
 
     # Step 1: Extract features (deterministic, ~1ms)
     ctx = extract_regime_context(d1_df, h4_df, external_ctx)
@@ -544,6 +553,7 @@ def classify_regime_ai(
 
             ai_result = run_regime_debate(ctx)
             if ai_result.confidence >= min_confidence:
+                _emit_telemetry(ai_result, start_ts, ai_enabled_flag=ai_enabled)
                 return ai_result
             # Low confidence → fall through to ATR
         except (ImportError, RuntimeError):
@@ -551,4 +561,35 @@ def classify_regime_ai(
             pass
 
     # Step 3: ATR fallback (always available)
-    return _atr_fallback(ctx)
+    result = _atr_fallback(ctx)
+    _emit_telemetry(result, start_ts, ai_enabled_flag=ai_enabled)
+    return result
+
+
+def _emit_telemetry(
+    result: AIRegimeAssessment,
+    start_ts: float,
+    *,
+    ai_enabled_flag: bool,
+) -> None:
+    """Emit one ai_regime_classified event per classify_regime_ai call.
+
+    Never raises — telemetry must not break the classifier.
+    """
+    try:
+        import time as _time
+
+        from smc.monitor.structured_log import info as _log_info
+
+        _log_info(
+            "ai_regime_classified",
+            regime=result.regime,
+            source=result.source,
+            direction=result.trend_direction,
+            confidence=round(result.confidence, 3),
+            elapsed_ms=int((_time.monotonic() - start_ts) * 1000),
+            cost_usd=round(result.cost_usd, 4),
+            ai_enabled=ai_enabled_flag,
+        )
+    except Exception:
+        pass
