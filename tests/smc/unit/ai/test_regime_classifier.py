@@ -341,6 +341,82 @@ class TestClassifyRegimeAi:
         result = classify_regime_ai(d1, None)
         assert len(result.reasoning) <= 300
 
+    def test_debate_exception_falls_back_to_atr(self, monkeypatch) -> None:
+        """Round 4 v5 hotfix: any AttributeError / RuntimeError / etc. from
+        the debate pipeline must not kill the cycle. classify_regime_ai
+        falls through to ATR fallback instead of propagating.
+        """
+        def _boom(_features: object) -> dict:
+            raise AttributeError("'RegimeContext' object has no attribute 'get'")
+
+        import smc.ai.debate.pipeline as _pipe
+        monkeypatch.setattr(_pipe, "run_regime_debate", _boom)
+
+        d1 = _make_d1_df()
+        # Must not raise — ATR fallback absorbs the failure.
+        result = classify_regime_ai(d1, None, ai_enabled=True)
+        assert result.source in ("atr_fallback", "default")
+
+
+class TestCoerceDebateResult:
+    """Ensure the debate dict → AIRegimeAssessment adapter is strict.
+
+    The adapter must reject malformed dicts (returning None → ATR
+    fallback) and only accept valid ``MarketRegimeAI`` labels. The
+    ``ctx`` arg is accepted for future extensions but the body doesn't
+    read from it, so tests pass None here.
+    """
+
+    def test_valid_dict_coerces(self) -> None:
+        from smc.ai.regime_classifier import _coerce_debate_result_to_assessment
+        raw = {
+            "regime": "TREND_UP",
+            "confidence": 0.72,
+            "reasoning": "Strong uptrend + macro tailwind",
+            "total_cost_usd": 0.42,
+        }
+        result = _coerce_debate_result_to_assessment(raw, None)  # type: ignore[arg-type]
+        assert result is not None
+        assert result.regime == "TREND_UP"
+        assert result.trend_direction == "bullish"
+        assert result.confidence == 0.72
+        assert result.source == "ai_debate"
+        assert result.cost_usd == 0.42
+
+    def test_trend_down_maps_to_bearish(self) -> None:
+        from smc.ai.regime_classifier import _coerce_debate_result_to_assessment
+        raw = {"regime": "TREND_DOWN", "confidence": 0.6}
+        result = _coerce_debate_result_to_assessment(raw, None)  # type: ignore[arg-type]
+        assert result is not None and result.trend_direction == "bearish"
+
+    def test_consolidation_maps_to_neutral(self) -> None:
+        from smc.ai.regime_classifier import _coerce_debate_result_to_assessment
+        raw = {"regime": "CONSOLIDATION", "confidence": 0.6}
+        result = _coerce_debate_result_to_assessment(raw, None)  # type: ignore[arg-type]
+        assert result is not None and result.trend_direction == "neutral"
+
+    def test_unknown_regime_rejected(self) -> None:
+        from smc.ai.regime_classifier import _coerce_debate_result_to_assessment
+        raw = {"regime": "SUPER_BULL", "confidence": 0.9}
+        assert _coerce_debate_result_to_assessment(raw, None) is None  # type: ignore[arg-type]
+
+    def test_non_dict_rejected(self) -> None:
+        from smc.ai.regime_classifier import _coerce_debate_result_to_assessment
+        assert _coerce_debate_result_to_assessment("not a dict", None) is None  # type: ignore[arg-type]
+        assert _coerce_debate_result_to_assessment(None, None) is None  # type: ignore[arg-type]
+
+    def test_confidence_clamped(self) -> None:
+        from smc.ai.regime_classifier import _coerce_debate_result_to_assessment
+        raw = {"regime": "TRANSITION", "confidence": 1.5}
+        result = _coerce_debate_result_to_assessment(raw, None)  # type: ignore[arg-type]
+        assert result is not None and result.confidence == 1.0
+
+    def test_missing_reasoning_defaults_empty(self) -> None:
+        from smc.ai.regime_classifier import _coerce_debate_result_to_assessment
+        raw = {"regime": "CONSOLIDATION", "confidence": 0.6}
+        result = _coerce_debate_result_to_assessment(raw, None)  # type: ignore[arg-type]
+        assert result is not None and result.reasoning == ""
+
 
 # ---------------------------------------------------------------------------
 # ATR fallback mapping specifics

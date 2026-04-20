@@ -472,6 +472,63 @@ def _default_assessment() -> AIRegimeAssessment:
     )
 
 
+_VALID_REGIMES: set[str] = {
+    "TREND_UP",
+    "TREND_DOWN",
+    "CONSOLIDATION",
+    "TRANSITION",
+    "ATH_BREAKOUT",
+}
+
+
+def _coerce_debate_result_to_assessment(
+    raw: object,
+    ctx: "RegimeContext",
+) -> AIRegimeAssessment | None:
+    """Convert the 7-agent debate dict output to an AIRegimeAssessment.
+
+    Round 4 v5 hotfix (2026-04-20 04:15 live crash): ``run_regime_debate``
+    returns a flat dict with keys ``regime``/``confidence``/``reasoning``/
+    ``total_cost_usd``. This helper validates and wraps it so callers
+    receive a well-typed assessment — or ``None`` when the dict is
+    malformed, which triggers ATR fallback in the parent.
+    """
+    if not isinstance(raw, dict):
+        return None
+    regime = raw.get("regime")
+    if regime not in _VALID_REGIMES:
+        return None
+    try:
+        confidence = float(raw.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        return None
+
+    trend_direction: Literal["bullish", "bearish", "neutral"]
+    if regime in ("TREND_UP", "ATH_BREAKOUT"):
+        trend_direction = "bullish"
+    elif regime == "TREND_DOWN":
+        trend_direction = "bearish"
+    else:
+        trend_direction = "neutral"
+
+    reasoning = str(raw.get("reasoning") or "")[:300]
+    try:
+        cost_usd = float(raw.get("total_cost_usd", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        cost_usd = 0.0
+
+    return AIRegimeAssessment(
+        regime=regime,  # type: ignore[arg-type]
+        trend_direction=trend_direction,
+        confidence=max(0.0, min(1.0, confidence)),
+        param_preset=route(regime),  # type: ignore[arg-type]
+        reasoning=reasoning,
+        assessed_at=datetime.now(tz=timezone.utc),
+        source="ai_debate",
+        cost_usd=cost_usd,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -549,16 +606,27 @@ def classify_regime_ai(
     # Step 2: Try AI debate path
     if ai_enabled:
         try:
+            from dataclasses import asdict
             from smc.ai.debate.pipeline import run_regime_debate
 
-            ai_result = run_regime_debate(ctx)
-            if ai_result.confidence >= min_confidence:
+            # Round 4 v5 hotfix (2026-04-20 04:15 live crash): pipeline's
+            # run_regime_debate expects a flat features dict, not a
+            # RegimeContext. asdict() flattens for prompt formatting.
+            ai_result_raw = run_regime_debate(asdict(ctx))
+            ai_result = _coerce_debate_result_to_assessment(ai_result_raw, ctx)
+            if ai_result is not None and ai_result.confidence >= min_confidence:
                 _emit_telemetry(ai_result, start_ts, ai_enabled_flag=ai_enabled)
                 return ai_result
-            # Low confidence → fall through to ATR
-        except (ImportError, RuntimeError):
-            # LLM not available or debate failed → fall through
-            pass
+            # Low confidence or malformed → fall through to ATR
+        except Exception as exc:
+            # Never let debate failure kill the cycle — log and fall through
+            # to ATR fallback. Covers AttributeError, JSONDecodeError,
+            # subprocess errors, RuntimeError, ImportError, etc.
+            import logging
+            logging.getLogger(__name__).warning(
+                "AI debate failed (%s: %s) — falling back to ATR",
+                type(exc).__name__, str(exc)[:200],
+            )
 
     # Step 3: ATR fallback (always available)
     result = _atr_fallback(ctx)
