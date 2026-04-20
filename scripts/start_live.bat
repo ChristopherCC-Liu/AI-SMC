@@ -20,5 +20,11 @@ REM Round 4 v5: enable 7-agent regime classifier on both legs (shared baseline).
 REM Cuts researcher rounds 2->1 to halve Opus calls (bull+bear x1 instead of x2).
 set SMC_AI_REGIME_ENABLED=true
 set SMC_AI_DEBATE_ROUNDS=1
+REM Round 4 v5 (Tasks #51/52/53): post-2026-04-20 02:46 stacked-SL guardrails.
+REM max=1 enforces user's one-position-per-symbol hypothesis; 60min cooldown
+REM guarantees two stacked BUYs in a single session cannot repeat.
+set SMC_MAX_CONCURRENT_PER_SYMBOL=1
+set SMC_ANTI_STACK_COOLDOWN_MINUTES=60
+set SMC_RANGE_REVERSAL_CONFIRM_ENABLED=true
 cd /d C:\AI-SMC
 .venv\Scripts\python.exe scripts\live_demo.py >> logs\live_stdout.log 2>> logs\live_stderr.log
