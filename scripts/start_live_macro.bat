@@ -23,6 +23,10 @@ set PYTHONIOENCODING=utf-8
 set PYTHONUNBUFFERED=1
 set SMC_MACRO_ENABLED=true
 set SMC_JOURNAL_SUFFIX=_macro
+REM Round 4 v5: enable 7-agent regime classifier on both legs (shared baseline).
+REM Cuts researcher rounds 2->1 to halve Opus calls (bull+bear x1 instead of x2).
+set SMC_AI_REGIME_ENABLED=true
+set SMC_AI_DEBATE_ROUNDS=1
 REM Optional: override virtual balance split.  Default is 50/50.
 REM set SMC_VIRTUAL_BALANCE_SPLIT={"": 0.5, "_macro": 0.5}
 REM Optional: override treatment-leg magic (default 19760428).

@@ -16,5 +16,9 @@ REM SMC_MACRO_ENABLED=true set for treatment leg. Control MUST stay macro OFF
 REM to maintain the A/B baseline. Suffix empty = control journal path.
 set SMC_MACRO_ENABLED=false
 set SMC_JOURNAL_SUFFIX=
+REM Round 4 v5: enable 7-agent regime classifier on both legs (shared baseline).
+REM Cuts researcher rounds 2->1 to halve Opus calls (bull+bear x1 instead of x2).
+set SMC_AI_REGIME_ENABLED=true
+set SMC_AI_DEBATE_ROUNDS=1
 cd /d C:\AI-SMC
 .venv\Scripts\python.exe scripts\live_demo.py >> logs\live_stdout.log 2>> logs\live_stderr.log
