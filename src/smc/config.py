@@ -74,7 +74,7 @@ class SMCConfig(BaseSettings):
         description="MetaTrader 5 account login number.",
     )
 
-    @field_validator("macro_enabled", "mt5_mock", mode="before")
+    @field_validator("macro_enabled", "mt5_mock", "ai_regime_enabled", mode="before")
     @classmethod
     def _parse_bool_lenient(cls, v: object) -> object:
         """Strip whitespace + tolerate loose boolean strings from bat env.

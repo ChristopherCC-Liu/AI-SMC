@@ -198,3 +198,42 @@ class TestSMCConfigVirtualBalanceSplit:
         cfg = SMCConfig()
         assert cfg.virtual_balance_split.get("") == 0.5
         assert cfg.virtual_balance_split.get("_macro") == 0.5
+
+
+class TestSMCConfigAIRegimeEnabled:
+    """ai_regime_enabled env gate — live_demo.py reads this into
+    MultiTimeframeAggregator. Default must stay False to preserve ATR
+    fallback as the baseline for any future A/B.
+    """
+
+    def test_ai_regime_enabled_default_false(self, monkeypatch) -> None:
+        """Without env, ai_regime_enabled is False (ATR fallback baseline)."""
+        monkeypatch.delenv("SMC_AI_REGIME_ENABLED", raising=False)
+
+        from smc.config import SMCConfig
+        cfg = SMCConfig()
+        assert cfg.ai_regime_enabled is False
+
+    def test_ai_regime_enabled_env_true_activates(self, monkeypatch) -> None:
+        """SMC_AI_REGIME_ENABLED=true enables the 7-agent classifier."""
+        monkeypatch.setenv("SMC_AI_REGIME_ENABLED", "true")
+
+        from smc.config import SMCConfig
+        cfg = SMCConfig()
+        assert cfg.ai_regime_enabled is True
+
+    def test_ai_regime_enabled_whitespace_tolerated(self, monkeypatch) -> None:
+        """Windows .bat trailing space ('true ') must still parse True."""
+        monkeypatch.setenv("SMC_AI_REGIME_ENABLED", "true ")
+
+        from smc.config import SMCConfig
+        cfg = SMCConfig()
+        assert cfg.ai_regime_enabled is True
+
+    def test_ai_regime_min_confidence_default(self, monkeypatch) -> None:
+        """Default AI confidence floor is 0.5 (below → ATR fallback)."""
+        monkeypatch.delenv("SMC_AI_REGIME_MIN_CONFIDENCE", raising=False)
+
+        from smc.config import SMCConfig
+        cfg = SMCConfig()
+        assert cfg.ai_regime_min_confidence == 0.5

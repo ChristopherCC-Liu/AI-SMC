@@ -772,7 +772,10 @@ def main():
     )
 
     detector = SMCDetector(swing_length=10)
-    aggregator = MultiTimeframeAggregator(detector=detector, ai_regime_enabled=False)
+    aggregator = MultiTimeframeAggregator(
+        detector=detector,
+        ai_regime_enabled=_path_cfg.ai_regime_enabled,
+    )
 
     # Round 4 Alt-B W2+W3: _path_cfg (SMCConfig) already loaded above for
     # journal_suffix; reuse the same instance for macro overlay settings.
@@ -792,6 +795,11 @@ def main():
         "macro_layer_init",
         macro_enabled=_macro_flag,
         cache_dir=str(DATA_ROOT / "macro"),
+    )
+    log_info(
+        "ai_regime_init",
+        ai_regime_enabled=_path_cfg.ai_regime_enabled,
+        ai_regime_min_confidence=_path_cfg.ai_regime_min_confidence,
     )
 
     # Round 5 T3 (dual-symbol-audit P0): inject cfg + per-symbol cooldown path
