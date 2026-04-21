@@ -491,3 +491,70 @@ class TestAtrFallbackMapping:
             ctx = self._ctx(atr_regime=atr_regime)
             result = _atr_fallback(ctx)
             assert 0.0 <= result.confidence <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Round 5 A-track Task #7 refinement — precomputed_ctx kwarg
+# ---------------------------------------------------------------------------
+
+
+class TestPrecomputedCtx:
+    """classify_regime_ai accepts a precomputed RegimeContext so the
+    aggregator (SL fitness judge path) can extract once and forward."""
+
+    def test_precomputed_ctx_yields_identical_result(self):
+        """Passing precomputed_ctx must produce the same regime/source
+        as the default code path that extracts internally."""
+        from smc.ai.regime_classifier import extract_regime_context
+        d1 = _make_d1_df(n_bars=100, trend=5.0, volatility=20.0, base_price=4000.0)
+        h4 = _make_d1_df(n_bars=300, trend=4.0, volatility=18.0, base_price=4000.0)
+
+        # Default path
+        result_default = classify_regime_ai(d1, h4)
+        # Precomputed path
+        ctx = extract_regime_context(d1, h4)
+        result_pre = classify_regime_ai(d1, h4, precomputed_ctx=ctx)
+
+        assert result_default.regime == result_pre.regime
+        assert result_default.source == result_pre.source
+        assert result_default.trend_direction == result_pre.trend_direction
+
+    def test_precomputed_ctx_none_falls_back_to_extraction(self):
+        """Passing precomputed_ctx=None must not change behaviour."""
+        d1 = _make_d1_df()
+        result_a = classify_regime_ai(d1, None)
+        result_b = classify_regime_ai(d1, None, precomputed_ctx=None)
+        assert result_a.regime == result_b.regime
+        assert result_a.source == result_b.source
+
+    def test_precomputed_ctx_cached_path_still_hits(self, monkeypatch):
+        """When a cache hit occurs, precomputed_ctx is irrelevant — the
+        cached assessment wins before ctx is ever consulted."""
+        from smc.ai.regime_classifier import extract_regime_context
+        from smc.ai.models import AIRegimeAssessment
+        from smc.ai.param_router import route
+        from datetime import datetime, timezone
+
+        class _FakeCache:
+            def lookup(self, ts):
+                return AIRegimeAssessment(
+                    regime="ATH_BREAKOUT",
+                    trend_direction="bullish",
+                    confidence=0.9,
+                    param_preset=route("ATH_BREAKOUT"),
+                    reasoning="fake cache",
+                    assessed_at=datetime.now(tz=timezone.utc),
+                    source="ai_debate",
+                    cost_usd=0.0,
+                )
+
+        d1 = _make_d1_df()
+        ctx = extract_regime_context(d1, None)
+        result = classify_regime_ai(
+            d1, None,
+            cache=_FakeCache(),
+            cache_ts=datetime.now(tz=timezone.utc),
+            precomputed_ctx=ctx,
+        )
+        # Cache path wins regardless of ctx — regime comes from fake cache.
+        assert result.regime == "ATH_BREAKOUT"

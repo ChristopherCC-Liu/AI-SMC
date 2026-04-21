@@ -378,6 +378,136 @@ class TestRule7TransitionQualityGuard:
 # per design doc §3 these are the dominant catches for this cohort.
 
 
+class TestFiveLossesRealParams:
+    """Lead-provided real ticket parameters from 2026-04-20 02:46 UTC
+    disaster — replay with exact entry/sl/tp/risk/ATR/vol_rank values.
+
+    Each of the 5 real losses must VETO — we don't pin *which* rule
+    fires (multi-rule overlap is fine per Lead's guidance), only that
+    at least one rule rejects each fixture.
+    """
+
+    # (ticket, direction, entry, sl, tp, risk_pts, d1_atr_pct,
+    #  h4_vol_rank, regime, ai_conf, confluence)
+    _FIXTURES: list[tuple] = [
+        ("262518001", "long", 4792.79, 4740.07, 4818.34, 5272.0, 2.28, 0.16, "TREND_DOWN", 0.78, 0.48),
+        ("262518005", "long", 4792.79, 4740.07, 4818.34, 5272.0, 2.28, 0.16, "TRANSITION", 0.72, 0.52),
+        ("262579661", "long", 4778.42, 4740.07, 4818.34, 3835.0, 2.28, 0.16, "TRANSITION", 0.68, 0.50),
+        ("262579669", "long", 4778.42, 4740.07, 4818.34, 3835.0, 2.28, 0.16, "TREND_DOWN", 0.72, 0.47),
+        ("262626659", "long", 4770.45, 4740.34, 4818.34, 3011.0, 2.28, 0.16, "TRANSITION", 0.70, 0.55),
+    ]
+
+    @pytest.mark.parametrize(
+        "ticket, direction, entry_price, stop_loss, tp1, risk_pts, "
+        "d1_atr_pct, h4_vol_rank, regime, ai_conf, confluence",
+        _FIXTURES,
+        ids=[f[0] for f in _FIXTURES],
+    )
+    def test_real_ticket_vetoes(
+        self,
+        ticket: str,
+        direction: str,
+        entry_price: float,
+        stop_loss: float,
+        tp1: float,
+        risk_pts: float,
+        d1_atr_pct: float,
+        h4_vol_rank: float,
+        regime: str,
+        ai_conf: float,
+        confluence: float,
+    ) -> None:
+        # Design doc says the planned RR was 2.5 — rule 4 evaluates
+        # against the FANTASY TP that was actually scheduled, so
+        # construct the EntrySignal with rr_ratio=2.5 regardless of
+        # what the raw tp1/sl price math says about mid-trade unwind.
+        reward_points = risk_pts * 2.5
+        entry = EntrySignal(
+            entry_price=round(entry_price, 2),
+            stop_loss=round(stop_loss, 2),
+            take_profit_1=round(tp1, 2),
+            take_profit_2=round(tp1 + 10.0, 2),
+            risk_points=round(risk_pts, 1),
+            reward_points=round(reward_points, 1),
+            rr_ratio=2.5,
+            trigger_type="choch_in_zone",
+            direction=direction,  # type: ignore[arg-type]
+            grade="B",
+        )
+        assessment = _make_assessment(
+            regime=regime,
+            trend_direction="bearish" if regime == "TREND_DOWN" else "neutral",
+            confidence=ai_conf,
+            source="ai_debate",
+        )
+        # ATH distance far so rule 5 stays silent for these XAU fixtures.
+        ctx = _make_ctx(
+            current_price=entry_price,
+            d1_atr_pct=d1_atr_pct,
+            h4_volatility_rank=h4_vol_rank,
+            ath_distance_pct=5.0,
+        )
+        verdict = judge_sl_fitness(
+            entry=entry,
+            regime_assessment=assessment,
+            regime_ctx=ctx,
+            confluence_score=confluence,
+            h1_atr_points=600.0,
+            d1_atr_pct=d1_atr_pct,
+        )
+        assert verdict.accept is False, (
+            f"ticket {ticket} was NOT vetoed — verdict={verdict}"
+        )
+        assert len(verdict.reason) > 0
+
+    def test_all_five_tickets_produce_distinct_reasons(self) -> None:
+        """Sanity: at least 2 distinct rule_ids across the 5 real tickets.
+
+        Lead expected rule #1 to catch 2 / rule #4 to catch all / rule
+        #7 to catch 3 — given short-circuit on first match, the
+        observed rule distribution must include at least two unique ids.
+        """
+        rule_ids_seen: set[str] = set()
+        for fx in self._FIXTURES:
+            (_, direction, entry_price, stop_loss, tp1, risk_pts,
+             d1_atr_pct, h4_vol_rank, regime, ai_conf, confluence) = fx
+            entry = EntrySignal(
+                entry_price=round(entry_price, 2),
+                stop_loss=round(stop_loss, 2),
+                take_profit_1=round(tp1, 2),
+                take_profit_2=round(tp1 + 10.0, 2),
+                risk_points=round(risk_pts, 1),
+                reward_points=round(risk_pts * 2.5, 1),
+                rr_ratio=2.5,
+                trigger_type="choch_in_zone",
+                direction=direction,  # type: ignore[arg-type]
+                grade="B",
+            )
+            verdict = judge_sl_fitness(
+                entry=entry,
+                regime_assessment=_make_assessment(
+                    regime=regime,
+                    trend_direction="bearish" if regime == "TREND_DOWN" else "neutral",
+                    confidence=ai_conf,
+                    source="ai_debate",
+                ),
+                regime_ctx=_make_ctx(
+                    current_price=entry_price,
+                    d1_atr_pct=d1_atr_pct,
+                    h4_volatility_rank=h4_vol_rank,
+                    ath_distance_pct=5.0,
+                ),
+                confluence_score=confluence,
+                h1_atr_points=600.0,
+                d1_atr_pct=d1_atr_pct,
+            )
+            rule_ids_seen.add(verdict.rule_id)
+        # All should veto → no "accept" in the seen set.
+        assert "accept" not in rule_ids_seen
+        # Variety expected (not all the same rule).
+        assert len(rule_ids_seen) >= 2
+
+
 class TestFiveLossesRegression:
     """Replay-style tests — each represents one of today's 5 losing trades."""
 

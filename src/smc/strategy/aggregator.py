@@ -248,25 +248,11 @@ class MultiTimeframeAggregator:
             self._last_setup_diagnostic["stage_reject"] = "htf_bias_neutral"
             return ()
 
-        # Step 2b: Regime classification — cache → AI → ATR fallback
-        ai_assessment = classify_regime_ai(
-            d1_df=data.get(Timeframe.D1),
-            h4_df=data.get(Timeframe.H4),
-            ai_enabled=self._ai_regime_enabled,
-            cache=self._regime_cache,
-            cache_ts=bar_ts,
-        )
-        regime_params = ai_assessment.param_preset
-        # Round 5 A-track Task #8: expose ai_assessment so live_demo can
-        # read the AI regime (e.g. TREND_UP / ATH_BREAKOUT) and derive
-        # trail params for the strategy_server /signal response.
-        self._last_ai_assessment = ai_assessment
-
-        # Round 5 A-track Task #7: shadow-mode SL fitness judge needs a
-        # RegimeContext snapshot alongside the assessment.  extract_regime_context
-        # is pure + ~1ms — the duplicate work is cheap enough that we prefer it
-        # over plumbing ctx through the classifier's cache/fallback paths.
-        # Only computed when the judge is flagged ON (no overhead when off).
+        # Round 5 A-track Task #7 refinement: extract RegimeContext once
+        # when the SL fitness judge is enabled, then forward it to
+        # classify_regime_ai via precomputed_ctx so the classifier skips
+        # its internal extract_regime_context call (deterministic — a
+        # precomputed ctx yields identical AI/ATR behaviour).
         regime_ctx = (
             extract_regime_context(
                 d1_df=data.get(Timeframe.D1),
@@ -275,6 +261,21 @@ class MultiTimeframeAggregator:
             if self._sl_fitness_enabled
             else None
         )
+
+        # Step 2b: Regime classification — cache → AI → ATR fallback
+        ai_assessment = classify_regime_ai(
+            d1_df=data.get(Timeframe.D1),
+            h4_df=data.get(Timeframe.H4),
+            ai_enabled=self._ai_regime_enabled,
+            cache=self._regime_cache,
+            cache_ts=bar_ts,
+            precomputed_ctx=regime_ctx,
+        )
+        regime_params = ai_assessment.param_preset
+        # Round 5 A-track Task #8: expose ai_assessment so live_demo can
+        # read the AI regime (e.g. TREND_UP / ATH_BREAKOUT) and derive
+        # trail params for the strategy_server /signal response.
+        self._last_ai_assessment = ai_assessment
 
         # Legacy ranging gate: when NOT using AI regime (Sprint 5 compat),
         # suppress Tier 2/3 in ranging markets.  When AI regime is active,

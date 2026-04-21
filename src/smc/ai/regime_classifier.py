@@ -543,6 +543,7 @@ def classify_regime_ai(
     min_confidence: float = 0.5,
     cache: "RegimeCacheLookup | None" = None,
     cache_ts: datetime | None = None,
+    precomputed_ctx: RegimeContext | None = None,
 ) -> AIRegimeAssessment:
     """AI-powered regime classification with automatic fallback.
 
@@ -574,6 +575,12 @@ def classify_regime_ai(
     cache_ts:
         Timestamp to look up in the cache. Required when ``cache``
         is provided. Typically the current bar's timestamp.
+    precomputed_ctx:
+        Round 5 A-track Task #7: when the caller (aggregator with
+        sl_fitness_judge enabled) has already computed a
+        :class:`RegimeContext`, pass it here to skip re-extraction.
+        ``extract_regime_context`` is deterministic, so using a
+        precomputed snapshot yields identical AI/ATR behaviour.
 
     Returns
     -------
@@ -600,8 +607,10 @@ def classify_regime_ai(
         _emit_telemetry(result, start_ts, ai_enabled_flag=ai_enabled)
         return result
 
-    # Step 1: Extract features (deterministic, ~1ms)
-    ctx = extract_regime_context(d1_df, h4_df, external_ctx)
+    # Step 1: Extract features (deterministic, ~1ms) — or reuse precomputed.
+    ctx = precomputed_ctx if precomputed_ctx is not None else extract_regime_context(
+        d1_df, h4_df, external_ctx,
+    )
 
     # Step 2: Try AI debate path
     if ai_enabled:
