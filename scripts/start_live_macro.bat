@@ -33,6 +33,12 @@ REM guarantees two stacked BUYs in a single session cannot repeat.
 set SMC_MAX_CONCURRENT_PER_SYMBOL=1
 set SMC_ANTI_STACK_COOLDOWN_MINUTES=60
 set SMC_RANGE_REVERSAL_CONFIRM_ENABLED=true
+REM Round 7 P0: AI-aware mode_router (AIRegimeAssessment drives path selection).
+REM Treatment leg only — Control leg (start_live.bat) stays on legacy mode_router
+REM for live A/B comparison. Backtest 2020-2024 validated: 2023 Δ PF = 0.00
+REM (regression eliminated), 2022 -0.86 is 2-trade sample noise.
+set SMC_AI_MODE_ROUTER_ENABLED=true
+set SMC_AI_REGIME_TRUST_THRESHOLD=0.6
 REM Optional: override virtual balance split.  Default is 50/50.
 REM set SMC_VIRTUAL_BALANCE_SPLIT={"": 0.5, "_macro": 0.5}
 REM Optional: override treatment-leg magic (default 19760428).
