@@ -575,16 +575,19 @@ class TestAIRegimeIntegration:
             "consolidation_fell_through_no_range_conf_0.70"
         )
 
-    def test_p0_1c_consolidation_with_bullish_direction_allows_trending(
+    def test_p0_1c_consolidation_no_range_weak_direction_falls_through(
         self,
     ) -> None:
-        """P0-1c regression test (backtest-lead's flagged bug).
+        """P0-1c regression test (backtest-lead's original flagged path).
 
-        Scenario: AI says CONSOLIDATION with 0.72 confidence BUT the
-        direction engine is bullish with 0.7 conviction and no range
-        bounds exist.  Pre-fix: router forced v1_passthrough → 14
-        divergences / −0.23 PF in 2023.  Post-fix: falls through to
-        Priority 1 → trending.
+        Scenario: AI says CONSOLIDATION with 0.72 confidence, direction
+        engine weakly bullish (0.47, below P0-1d's 0.5 defer threshold),
+        no range bounds exist.  Pre-P0-1c: router forced v1_passthrough.
+        Post-P0-1c: falls through via the "no range" path; Priority 1
+        still picks trending because 0.47 ≥ 0.45.
+
+        Note: the P0-1d path (direction ≥ 0.5) is tested separately
+        below in test_p0_1d_* — it produces a different telemetry tag.
         """
         assessment = _make_ai_assessment(
             "CONSOLIDATION",
@@ -593,21 +596,115 @@ class TestAIRegimeIntegration:
         )
         result = route_trading_mode(
             ai_direction="bullish",
-            ai_confidence=0.7,
+            ai_confidence=0.47,  # ≥ Pri-1 floor (0.45), < P0-1d defer floor (0.5)
             regime="transitional",
             session="LONDON",
             range_bounds=None,  # no range → preconditions fail
             guards_passed=False,
             ai_regime_assessment=assessment,
         )
-        # Legacy Priority 1 picks trending because ai_direction bullish
-        # + conf 0.7 >= 0.45 + session LONDON (not ASIAN_CORE).
+        # Priority 1 picks trending (0.47 >= 0.45, not ASIAN_CORE).
         assert result.mode == "trending"
-        # Telemetry still records the CONSOLIDATION fell-through so the
-        # measurement team can count this legitimate override.
+        # P0-1c tag (not P0-1d) because 0.47 < 0.5.
         assert result.ai_regime_decision == (
             "consolidation_fell_through_no_range_conf_0.72"
         )
+
+    # -- P0-1d: CONSOLIDATION defers to strong ai_direction --
+    # Backtest-lead 37ed918 rerun found the 14 divergent 2023 bars had
+    # valid range_bounds + guards, so P0-1c's fall-through didn't fire.
+    # P0-1d adds a pre-check: when direction ≥ 0.5 AND ai_regime is
+    # CONSOLIDATION, defer to Priority 1-3 so Priority 1 can pick
+    # trending.  Threshold 0.5 is stricter than Priority 1's 0.45 — this
+    # override demands more conviction.
+
+    def test_p0_1d_consolidation_deferred_to_bullish_direction(
+        self, sample_range_bounds: RangeBounds
+    ) -> None:
+        """CONSOLIDATION + ai_dir bullish ≥ 0.5 + valid range → trending.
+
+        Regression test for the 2023 −0.23 PF bars P0-1c couldn't reach
+        (because range_bounds + guards were valid, routing ranging under
+        pure regime view).  P0-1d now defers to direction so Priority 1
+        picks trending.
+        """
+        assessment = _make_ai_assessment(
+            "CONSOLIDATION",
+            confidence=0.72,
+            trend_direction="neutral",
+        )
+        result = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.55,
+            regime="ranging",
+            session="LONDON",
+            range_bounds=sample_range_bounds,
+            guards_passed=True,
+            current_price=2360.0,  # in range
+            ai_regime_assessment=assessment,
+        )
+        # Priority 1 picks trending (0.55 >= 0.45, not ASIAN_CORE).
+        assert result.mode == "trending"
+        # Telemetry tags the CONSOLIDATION→direction override.
+        assert result.ai_regime_decision == (
+            "consolidation_deferred_to_direction_conf_0.55"
+        )
+
+    def test_p0_1d_consolidation_below_direction_threshold_routes_ranging(
+        self, sample_range_bounds: RangeBounds
+    ) -> None:
+        """CONSOLIDATION + ai_dir bullish 0.48 + valid range → ranging.
+
+        Direction below the 0.5 defer threshold — regime retains the
+        vote, normal CONSOLIDATION→ranging behaviour applies.
+        """
+        assessment = _make_ai_assessment(
+            "CONSOLIDATION",
+            confidence=0.72,
+            trend_direction="neutral",
+        )
+        result = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.48,  # below 0.5 defer threshold
+            regime="ranging",
+            session="LONDON",
+            range_bounds=sample_range_bounds,
+            guards_passed=True,
+            current_price=2360.0,
+            ai_regime_assessment=assessment,
+        )
+        # Regime still wins → ranging via the normal CONSOLIDATION path.
+        assert result.mode == "ranging"
+        assert result.ai_regime_decision == (
+            "consolidation_to_ranging_conf_0.72"
+        )
+
+    def test_p0_1d_neutral_direction_not_deferred(
+        self, sample_range_bounds: RangeBounds
+    ) -> None:
+        """CONSOLIDATION + ai_direction neutral (even at 0.9 conf) → regime wins.
+
+        Neutral direction means no strong trending conviction regardless
+        of its ai_confidence magnitude — defer threshold only applies to
+        bullish/bearish.
+        """
+        assessment = _make_ai_assessment(
+            "CONSOLIDATION",
+            confidence=0.72,
+            trend_direction="neutral",
+        )
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.9,
+            regime="ranging",
+            session="LONDON",
+            range_bounds=sample_range_bounds,
+            guards_passed=True,
+            current_price=2360.0,
+            ai_regime_assessment=assessment,
+        )
+        assert result.mode == "ranging"
+        assert result.ai_regime_decision == "consolidation_to_ranging_conf_0.72"
 
     # -- TRANSITION: default v1, exception when ATR trending + AI dir conviction --
 

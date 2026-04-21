@@ -138,43 +138,65 @@ def route_trading_mode(
                 ),
             )
         elif ai_regime == "CONSOLIDATION":
-            # --- CONSOLIDATION: allow ranging when guards + session align ---
-            price_in_range = (
-                current_price is None
-                or range_bounds is None
-                or (range_bounds.lower <= current_price <= range_bounds.upper)
-            )
+            # --- P0-1d: CONSOLIDATION defers to strong ai_direction ---
+            # When the DirectionEngine shows strong conviction (≥ 0.5),
+            # two AI components disagree: regime says "consolidating" but
+            # direction says "clearly trending".  Trust the higher-
+            # conviction signal — fall through to Priority 1-3 so Priority
+            # 1 can route trending.  2023 backtest evidence: 14 bars with
+            # valid range + guards routed to ranging under pure regime
+            # view, but Priority-1 trending would have been more profitable
+            # (Δ PF −0.23 unchanged by P0-1c fall-through because those
+            # bars still passed the CONSOLIDATION→ranging preconditions).
+            #
+            # Threshold 0.5 is DELIBERATELY stricter than Priority 1's 0.45
+            # — CONSOLIDATION override demands higher conviction.  At
+            # ai_confidence < 0.5 the regime still gets the vote (ranging
+            # if preconditions hold).
             if (
-                range_bounds is not None
-                and guards_passed
-                and session in cfg.ranging_sessions
-                and price_in_range
+                ai_direction in ("bullish", "bearish")
+                and ai_confidence >= 0.5
             ):
-                return TradingMode(
-                    mode="ranging",
-                    reason=(
-                        f"AI regime CONSOLIDATION (conf={ai_regime_conf:.2f}) "
-                        f"— mean-reversion mode, session={session}"
-                    ),
-                    ai_direction=ai_direction,
-                    ai_confidence=ai_confidence,
-                    regime=regime,
-                    range_bounds=range_bounds,
-                    ai_regime_decision=(
-                        f"consolidation_to_ranging_conf_{ai_regime_conf:.2f}"
-                    ),
+                fell_through_tag = (
+                    f"consolidation_deferred_to_direction_conf_"
+                    f"{ai_confidence:.2f}"
                 )
-            # P0-1c fix: CONSOLIDATION + range preconditions missing must NOT
-            # force v1_passthrough — that starves Priority 1 of AI-bullish/
-            # bearish trending entries (2023 backtest: 14 divergences,
-            # Δ PF −0.23).  Instead, tag the fell-through state and let
-            # Priority 1-3 decide (trending if ai_direction + conf ≥ 0.45,
-            # ranging if legacy Priority 2 conditions hold elsewhere,
-            # else v1_passthrough).  The AI's CONSOLIDATION view stays
-            # informational via the telemetry tag below.
-            fell_through_tag = (
-                f"consolidation_fell_through_no_range_conf_{ai_regime_conf:.2f}"
-            )
+                # Flow continues to Priority 1-3 below.
+            else:
+                # --- CONSOLIDATION: allow ranging when guards + session align ---
+                price_in_range = (
+                    current_price is None
+                    or range_bounds is None
+                    or (range_bounds.lower <= current_price <= range_bounds.upper)
+                )
+                if (
+                    range_bounds is not None
+                    and guards_passed
+                    and session in cfg.ranging_sessions
+                    and price_in_range
+                ):
+                    return TradingMode(
+                        mode="ranging",
+                        reason=(
+                            f"AI regime CONSOLIDATION (conf={ai_regime_conf:.2f}) "
+                            f"— mean-reversion mode, session={session}"
+                        ),
+                        ai_direction=ai_direction,
+                        ai_confidence=ai_confidence,
+                        regime=regime,
+                        range_bounds=range_bounds,
+                        ai_regime_decision=(
+                            f"consolidation_to_ranging_conf_{ai_regime_conf:.2f}"
+                        ),
+                    )
+                # P0-1c fix: CONSOLIDATION + range preconditions missing must NOT
+                # force v1_passthrough — that starves Priority 1 of AI-bullish/
+                # bearish trending entries.  Tag the fell-through state and let
+                # Priority 1-3 decide.  The AI's CONSOLIDATION view stays
+                # informational via the telemetry tag below.
+                fell_through_tag = (
+                    f"consolidation_fell_through_no_range_conf_{ai_regime_conf:.2f}"
+                )
         elif ai_regime == "TRANSITION":
             # --- TRANSITION: default v1_passthrough, exception for ATR-trending
             #     + directional AI conviction (conservative momentum-follow).
