@@ -1406,6 +1406,14 @@ def main():
                 _mt5_ticket: int | None = None
                 _mt5_send_retcode: int | None = None
                 _mt5_mode_tag = "PAPER"
+                # Round 6 B3: execution_path disambiguates "mode=PAPER" from truth.
+                # Round 4 v5 permanently disabled Python order_send → EA is the
+                # sole executor. So "PAPER" historically meant "Python didn't
+                # send" but EA still did. New semantics:
+                #   "ea"    → EA will (or did) execute the signal
+                #   "paper" → --paper / --no-execute: no execution at all
+                #   "python" → reserved for future if Python order_send revives
+                _execution_path = "paper" if PAPER_MODE else "ea"
                 _margin_gated = False  # set True when margin_cap gate blocks real order
                 # Asian ranging 用 0.3x multiplier (Phase1a 降档协议), 其他 1.0x.
                 # margin 公式分两步避免 bug:
@@ -1496,6 +1504,8 @@ def main():
                             "tp1": best.take_profit,
                             "trigger": best.trigger,
                             "mode": "MARGIN_GATED",
+                            # Round 6 B3: intent was EA execution; gate blocked it.
+                            "execution_path": _execution_path,
                             "margin_gated": True,
                             "margin_reason": margin_check.reason,
                             "trading_mode": mode.mode,
@@ -1612,6 +1622,10 @@ def main():
                         "regime": regime,
                         "ai_direction": ai_analysis.get("ai_direction", ai_analysis.get("direction", "?")),
                         "mode": _mt5_mode_tag,  # 4.6-X: PAPER / LIVE_EXEC / MT5_FAIL_xxx
+                        # Round 6 B3: Round 4 v5 EA-only architecture means
+                        # "mode=PAPER" ≠ no execution — EA still fires. See
+                        # docs/ARCHITECTURE.md "Journal semantics".
+                        "execution_path": _execution_path,
                         "mt5_ticket": _mt5_ticket,
                         "mt5_retcode": _mt5_send_retcode,
                         "mt5_send_attempts": _mt5_send_attempts,  # Round 5 T0 P0-3
@@ -1677,6 +1691,8 @@ def main():
                         "regime": regime,
                         "ai_direction": ai_analysis.get("ai_direction", ai_analysis.get("direction", "?")),
                         "mode": "PAPER",
+                        # Round 6 B3: EA executes the trending signal unless PAPER_MODE.
+                        "execution_path": _execution_path,
                         "trading_mode": mode.mode,
                         # audit-r2 ops #18 (TP1 debate + Guard 6 monitor)
                         "planned_rr_ratio": _t_rr,  # trending: planned == exec
