@@ -306,7 +306,7 @@ def _summary_table(
         ("Loss count",    str(stats_a.loss_count),                 str(stats_b.loss_count)),
         ("Win rate",      _fmt_pct(stats_a.win_rate),              _fmt_pct(stats_b.win_rate)),
         ("Profit factor", _fmt_pf(stats_a.profit_factor),          _fmt_pf(stats_b.profit_factor)),
-        ("Avg PnL (R)",   f"{stats_a.avg_pnl:+.3f}",              f"{stats_b.avg_pnl:+.3f}"),
+        ("Avg PnL",       f"{stats_a.avg_pnl:+.3f}",              f"{stats_b.avg_pnl:+.3f}"),
         ("Gross wins",    f"{stats_a.gross_wins:.3f}",             f"{stats_b.gross_wins:.3f}"),
         ("Gross losses",  f"{stats_a.gross_losses:.3f}",           f"{stats_b.gross_losses:.3f}"),
         ("Account balance (latest)", acc_a, acc_b),
