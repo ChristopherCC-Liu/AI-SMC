@@ -584,7 +584,7 @@ class TestAIRegimeIntegration:
     def test_transition_momentum_exception_allows_trending(
         self,
     ) -> None:
-        """TRANSITION + ATR trending + AI bullish ≥ 0.5 → momentum-follow."""
+        """TRANSITION + ATR trending + AI bullish ≥ 0.45 → momentum-follow."""
         assessment = _make_ai_assessment("TRANSITION", confidence=0.7)
         result = route_trading_mode(
             ai_direction="bullish",
@@ -598,14 +598,14 @@ class TestAIRegimeIntegration:
         assert "TRANSITION" in result.reason
         assert "momentum-follow" in result.reason
 
-    def test_transition_momentum_exception_boundary_exact_0_5(
+    def test_transition_momentum_exception_boundary_exact_0_45(
         self,
     ) -> None:
-        """TRANSITION exception fires at exactly 0.5 (inclusive)."""
+        """TRANSITION exception fires at exactly 0.45 (inclusive, matches Pri-1)."""
         assessment = _make_ai_assessment("TRANSITION", confidence=0.7)
         result = route_trading_mode(
             ai_direction="bullish",
-            ai_confidence=0.5,
+            ai_confidence=0.45,
             regime="trending",
             session="LONDON",
             range_bounds=None,
@@ -613,14 +613,14 @@ class TestAIRegimeIntegration:
         )
         assert result.mode == "trending"
 
-    def test_transition_momentum_exception_blocked_below_0_5(
+    def test_transition_momentum_exception_blocked_below_0_45(
         self,
     ) -> None:
-        """TRANSITION exception does NOT fire at 0.49 (stricter than Pri-1)."""
+        """TRANSITION exception does NOT fire at 0.44 (just below Pri-1 floor)."""
         assessment = _make_ai_assessment("TRANSITION", confidence=0.7)
         result = route_trading_mode(
             ai_direction="bullish",
-            ai_confidence=0.49,  # below 0.5 TRANSITION floor
+            ai_confidence=0.44,  # below 0.45 aligned floor
             regime="trending",
             session="LONDON",
             range_bounds=None,

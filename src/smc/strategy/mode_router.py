@@ -42,10 +42,12 @@ __all__ = ["route_trading_mode"]
 _TREND_REGIMES: frozenset[str] = frozenset({"TREND_UP", "TREND_DOWN", "ATH_BREAKOUT"})
 
 # TRANSITION exception: allow trending only when ATR regime agrees AND the
-# AI direction engine has ≥ this much conviction.  Deliberately STRICTER
-# than Priority 1's 0.45 floor — TRANSITION is an ambiguity regime, so we
-# demand higher directional conviction before overriding v1_passthrough.
-_TRANSITION_TREND_DIR_CONF: float = 0.5
+# AI direction engine has ≥ this much conviction.  Intentionally aligned
+# with Priority 1's post-Round-5-T5 threshold (0.45) so the two trending
+# paths use a single directional floor — consistency beats defensive
+# layering here (Lead ACK-READY 7433c19: "0.45 is the correct final value
+# — it matches current Priority 1's threshold so the two paths align").
+_TRANSITION_TREND_DIR_CONF: float = 0.45
 
 
 def route_trading_mode(
