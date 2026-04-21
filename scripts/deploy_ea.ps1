@@ -167,6 +167,7 @@ if (Test-Path $destEx5) {
 
 Write-Step "deploy_ea: syncing includes"
 
+$includeCount = 0
 if (-not (Test-Path $includeSrcDir)) {
     Write-Host ("  No include dir in repo at " + $includeSrcDir + " — skipping (pre-R6 EA?)") -ForegroundColor Yellow
 } else {
@@ -180,10 +181,12 @@ if (-not (Test-Path $includeSrcDir)) {
             try {
                 Copy-Item -Path $f.FullName -Destination $dst -Force
                 Write-Host ("  Copied {0} ({1:N0} bytes)" -f $f.Name, $f.Length)
+                $includeCount++
             } catch {
                 Fail ("Include copy failed for " + $f.Name + ": " + $_.Exception.Message)
             }
         }
+        Write-Host ("  Synced {0} include file(s)" -f $includeCount)
     }
 }
 
@@ -279,9 +282,10 @@ if ($SkipTelegram) {
             $ex5SizeKb = [math]::Round($ex5Size / 1024, 1)
             $notifyArgs = @(
                 $notifyScript,
-                "--version",      $eaVersion,
-                "--ex5-size-kb",  $ex5SizeKb,
-                "--compile-sec",  [math]::Round($sw.Elapsed.TotalSeconds, 1)
+                "--version",        $eaVersion,
+                "--ex5-size-kb",    $ex5SizeKb,
+                "--compile-sec",    [math]::Round($sw.Elapsed.TotalSeconds, 1),
+                "--include-count",  $includeCount
             )
             try {
                 & $pythonExe @notifyArgs 2>&1 | ForEach-Object { Write-Host "    $_" }
