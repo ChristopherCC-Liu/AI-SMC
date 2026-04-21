@@ -113,13 +113,32 @@ def get_positions(symbol: str = Query(default="XAUUSD")) -> JSONResponse:
     ``live_demo`` writes ``data/{SYMBOL}/mt5_positions.json`` at the end of
     each M15 cycle via the MT5 positions adapter. Empty list (not 404) on a
     missing file keeps the dashboard usable during cold starts / market-closed.
+
+    Round 6 B4: each position row is enriched with ``trail_activate_r`` +
+    ``trail_distance_r`` + ``regime_at_open`` — derived from
+    :func:`smc.ai.param_router.get_trail_params` by tail-scanning
+    ``logs/structured.jsonl`` for the last ``ai_regime_classified`` event
+    whose ``ts <= position.open_time``. Unknown / missing regime → fields
+    are ``None`` and the UI renders an empty pill. Never raises: attachment
+    failure falls back to the raw broker rows.
     """
+    from smc.monitor.dashboard_feeds import attach_trail_params_to_positions
+
     root = _symbol_data_root(symbol)
     data = _read_json(root / "mt5_positions.json") or {}
     halt = _read_json(root / "consec_loss_state.json") or {}
+    raw_positions = data.get("positions", []) or []
+    try:
+        enriched_positions = attach_trail_params_to_positions(
+            raw_positions,
+            structured_log_path=ROOT / "logs" / "structured.jsonl",
+        )
+    except Exception as exc:
+        logger.warning("trail attach fail, returning raw positions: %s", exc)
+        enriched_positions = raw_positions
     return JSONResponse({
         "ts": data.get("ts"),
-        "positions": data.get("positions", []),
+        "positions": enriched_positions,
         "halt": {
             "tripped": bool(halt.get("tripped", False)),
             "consec_losses": int(halt.get("consec_losses", 0)),

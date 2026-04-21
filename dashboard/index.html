@@ -123,6 +123,51 @@
     </div>
   </div>
 
+  <!-- Round 6 B4: Active Trades (实时持仓 + per-ticket trail preset) -->
+  <div x-show="positions && positions.length > 0" class="card p-5 md:p-6">
+    <div class="flex items-baseline justify-between mb-3">
+      <div>
+        <div class="text-xs uppercase tracking-wider text-muted">实时持仓 · Trail 预设</div>
+        <div class="text-xs text-muted mt-0.5">每 5 秒刷新 · 来自 /api/positions</div>
+      </div>
+      <div class="text-xs num text-muted">共 <span x-text="positions.length"></span> 笔</div>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="text-xs text-muted uppercase tracking-wider">
+          <tr class="text-left border-b border-slate-700/40">
+            <th class="py-2 pr-3">Leg</th>
+            <th class="py-2 pr-3">Position</th>
+            <th class="py-2 pr-3">Trail</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="pos in positions" :key="pos.ticket">
+            <tr class="border-b border-slate-700/20 last:border-0">
+              <td class="py-2.5 pr-3">
+                <span class="text-xs text-muted num" x-text="tradeLegLabel(pos)"></span>
+              </td>
+              <td class="py-2.5 pr-3">
+                <span class="px-2 py-0.5 rounded text-xs font-medium"
+                      :style="{ background: (pos.direction === 'long' ? '#10B98122' : '#EF444422'), color: (pos.direction === 'long' ? '#10B981' : '#EF4444') }"
+                      x-text="(pos.direction === 'long' ? '多 ' : '空 ') + (Number(pos.lots || 0).toFixed(2)) + ' 手'"></span>
+                <span class="ml-2 text-xs text-muted num" x-text="'@ $' + formatNum(pos.open_price)"></span>
+              </td>
+              <td class="py-2.5 pr-3">
+                <span x-show="pos.trail_activate_r !== null && pos.trail_activate_r !== undefined"
+                      class="px-2 py-0.5 rounded text-xs font-medium num"
+                      :style="trailPillStyle(pos.regime_at_open)"
+                      x-text="trailPillLabel(pos)"></span>
+                <span x-show="pos.trail_activate_r === null || pos.trail_activate_r === undefined"
+                      class="text-xs text-muted">—</span>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- Round 5 O2: 今日 P&L by leg -->
   <div class="card p-5 md:p-6">
     <div class="flex items-baseline justify-between mb-3">
@@ -965,6 +1010,40 @@
         if (regime === "TRANSITION") return "#F59E0B";    // warn
         return "#94A3B8";
       },
+
+      // Round 6 B4: trail pill helpers — mirror smc.ai.param_router.TRAIL_PRESETS.
+      // Colors map to regime semantics:
+      //   TREND_UP/TREND_DOWN → green/red (directional trend)
+      //   ATH_BREAKOUT        → amber (wide breakout room)
+      //   CONSOLIDATION       → accent (tight scalp)
+      //   TRANSITION          → muted (baseline)
+      trailPillStyle(regime) {
+        const colorMap = {
+          TREND_UP:      "#10B981",
+          TREND_DOWN:    "#EF4444",
+          ATH_BREAKOUT:  "#F59E0B",
+          CONSOLIDATION: "#A78BFA",
+          TRANSITION:    "#94A3B8",
+        };
+        const color = colorMap[regime] || "#94A3B8";
+        return { background: color + "22", color: color };
+      },
+      trailPillLabel(pos) {
+        const act = (pos.trail_activate_r ?? 0).toFixed(1);
+        const dist = (pos.trail_distance_r ?? 0).toFixed(1);
+        return `${act}R @ ${dist}R`;
+      },
+      tradeLegLabel(pos) {
+        // Legs are decided by (symbol, magic) composite — matches
+        // PNL_LEG_BY_COMPOSITE in smc.monitor.dashboard_feeds.
+        const symbol = pos.symbol || "";
+        const magic = Number(pos.magic || 0);
+        if (symbol.includes("XAU") && magic === 19760418) return "XAU control";
+        if (symbol.includes("XAU") && magic === 19760428) return "XAU treatment";
+        if (symbol.includes("BTC") && magic === 19760419) return "BTC control";
+        return symbol ? `${symbol} ${magic}` : "—";
+      },
+
       directionColor(direction) {
         if (direction === "bullish") return "#10B981";
         if (direction === "bearish") return "#EF4444";

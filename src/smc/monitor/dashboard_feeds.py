@@ -117,6 +117,110 @@ def tail_regime_events(
 
 
 # ---------------------------------------------------------------------------
+# Round 6 B4: per-position trail-preset attachment for /api/positions
+# ---------------------------------------------------------------------------
+
+
+def _find_regime_before(
+    structured_log_path: Path,
+    cutoff_ts: datetime,
+    *,
+    max_scan_lines: int = 4000,
+) -> str | None:
+    """Return the last non-default ``ai_regime_classified.regime`` ≤ cutoff_ts.
+
+    Mirrors :func:`smc.monitor.trade_close_enrichment._find_regime_at` but
+    returns only the regime string (the B4 UI doesn't need confidence).
+    ``None`` if no usable event exists — the caller renders an empty pill.
+    """
+    if not structured_log_path.exists():
+        return None
+    try:
+        lines = structured_log_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        logger.debug("structured log read fail %s: %s", structured_log_path, exc)
+        return None
+
+    scanned = 0
+    for line in reversed(lines):
+        if scanned >= max_scan_lines:
+            break
+        scanned += 1
+        row = _parse_structured_line(line)
+        if row is None or row.get("event") != "ai_regime_classified":
+            continue
+        if str(row.get("source", "")) in _REGIME_SOURCE_BLOCKLIST:
+            continue
+        ts_raw = row.get("ts")
+        try:
+            row_ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if row_ts > cutoff_ts:
+            continue
+        regime = row.get("regime")
+        return str(regime) if regime is not None else None
+    return None
+
+
+def _parse_open_time(raw: Any) -> datetime | None:
+    """Parse position.open_time (ISO 8601) into a UTC-aware datetime.
+
+    Returns ``None`` on malformed / missing input so the caller falls back
+    to "no trail pill" instead of crashing the whole positions payload.
+    """
+    if raw is None:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
+def attach_trail_params_to_positions(
+    positions: list[dict[str, Any]],
+    *,
+    structured_log_path: Path,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Decorate each position dict with ``trail_activate_r`` + ``trail_distance_r``.
+
+    For each position we:
+      1. Parse ``open_time`` (fallback ``now`` if missing).
+      2. Tail-scan ``structured.jsonl`` for the last non-default
+         ``ai_regime_classified`` with ``ts <= open_time``.
+      3. Look up the regime in :data:`TRAIL_PRESETS`; unknown regimes or
+         missing events produce ``None`` for both fields so the UI can
+         render "--" without crashing.
+
+    Returns a **new** list of **new** position dicts (immutability — the
+    caller's input is never mutated).
+    """
+    from smc.ai.param_router import TRAIL_PRESETS, TrailParams
+
+    cutoff_fallback = now or datetime.now(timezone.utc)
+    out: list[dict[str, Any]] = []
+    for pos in positions:
+        open_ts = _parse_open_time(pos.get("open_time")) or cutoff_fallback
+        regime = _find_regime_before(structured_log_path, open_ts)
+        trail: TrailParams | None = TRAIL_PRESETS.get(regime) if regime else None
+        enriched = dict(pos)  # shallow copy — never mutate caller's dict
+        if trail is not None:
+            enriched["trail_activate_r"] = trail.activate_r
+            enriched["trail_distance_r"] = trail.distance_r
+            enriched["regime_at_open"] = regime
+        else:
+            enriched["trail_activate_r"] = None
+            enriched["trail_distance_r"] = None
+            enriched["regime_at_open"] = regime  # may still be non-None for "unknown regime"
+        out.append(enriched)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # O2: P&L snapshot (per-leg realized + floating)
 # ---------------------------------------------------------------------------
 
