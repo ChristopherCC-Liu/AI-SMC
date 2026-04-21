@@ -675,6 +675,12 @@ def cmd_live(
         aggregator = MultiTimeframeAggregator(
             detector=detector,
             ai_regime_enabled=cfg.ai_regime_enabled,
+            sl_fitness_enabled=cfg.sl_fitness_judge_enabled,
+            sl_fitness_min_sl_atr_ratio=cfg.sl_fitness_min_sl_atr_ratio,
+            sl_fitness_max_sl_atr_ratio=cfg.sl_fitness_max_sl_atr_ratio,
+            sl_fitness_low_vol_percentile=cfg.sl_fitness_low_vol_percentile,
+            sl_fitness_transition_conf_floor=cfg.sl_fitness_transition_conf_floor,
+            sl_fitness_counter_trend_ai_conf=cfg.sl_fitness_counter_trend_ai_conf,
         )
 
         # Build live loop

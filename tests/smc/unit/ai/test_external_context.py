@@ -314,3 +314,57 @@ class TestExternalContextFetcher:
         after = datetime.now(tz=timezone.utc)
 
         assert before <= ctx.fetched_at <= after
+
+    def test_is_fresh_empty_cache(self) -> None:
+        """Pre-fetch: nothing cached → not fresh (R2 health_probe signal)."""
+        fetcher = ExternalContextFetcher(cache_ttl_minutes=60)
+        assert fetcher.is_fresh() is False
+
+    def test_is_fresh_after_successful_fetch(self) -> None:
+        import pandas as pd
+
+        mock_ticker = MagicMock()
+        mock_ticker.history.return_value = pd.DataFrame({"Close": [18.0]})
+
+        fetcher = ExternalContextFetcher(cache_ttl_minutes=60)
+        with (
+            patch("yfinance.Ticker", return_value=mock_ticker),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            fetcher.fetch()
+
+        assert fetcher.is_fresh() is True
+
+    def test_is_fresh_false_after_invalidate(self) -> None:
+        import pandas as pd
+
+        mock_ticker = MagicMock()
+        mock_ticker.history.return_value = pd.DataFrame({"Close": [18.0]})
+
+        fetcher = ExternalContextFetcher(cache_ttl_minutes=60)
+        with (
+            patch("yfinance.Ticker", return_value=mock_ticker),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            fetcher.fetch()
+
+        fetcher.invalidate()
+        assert fetcher.is_fresh() is False
+
+    def test_is_fresh_false_when_ttl_expired(self) -> None:
+        """TTL=0 ensures any post-fetch call already exceeds the window."""
+        import pandas as pd
+        import time as _time
+
+        mock_ticker = MagicMock()
+        mock_ticker.history.return_value = pd.DataFrame({"Close": [18.0]})
+
+        fetcher = ExternalContextFetcher(cache_ttl_minutes=0)
+        with (
+            patch("yfinance.Ticker", return_value=mock_ticker),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            fetcher.fetch()
+
+        _time.sleep(0.001)
+        assert fetcher.is_fresh() is False

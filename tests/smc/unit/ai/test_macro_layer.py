@@ -153,6 +153,37 @@ class TestComputeMacroBias:
 # ---------------------------------------------------------------------------
 
 
+class TestIsCacheFresh:
+    """R2: MacroLayer.is_cache_fresh reports underlying fetcher freshness."""
+
+    def test_fresh_after_successful_fetch(self, tmp_path) -> None:
+        layer = MacroLayer(cache_dir=tmp_path)
+        with patch.object(
+            layer._external,
+            "is_fresh",
+            return_value=True,
+        ):
+            assert layer.is_cache_fresh() is True
+
+    def test_not_fresh_when_underlying_fetcher_empty(self, tmp_path) -> None:
+        layer = MacroLayer(cache_dir=tmp_path)
+        with patch.object(
+            layer._external,
+            "is_fresh",
+            return_value=False,
+        ):
+            assert layer.is_cache_fresh() is False
+
+    def test_never_raises_even_if_fetcher_explodes(self, tmp_path) -> None:
+        layer = MacroLayer(cache_dir=tmp_path)
+        with patch.object(
+            layer._external,
+            "is_fresh",
+            side_effect=RuntimeError("boom"),
+        ):
+            assert layer.is_cache_fresh() is False
+
+
 class TestDXYBias:
     def test_dxy_bias_raises_when_fetcher_unavailable(self, tmp_path) -> None:
         """When ExternalContextFetcher reports unavailable, _dxy_bias raises."""

@@ -146,6 +146,19 @@ class MacroLayer:
     # Public API
     # ------------------------------------------------------------------
 
+    def is_cache_fresh(self) -> bool:
+        """Return True iff the underlying external fetcher's cache is
+        within TTL — i.e. a call to ``compute_macro_bias`` would be
+        served from cache without a network round-trip.
+
+        Used by the live-cycle ``health_probe`` event (Round 5 R2).
+        Never raises.
+        """
+        try:
+            return bool(self._external.is_fresh())
+        except Exception:
+            return False
+
     def compute_macro_bias(self, instrument: str = "XAUUSD") -> MacroBias:
         """Return the aggregated macro bias for the given instrument.
 

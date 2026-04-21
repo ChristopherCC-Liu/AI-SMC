@@ -79,6 +79,7 @@ class SMCConfig(BaseSettings):
         "mt5_mock",
         "ai_regime_enabled",
         "range_reversal_confirm_enabled",
+        "sl_fitness_judge_enabled",
         mode="before",
     )
     @classmethod
@@ -297,6 +298,49 @@ class SMCConfig(BaseSettings):
             "2026-04-20 post-mortem where 5 stacked BUYs passed existing "
             "checks but had MFE < 0.10R (still-falling bars)."
         ),
+    )
+    # ------------------------------------------------------------------
+    # Round 5 A-track — SL Fitness Judge (Task #7)
+    # ------------------------------------------------------------------
+    sl_fitness_judge_enabled: bool = Field(
+        default=False,
+        description=(
+            "Round 5 Task #7: when True, the SL fitness judge runs in "
+            "shadow mode inside the aggregator — emits "
+            "sl_fitness_shadow_veto telemetry without actually vetoing "
+            "any setup.  Default False keeps behaviour identical to "
+            "Round 4 v5 live_demo.  Toggle via SMC_SL_FITNESS_JUDGE_ENABLED."
+        ),
+    )
+    sl_fitness_min_sl_atr_ratio: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=2.0,
+        description="Rule 2 floor: risk_points must be ≥ this × d1_atr_points.",
+    )
+    sl_fitness_max_sl_atr_ratio: float = Field(
+        default=2.5,
+        ge=0.5,
+        le=10.0,
+        description="Rule 3 ceiling: risk_points must be ≤ this × d1_atr_points.",
+    )
+    sl_fitness_low_vol_percentile: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Rule 4: H4 vol rank below this = low-vol (vetoes RR ≥ 2.5).",
+    )
+    sl_fitness_transition_conf_floor: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="Rule 7: TRANSITION regime demands confluence ≥ this.",
+    )
+    sl_fitness_counter_trend_ai_conf: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="Rule 1: AI confidence threshold for asserting counter-trend VETO.",
     )
     ath_reference_price: float = Field(
         default=3500.0,

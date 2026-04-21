@@ -493,6 +493,18 @@ class ExternalContextFetcher:
             self._cached = None
             self._cached_at = None
 
+    def is_fresh(self) -> bool:
+        """Return True iff cached context is within TTL.
+
+        Used by the live-cycle ``health_probe`` event (Round 5 R2) to
+        compute ``macro_bias_fresh`` without triggering a new fetch.
+        """
+        with self._lock:
+            if self._cached is None or self._cached_at is None:
+                return False
+            now = datetime.now(tz=timezone.utc)
+            return (now - self._cached_at) < self._cache_ttl
+
     @staticmethod
     def _fetch_all() -> ExternalContext:
         """Attempt to fetch all data sources.  Never raises."""

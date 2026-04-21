@@ -19,7 +19,7 @@ import polars as pl
 
 from smc.ai.models import AIRegimeAssessment, RegimeParams
 from smc.ai.param_router import route as route_regime_params
-from smc.ai.regime_classifier import classify_regime_ai
+from smc.ai.regime_classifier import classify_regime_ai, extract_regime_context
 from smc.data.schemas import Timeframe
 from smc.smc_core.detector import SMCDetector
 from smc.smc_core.types import SMCSnapshot
@@ -31,6 +31,7 @@ from smc.strategy.confluence import (
 from smc.strategy.entry_trigger import check_entry
 from smc.strategy.htf_bias import compute_htf_bias
 from smc.strategy.regime import classify_regime
+from smc.strategy.sl_fitness_judge import judge_sl_fitness
 from smc.strategy.types import TradeSetup
 from smc.strategy.zone_scanner import scan_zones
 
@@ -87,6 +88,12 @@ class MultiTimeframeAggregator:
         enable_ob_test_trigger: bool = False,
         ai_regime_enabled: bool = False,
         regime_cache: "RegimeCacheLookup | None" = None,
+        sl_fitness_enabled: bool = False,
+        sl_fitness_min_sl_atr_ratio: float = 0.5,
+        sl_fitness_max_sl_atr_ratio: float = 2.5,
+        sl_fitness_low_vol_percentile: float = 0.3,
+        sl_fitness_transition_conf_floor: float = 0.6,
+        sl_fitness_counter_trend_ai_conf: float = 0.6,
     ) -> None:
         self._detector = detector
         self._enable_ob_test_trigger = enable_ob_test_trigger
@@ -98,6 +105,13 @@ class MultiTimeframeAggregator:
         # Set by live_demo.py via set_macro_bias() at the start of each cycle.
         # Default 0.0 = no-op; backward-compatible with all existing callers.
         self._macro_bias: float = 0.0
+        # Round 5 A-track Task #7: SL fitness judge (shadow mode by default).
+        self._sl_fitness_enabled = sl_fitness_enabled
+        self._sl_fitness_min_sl_atr_ratio = sl_fitness_min_sl_atr_ratio
+        self._sl_fitness_max_sl_atr_ratio = sl_fitness_max_sl_atr_ratio
+        self._sl_fitness_low_vol_percentile = sl_fitness_low_vol_percentile
+        self._sl_fitness_transition_conf_floor = sl_fitness_transition_conf_floor
+        self._sl_fitness_counter_trend_ai_conf = sl_fitness_counter_trend_ai_conf
         # If the detector was not created with a swing_length_map,
         # inject the default one so all aggregator pipelines benefit.
         if not detector.swing_length_map:
@@ -239,6 +253,20 @@ class MultiTimeframeAggregator:
         )
         regime_params = ai_assessment.param_preset
 
+        # Round 5 A-track Task #7: shadow-mode SL fitness judge needs a
+        # RegimeContext snapshot alongside the assessment.  extract_regime_context
+        # is pure + ~1ms — the duplicate work is cheap enough that we prefer it
+        # over plumbing ctx through the classifier's cache/fallback paths.
+        # Only computed when the judge is flagged ON (no overhead when off).
+        regime_ctx = (
+            extract_regime_context(
+                d1_df=data.get(Timeframe.D1),
+                h4_df=data.get(Timeframe.H4),
+            )
+            if self._sl_fitness_enabled
+            else None
+        )
+
         # Legacy ranging gate: when NOT using AI regime (Sprint 5 compat),
         # suppress Tier 2/3 in ranging markets.  When AI regime is active,
         # the direction filter + allowed_triggers handle this more precisely.
@@ -350,6 +378,59 @@ class MultiTimeframeAggregator:
             if conf_score < min_confluence:
                 zone_rejects["confluence_low"] += 1
                 continue
+
+            # Round 5 A-track Task #7: SL fitness judge — SHADOW MODE.
+            # When enabled, evaluate the 7-rule fitness check and emit
+            # sl_fitness_shadow_veto{accepted, rule_id, regime, direction,
+            # rr_planned, conf} telemetry.  Does NOT block the setup in
+            # shadow mode — we measure first, enforce later (see design
+            # doc §6 "Option 2 shadow mode").
+            if self._sl_fitness_enabled and regime_ctx is not None:
+                try:
+                    verdict = judge_sl_fitness(
+                        entry=entry,
+                        regime_assessment=ai_assessment,
+                        regime_ctx=regime_ctx,
+                        confluence_score=conf_score,
+                        h1_atr_points=h1_atr,
+                        d1_atr_pct=regime_ctx.d1_atr_pct,
+                        min_sl_atr_ratio=self._sl_fitness_min_sl_atr_ratio,
+                        max_sl_atr_ratio=self._sl_fitness_max_sl_atr_ratio,
+                        low_vol_percentile=self._sl_fitness_low_vol_percentile,
+                        transition_conf_floor=self._sl_fitness_transition_conf_floor,
+                        counter_trend_ai_conf=self._sl_fitness_counter_trend_ai_conf,
+                    )
+                    # Emit telemetry regardless of accept/veto so ops can
+                    # measure veto rate + false-positive rate over 10 days.
+                    try:
+                        from smc.monitor.structured_log import info as _log_info
+                        _log_info(
+                            "sl_fitness_shadow_veto",
+                            accepted=verdict.accept,
+                            rule_id=verdict.rule_id,
+                            reason=verdict.reason,
+                            regime=ai_assessment.regime,
+                            direction=entry.direction,
+                            rr_planned=entry.rr_ratio,
+                            confluence=round(conf_score, 3),
+                            ai_conf=round(ai_assessment.confidence, 3),
+                            risk_points=entry.risk_points,
+                            d1_atr_pct=regime_ctx.d1_atr_pct,
+                        )
+                    except Exception:
+                        pass  # telemetry never breaks the pipeline
+                except Exception as exc:
+                    # Never let the judge break the live loop — log and continue
+                    # as if the judge had accepted.
+                    try:
+                        from smc.monitor.structured_log import warn as _log_warn
+                        _log_warn(
+                            "sl_fitness_judge_error",
+                            error_type=type(exc).__name__,
+                            error_msg=str(exc)[:200],
+                        )
+                    except Exception:
+                        pass
 
             setups.append(
                 TradeSetup(

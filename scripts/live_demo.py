@@ -148,6 +148,12 @@ from smc.strategy.htf_bias import compute_htf_bias, htf_bias_tier
 from smc.monitor.timing import next_bar_close
 from smc.monitor.structured_log import crit as log_crit, warn as log_warn, info as log_info
 from smc.monitor.critical_alerter import alert_critical
+# Round 5 stability R1: MT5 handle auto-heal watchdog — detects IPC handle rot
+# (tick → None for N cycles) and reinitialises; gives up after 5 consecutive
+# failures so Task Scheduler can respawn a fresh process with a fresh handle.
+from smc.monitor import mt5_watchdog
+# Round 5 stability R2: per-cycle health_probe event for uptime / SLA digest.
+from smc.monitor import health_probe
 from smc.monitor.state_io import atomic_write_json
 from smc.monitor.reconcile_cursor import load_reconcile_cursor, save_reconcile_cursor
 from smc.strategy.session import get_session_info
@@ -273,9 +279,13 @@ def run_ai_analysis(data):
         from smc.ai.direction_engine import DirectionEngine
         engine = DirectionEngine(cache_ttl_hours=1)  # Round 4.6-Q (USER): 4h→1h
         h4_df = data.get(Timeframe.H4)
+        # Round 5 R2: capture wall-clock elapsed for the AI call so the
+        # per-cycle health_probe can report debate_elapsed_ms_last.
+        _ai_start_mono = time.monotonic()
         with ThreadPoolExecutor(max_workers=1) as pool:
             fut = pool.submit(engine.get_direction, h4_df=h4_df)
             ai_dir = fut.result(timeout=180)  # 3min hard cap
+        analysis["ai_elapsed_ms"] = int((time.monotonic() - _ai_start_mono) * 1000)
         if ai_dir.source != "neutral_default":
             analysis["ai_direction"] = ai_dir.direction
             analysis["ai_confidence"] = round(ai_dir.confidence, 3)
@@ -285,6 +295,7 @@ def run_ai_analysis(data):
             analysis["source"] = f"technical + {ai_dir.source}"
     except FutTimeout:
         analysis["ai_error"] = "ai_timeout_180s"
+        analysis["ai_elapsed_ms"] = 180_000
         log_warn("ai_timeout", cycle_hint=analysis.get("assessed_at", "?"))
     except Exception as e:
         analysis["ai_error"] = str(e)[:100]
@@ -756,6 +767,11 @@ def main():
         )
         sys.exit(1)
 
+    # Round 5 stability R1: initialise MT5 handle watchdog state.  The
+    # monotonic timestamp we stamp here is the reference point for
+    # `handle_age_sec` in the per-cycle health_probe event (R2).
+    mt5_wd = mt5_watchdog.mark_initialized(mt5_watchdog.new_state())
+
     info = mt5.account_info()
     print(f"MT5 Connected: {info.login} @ {info.server}")
     print(f"Balance: ${info.balance}")
@@ -1012,9 +1028,33 @@ def main():
         try:
             # 1. Price
             tick = mt5.symbol_info_tick(cfg.mt5_path)
-            if tick is None:
+            tick_ok = tick is not None
+            # Round 5 stability R1: feed tick outcome into the watchdog so
+            # consecutive tick_none streaks trigger handle reinit and, after
+            # 5 failures, process exit for Task Scheduler respawn.
+            mt5_wd = mt5_watchdog.record_tick_result(mt5_wd, tick_ok=tick_ok)
+            if not tick_ok:
                 log_warn("tick_unavailable", cycle=cycle)
                 print("  WARN: no tick data")
+                if mt5_watchdog.should_giveup(mt5_wd):
+                    alert_critical(
+                        "mt5_handle_reset_giveup",
+                        streak=mt5_wd.consecutive_tick_none,
+                        reset_attempts=mt5_wd.reset_attempts,
+                        send_telegram=True,
+                    )
+                    log_crit(
+                        "mt5_handle_reset_giveup",
+                        streak=mt5_wd.consecutive_tick_none,
+                        reset_attempts=mt5_wd.reset_attempts,
+                    )
+                    print(
+                        f"  CRIT: {mt5_wd.consecutive_tick_none} consecutive "
+                        f"tick_none — exiting for Task Scheduler respawn."
+                    )
+                    sys.exit(1)
+                if mt5_watchdog.should_reset(mt5_wd):
+                    mt5_wd = mt5_watchdog.try_reset_handle(mt5, mt5_wd)
                 continue
             price = tick.bid
             spread = tick.ask - tick.bid
@@ -1024,6 +1064,29 @@ def main():
             data = fetch_mt5_data(cfg.mt5_path)
             bars_info = ", ".join(f"{k}: {len(v)}" for k, v in data.items())
             print(f"  Data: {{{bars_info}}}")
+
+            # Round 5 stability R2: emit one health_probe per cycle for the
+            # daily SLA digest.  Uses the balance already cached in `info`
+            # (updated from reconcile block every cycle) as a cheap audit
+            # value — no extra mt5.account_info() round-trip needed.
+            try:
+                _probe_balance = float(info.balance) if info is not None else None
+            except Exception:
+                _probe_balance = None
+            try:
+                _macro_fresh = bool(macro_layer.is_cache_fresh()) if _macro_flag else False
+            except Exception:
+                _macro_fresh = False
+            _probe = health_probe.build_probe(
+                cycle=cycle,
+                tick_ok=True,  # we would have `continue`d above if not
+                data=data,
+                handle_age_sec=mt5_watchdog.handle_age_sec(mt5_wd),
+                debate_elapsed_ms_last=ai_analysis.get("ai_elapsed_ms"),
+                macro_bias_fresh=_macro_fresh,
+                balance_usd=_probe_balance,
+            )
+            health_probe.emit(_probe)
 
             # 3. AI Analysis (every H4 = every 16 M15 cycles, or first run)
             if cycle == 1 or (time.time() - last_ai_update) > 14400:
@@ -1444,7 +1507,15 @@ def main():
                         "type_filling": mt5.ORDER_FILLING_IOC,
                     }
                 if _mt5_execute:
+                    # Round 5 stability R1: mark critical section so the
+                    # handle watchdog will not call mt5.shutdown() in
+                    # parallel if symbol_info_tick transiently returns None
+                    # during send_with_retry's internal tick refresh loop.
+                    # (Cycle is single-threaded today, but the flag keeps
+                    # the contract explicit for future executor threading.)
+                    mt5_wd = mt5_watchdog.enter_critical(mt5_wd)
                     send_result = send_with_retry(mt5, request, circuit_flag_path=CIRCUIT_FLAG_PATH)
+                    mt5_wd = mt5_watchdog.exit_critical(mt5_wd)
                     _mt5_send_retcode = send_result.retcode
                     _mt5_ticket = send_result.ticket
                     _mt5_send_attempts = send_result.attempts
@@ -1638,16 +1709,79 @@ def main():
                         pnl_usd=pnl,
                         running_daily_pnl=round(daily_pnl, 2),
                     )
-                    # Round 5 T1 F1: Telegram on each closed trade so user sees
-                    # realised P&L without opening the dashboard.
+                    # Round 5 O3: enrich the trade_closed Telegram push with
+                    # entry/exit/rr/regime/trigger so老板 can judge from the
+                    # phone whether the close matched intent. Best-effort —
+                    # enrichment never blocks the Telegram send.
+                    from smc.monitor.trade_close_enrichment import (
+                        build_trade_close_context,
+                        format_trade_close_telegram,
+                    )
+                    try:
+                        # Scan *both* per-symbol legs so a ticket from either
+                        # control or treatment resolves. We pass the current
+                        # JOURNAL_PATH first (fast hit on same-leg tickets).
+                        _other_suffix = "_macro" if _journal_suffix == "" else ""
+                        _journal_candidates = [
+                            JOURNAL_PATH,
+                            DATA_ROOT / f"journal{_other_suffix}" / "live_trades.jsonl",
+                        ]
+                        _ctx = build_trade_close_context(
+                            ticket=int(deal.get("ticket", 0) or 0),
+                            pnl_usd=pnl,
+                            exit_price=deal.get("exit_price"),
+                            close_time=deal.get("close_time"),
+                            journal_paths=_journal_candidates,
+                            structured_log_path=Path("logs/structured.jsonl"),
+                        )
+                        _telegram_body = format_trade_close_telegram(_ctx)
+                    except Exception as _enrich_exc:
+                        log_warn(
+                            "trade_close_enrich_fail",
+                            cycle=cycle,
+                            ticket=deal.get("ticket"),
+                            exception_type=type(_enrich_exc).__name__,
+                            exception_msg=str(_enrich_exc)[:200],
+                        )
+                        _telegram_body = None
+
+                    # Log the structured event (audit trail) — keep legacy fields
+                    # so grep/parsers that depend on `pnl_usd` + `running_daily_pnl`
+                    # continue to work. Only the Telegram message shape changes.
                     alert_critical(
                         "trade_closed",
                         cycle=cycle,
                         ticket=deal.get("ticket"),
                         pnl_usd=pnl,
                         running_daily_pnl=round(daily_pnl, 2),
-                        send_telegram=True,
+                        rr_realized=_ctx.rr_realized if _telegram_body else None,
+                        regime_at_entry=_ctx.regime_at_entry if _telegram_body else None,
+                        leg=_ctx.leg_label if _telegram_body else None,
+                        send_telegram=False,  # Telegram sent separately with enriched body
                     )
+                    if _telegram_body:
+                        try:
+                            # Send the enriched multi-line body directly via
+                            # the raw alerter so newlines survive (bypasses
+                            # alert_critical's k=v flattening).
+                            import asyncio as _asyncio
+                            import os as _os
+                            from smc.monitor.alerter import TelegramAlerter
+                            _tok = _os.getenv("SMC_TELEGRAM_BOT_TOKEN") or _os.getenv("TELEGRAM_BOT_TOKEN")
+                            _cid = _os.getenv("SMC_TELEGRAM_CHAT_ID") or _os.getenv("TELEGRAM_CHAT_ID")
+                            if _tok and _cid:
+                                _alerter = TelegramAlerter(bot_token=_tok, chat_id=_cid)
+                                try:
+                                    _asyncio.run(_alerter.send_text(_telegram_body))
+                                except RuntimeError:
+                                    # Running loop; fire-and-forget.
+                                    try:
+                                        _loop = _asyncio.get_running_loop()
+                                        _loop.create_task(_alerter.send_text(_telegram_body))
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass  # best-effort — never break trading loop
                 # Update peak_balance from live account equity for next cycle.
                 try:
                     info = mt5.account_info()
