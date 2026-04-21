@@ -1088,10 +1088,12 @@ def main():
                 _macro_fresh = False
             _probe = health_probe.build_probe(
                 cycle=cycle,
-                leg_suffix=_journal_suffix,
+                cycle_ts_iso=now.isoformat(),
+                leg=_journal_suffix,
                 tick_ok=True,  # we would have `continue`d above if not
                 data=data,
                 handle_age_sec=mt5_watchdog.handle_age_sec(mt5_wd),
+                handle_reset_count=mt5_wd.reset_attempts,
                 debate_elapsed_ms_last=ai_analysis.get("ai_elapsed_ms"),
                 macro_bias_fresh=_macro_fresh,
                 balance_usd=_probe_balance,

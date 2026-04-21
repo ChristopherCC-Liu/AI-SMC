@@ -117,10 +117,12 @@ def test_build_probe_preserves_fields() -> None:
     data = {"M15": [0], "H1": [0], "H4": [0], "D1": [0]}
     p = build_probe(
         cycle=42,
-        leg_suffix="_macro",
+        cycle_ts_iso="2026-04-21T03:15:00+00:00",
+        leg="_macro",
         tick_ok=True,
         data=data,
         handle_age_sec=1234,
+        handle_reset_count=2,
         debate_elapsed_ms_last=9100,
         macro_bias_fresh=True,
         balance_usd=1000.50,
@@ -128,10 +130,12 @@ def test_build_probe_preserves_fields() -> None:
         floating_usd=14.75,
     )
     assert p.cycle == 42
-    assert p.leg_suffix == "_macro"
+    assert p.cycle_ts_iso == "2026-04-21T03:15:00+00:00"
+    assert p.leg == "_macro"
     assert p.tick_ok is True
     assert p.data_ok is True
     assert p.handle_age_sec == 1234
+    assert p.handle_reset_count == 2
     assert p.debate_elapsed_ms_last == 9100
     assert p.macro_bias_fresh is True
     assert p.balance_usd == 1000.50
@@ -143,6 +147,7 @@ def test_build_probe_preserves_fields() -> None:
 def test_build_probe_nones_passed_through() -> None:
     p = build_probe(
         cycle=1,
+        cycle_ts_iso="2026-04-21T03:15:00+00:00",
         tick_ok=False,
         data=None,
         handle_age_sec=None,
@@ -150,7 +155,8 @@ def test_build_probe_nones_passed_through() -> None:
         macro_bias_fresh=False,
         balance_usd=None,
     )
-    assert p.leg_suffix == ""
+    assert p.leg == ""
+    assert p.handle_reset_count == 0  # default
     assert p.data_ok is False
     assert p.handle_age_sec is None
     assert p.debate_elapsed_ms_last is None
@@ -160,11 +166,12 @@ def test_build_probe_nones_passed_through() -> None:
 
 
 @pytest.mark.unit
-def test_build_probe_defaults_leg_suffix_when_none_passed() -> None:
+def test_build_probe_defaults_leg_when_none_passed() -> None:
     """None → coerced to empty string (dataclass field is non-optional str)."""
     p = build_probe(
         cycle=1,
-        leg_suffix=None,  # type: ignore[arg-type]
+        cycle_ts_iso="2026-04-21T03:15:00+00:00",
+        leg=None,  # type: ignore[arg-type]
         tick_ok=True,
         data={"M15": [0], "H1": [0], "H4": [0], "D1": [0]},
         handle_age_sec=0,
@@ -172,16 +179,16 @@ def test_build_probe_defaults_leg_suffix_when_none_passed() -> None:
         macro_bias_fresh=False,
         balance_usd=None,
     )
-    assert p.leg_suffix == ""
+    assert p.leg == ""
 
 
 @pytest.mark.unit
 def test_health_probe_fields_is_immutable() -> None:
     p = HealthProbeFields(
-        cycle=1, leg_suffix="", tick_ok=True, data_ok=True,
-        handle_age_sec=0, debate_elapsed_ms_last=None,
-        macro_bias_fresh=False, balance_usd=None,
-        equity_usd=None, floating_usd=None,
+        cycle=1, cycle_ts_iso="", leg="", tick_ok=True, data_ok=True,
+        handle_age_sec=0, handle_reset_count=0,
+        debate_elapsed_ms_last=None, macro_bias_fresh=False,
+        balance_usd=None, equity_usd=None, floating_usd=None,
     )
     with pytest.raises(FrozenInstanceError):
         p.cycle = 99  # type: ignore[misc]
@@ -190,16 +197,20 @@ def test_health_probe_fields_is_immutable() -> None:
 @pytest.mark.unit
 def test_to_event_kwargs_includes_only_expected_keys() -> None:
     p = build_probe(
-        cycle=7, leg_suffix="_macro", tick_ok=True, data=None,
-        handle_age_sec=10, debate_elapsed_ms_last=500,
+        cycle=7,
+        cycle_ts_iso="2026-04-21T03:15:00+00:00",
+        leg="_macro", tick_ok=True, data=None,
+        handle_age_sec=10, handle_reset_count=0,
+        debate_elapsed_ms_last=500,
         macro_bias_fresh=True, balance_usd=999.99,
         equity_usd=1002.22, floating_usd=2.23,
     )
     kwargs = p.to_event_kwargs()
     assert set(kwargs.keys()) == {
-        "cycle", "leg_suffix", "tick_ok", "data_ok", "handle_age_sec",
-        "debate_elapsed_ms_last", "macro_bias_fresh", "balance_usd",
-        "equity_usd", "floating_usd",
+        "cycle", "cycle_ts_iso", "leg", "tick_ok", "data_ok",
+        "handle_age_sec", "handle_reset_count",
+        "debate_elapsed_ms_last", "macro_bias_fresh",
+        "balance_usd", "equity_usd", "floating_usd",
     }
 
 
@@ -214,10 +225,12 @@ def test_emit_writes_info_event_with_expected_fields(
 ) -> None:
     p = build_probe(
         cycle=3,
-        leg_suffix="_macro",
+        cycle_ts_iso="2026-04-21T03:15:00+00:00",
+        leg="_macro",
         tick_ok=True,
         data={"M15": [0], "H1": [0], "H4": [0], "D1": [0]},
         handle_age_sec=42,
+        handle_reset_count=1,
         debate_elapsed_ms_last=8500,
         macro_bias_fresh=True,
         balance_usd=1234.56,
@@ -231,10 +244,12 @@ def test_emit_writes_info_event_with_expected_fields(
     assert ev["_severity"] == "INFO"
     assert ev["event"] == "health_probe"
     assert ev["cycle"] == 3
-    assert ev["leg_suffix"] == "_macro"
+    assert ev["cycle_ts_iso"] == "2026-04-21T03:15:00+00:00"
+    assert ev["leg"] == "_macro"
     assert ev["tick_ok"] is True
     assert ev["data_ok"] is True
     assert ev["handle_age_sec"] == 42
+    assert ev["handle_reset_count"] == 1
     assert ev["debate_elapsed_ms_last"] == 8500
     assert ev["macro_bias_fresh"] is True
     assert ev["balance_usd"] == 1234.56
@@ -252,7 +267,9 @@ def test_emit_survives_logger_failure(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(sl, "info", _explode)
     p = build_probe(
-        cycle=1, tick_ok=False, data=None,
+        cycle=1,
+        cycle_ts_iso="2026-04-21T03:15:00+00:00",
+        tick_ok=False, data=None,
         handle_age_sec=None, debate_elapsed_ms_last=None,
         macro_bias_fresh=False, balance_usd=None,
     )
