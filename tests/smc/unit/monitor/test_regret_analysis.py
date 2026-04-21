@@ -11,6 +11,7 @@ from smc.monitor.regret_analysis import (
     MAGIC_CONTROL,
     MAGIC_TREATMENT,
     build_regret_records,
+    compute_regret_for_ticket,
     compute_regret_row,
     compute_summary,
     count_anti_stack_blocks,
@@ -277,3 +278,158 @@ class TestBuildRegretRecords:
         recs = build_regret_records([_trade("2026-04-20T02:00:00+00:00", 10.0)])
         assert recs[0].get("summary") is not True
         assert recs[-1]["summary"] is True
+
+
+# ---------------------------------------------------------------------------
+# compute_regret_for_ticket (R6 B2 — O3 Telegram scalar)
+# ---------------------------------------------------------------------------
+
+
+class TestComputeRegretForTicket:
+    """Four fixtures: helpful / hurtful / neutral / uncomputable regret."""
+
+    def test_control_leg_is_neutral_zero(self) -> None:
+        """Control leg by design has no_macro_pnl == actual_pnl → regret 0."""
+        closure = {
+            "event": "trade_reconciled",
+            "ticket": 262715883,
+            "pnl_usd": 66.31,
+            "magic": MAGIC_CONTROL,
+            "direction": "long",
+        }
+        regret = compute_regret_for_ticket(
+            ticket=262715883,
+            closure=closure,
+        )
+        assert regret == 0.0
+
+    def test_treatment_leg_neutral_under_current_heuristic(self) -> None:
+        """Treatment leg: current v4 Alt-B heuristic assumes macro doesn't
+        re-time entries, so no_macro_pnl == actual_pnl → regret 0 as well.
+
+        This documents the heuristic baseline. If a future version of
+        ``compute_regret_row`` moves to a non-trivial macro counterfactual,
+        the value will change without needing to change the wrapper API.
+        """
+        closure = {
+            "event": "trade_reconciled",
+            "ticket": 262518001,
+            "pnl_usd": -52.72,
+            "magic": MAGIC_TREATMENT,
+            "direction": "short",
+        }
+        regret = compute_regret_for_ticket(
+            ticket=262518001, closure=closure,
+        )
+        assert regret == 0.0
+
+    def test_helpful_macro_when_counterfactual_worse(self) -> None:
+        """If we monkeypatch no_macro_pnl lower than actual → negative regret
+        (macro helped). Simulates a future heuristic upgrade path."""
+        import smc.monitor.regret_analysis as ra
+
+        def fake_row(trade, closures_by_ticket=None):
+            # Simulate "no-macro would have lost $5 more than we actually did"
+            actual = 10.0
+            no_macro = actual - 5.0  # counterfactual worse by $5
+            return {
+                "trade_id": "ticket:999",
+                "actual_pnl": actual,
+                "no_macro_pnl": no_macro,
+                "confidence": "heuristic",
+            }
+
+        original = ra.compute_regret_row
+        ra.compute_regret_row = fake_row  # type: ignore[assignment]
+        try:
+            closure = {
+                "event": "trade_reconciled",
+                "ticket": 999, "pnl_usd": 10.0,
+                "magic": MAGIC_TREATMENT, "direction": "long",
+            }
+            regret = compute_regret_for_ticket(ticket=999, closure=closure)
+        finally:
+            ra.compute_regret_row = original  # type: ignore[assignment]
+        assert regret == pytest.approx(-5.0)
+
+    def test_hurtful_macro_when_counterfactual_better(self) -> None:
+        """no_macro_pnl > actual_pnl → positive regret (macro hurt)."""
+        import smc.monitor.regret_analysis as ra
+
+        def fake_row(trade, closures_by_ticket=None):
+            actual = -10.0
+            no_macro = actual + 15.0  # would have made $5 without macro
+            return {
+                "trade_id": "ticket:888",
+                "actual_pnl": actual,
+                "no_macro_pnl": no_macro,
+                "confidence": "heuristic",
+            }
+
+        original = ra.compute_regret_row
+        ra.compute_regret_row = fake_row  # type: ignore[assignment]
+        try:
+            closure = {
+                "event": "trade_reconciled",
+                "ticket": 888, "pnl_usd": -10.0,
+                "magic": MAGIC_TREATMENT, "direction": "long",
+            }
+            regret = compute_regret_for_ticket(ticket=888, closure=closure)
+        finally:
+            ra.compute_regret_row = original  # type: ignore[assignment]
+        assert regret == pytest.approx(15.0)
+
+    def test_uncomputable_missing_magic_returns_none(self) -> None:
+        """No magic in closure → cannot classify leg → None."""
+        closure = {
+            "event": "trade_reconciled",
+            "ticket": 777,
+            "pnl_usd": 10.0,
+            # no magic
+            "direction": "long",
+        }
+        assert compute_regret_for_ticket(ticket=777, closure=closure) is None
+
+    def test_uncomputable_unknown_magic_returns_none(self) -> None:
+        """Unknown magic (not control/treatment) → None."""
+        closure = {
+            "event": "trade_reconciled",
+            "ticket": 666, "pnl_usd": 10.0,
+            "magic": 99999999, "direction": "long",
+        }
+        assert compute_regret_for_ticket(ticket=666, closure=closure) is None
+
+    def test_uncomputable_missing_pnl_returns_none(self) -> None:
+        """No pnl_usd and ticket not in closures_by_ticket → None."""
+        closure = {
+            "event": "trade_reconciled",
+            "ticket": 555,
+            "magic": MAGIC_CONTROL,
+            "direction": "long",
+        }
+        assert compute_regret_for_ticket(ticket=555, closure=closure) is None
+
+    def test_uses_closures_by_ticket_when_closure_pnl_absent(self) -> None:
+        """Pre-indexed closures_by_ticket map supplies pnl when closure dict
+        doesn't carry it directly."""
+        closure = {
+            "event": "trade_reconciled",
+            "ticket": 444,
+            "magic": MAGIC_CONTROL,
+            "direction": "long",
+        }
+        regret = compute_regret_for_ticket(
+            ticket=444,
+            closure=closure,
+            closures_by_ticket={444: 25.0},
+        )
+        # Control leg → 0 even when pnl came from the external map.
+        assert regret == 0.0
+
+    def test_bad_ticket_string_returns_none(self) -> None:
+        """Non-coercible ticket → None (defensive)."""
+        closure = {
+            "event": "trade_reconciled", "ticket": "abc",
+            "pnl_usd": 10.0, "magic": MAGIC_CONTROL, "direction": "long",
+        }
+        assert compute_regret_for_ticket(ticket="abc", closure=closure) is None  # type: ignore[arg-type]

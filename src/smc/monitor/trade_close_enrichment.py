@@ -12,9 +12,11 @@ This module fills in:
 - ``regime_at_entry`` + ``regime_confidence`` — last non-default
   ``ai_regime_classified`` event in ``logs/structured.jsonl`` before the
   entry timestamp.
-- ``regret_delta`` — placeholder ``None`` today; measurement-lead M3 will
-  populate this later. Keeping the key so downstream consumers don't break
-  when it lands.
+- ``regret_delta`` — scalar counterfactual PnL difference in USD
+  (``no_macro_pnl - actual_pnl``). Populated by
+  :func:`smc.monitor.regret_analysis.compute_regret_for_ticket` when the
+  caller supplies a ``closure_event`` or ``closures_by_ticket`` map;
+  ``None`` otherwise so downstream formatters can omit the line.
 
 Everything here is best-effort: missing data (no matching journal row, no
 regime event, I/O error) returns ``None``/fallback values — the trade_closed
@@ -33,6 +35,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+from smc.monitor.regret_analysis import compute_regret_for_ticket
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +269,8 @@ def build_trade_close_context(
     close_time: datetime | None,
     journal_paths: Iterable[Path],
     structured_log_path: Path,
+    closure_event: dict[str, Any] | None = None,
+    closures_by_ticket: dict[int, float] | None = None,
 ) -> TradeCloseContext:
     """Assemble the full enrichment payload for a closed trade.
 
@@ -272,6 +278,12 @@ def build_trade_close_context(
     :func:`fetch_closed_pnl_since`, exit_price if they can read the deal) and
     this function fills in everything else from the journals + structured
     log. Never raises — on any failure, relevant fields come back ``None``.
+
+    ``closure_event`` and ``closures_by_ticket`` are optional hooks for R6 B2
+    ``regret_delta`` computation: when either is provided, we pass them to
+    :func:`compute_regret_for_ticket` so the Telegram body can surface a
+    ``Regret: ±$X.XX`` line. Both ``None`` preserves the pre-R6 behaviour of
+    leaving ``regret_delta=None``.
     """
     row_match, source_path = _scan_journal_for_ticket(journal_paths, ticket)
     row = row_match or {}
@@ -310,6 +322,15 @@ def build_trade_close_context(
     trail_activate_r = _safe_float(row.get("trail_activate_r"))
     trail_distance_r = _safe_float(row.get("trail_distance_r"))
 
+    regret_delta = _resolve_regret_delta(
+        ticket=ticket,
+        pnl_usd=pnl_usd,
+        magic=magic,
+        direction=direction,
+        closure_event=closure_event,
+        closures_by_ticket=closures_by_ticket,
+    )
+
     return TradeCloseContext(
         ticket=ticket,
         pnl_usd=round(float(pnl_usd), 2),
@@ -325,10 +346,45 @@ def build_trade_close_context(
         rr_realized=rr_realized,
         regime_at_entry=regime,
         regime_confidence=regime_conf,
-        regret_delta=None,  # M3 will populate; keep key for forward compat.
+        regret_delta=regret_delta,
         trail_activate_r=trail_activate_r,
         trail_distance_r=trail_distance_r,
     )
+
+
+def _resolve_regret_delta(
+    *,
+    ticket: int,
+    pnl_usd: float,
+    magic: int | None,
+    direction: str | None,
+    closure_event: dict[str, Any] | None,
+    closures_by_ticket: dict[int, float] | None,
+) -> float | None:
+    """Call compute_regret_for_ticket with best-effort inputs.
+
+    When the caller didn't pass a closure event, synthesise a minimal one
+    from the fields we already know so downstream heuristics still fire.
+    Returns ``None`` if nothing useful can be computed.
+    """
+    if closure_event is None and closures_by_ticket is None:
+        return None
+    closure = closure_event if closure_event is not None else {
+        "event": "trade_reconciled",
+        "ticket": ticket,
+        "pnl_usd": pnl_usd,
+        "magic": magic,
+        "direction": direction,
+    }
+    try:
+        return compute_regret_for_ticket(
+            ticket=ticket,
+            closure=closure,
+            closures_by_ticket=closures_by_ticket,
+        )
+    except Exception as exc:  # never let enrichment block on regret failure
+        logger.debug("regret compute failed for ticket %s: %s", ticket, exc)
+        return None
 
 
 def _safe_float(x: Any) -> float | None:
@@ -401,10 +457,14 @@ def format_trade_close_telegram(ctx: TradeCloseContext) -> str:
             f"{ctx.trail_distance_r:.2f}R"
         )
 
-    # Optional: regret_delta once M3 lands.
-    if ctx.regret_delta is not None:
-        sign = "+" if ctx.regret_delta >= 0 else ""
-        lines.append(f"Regret: {sign}{ctx.regret_delta:.2f}R vs alt SL")
+    # R6 B2: regret_delta in USD ("no-macro counterfactual minus actual").
+    # Omit the line when exactly 0 (Control leg or neutral Treatment) to keep
+    # the Telegram body terse — a $0.00 line carries no signal.
+    if ctx.regret_delta is not None and abs(ctx.regret_delta) >= 0.01:
+        sign_char = "+" if ctx.regret_delta >= 0 else "-"
+        lines.append(
+            f"Regret: {sign_char}${abs(ctx.regret_delta):.2f} vs no-macro counterfactual"
+        )
 
     msg = "\n".join(lines)
     return msg[:1000]

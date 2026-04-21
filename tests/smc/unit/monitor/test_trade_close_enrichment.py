@@ -312,6 +312,8 @@ def test_format_telegram_under_1000_chars():
 
 
 def test_format_telegram_includes_regret_when_present():
+    # R6 B2: regret_delta is USD, not R. Negative means macro helped
+    # (no-macro counterfactual would have been $0.40 worse).
     ctx = TradeCloseContext(
         ticket=6, pnl_usd=1.0, magic=19760428, leg_label="Treatment-XAU",
         symbol="XAUUSD", direction="long", entry_price=4000, exit_price=4010,
@@ -321,7 +323,34 @@ def test_format_telegram_includes_regret_when_present():
     )
     text = format_trade_close_telegram(ctx)
     assert "Regret" in text
-    assert "-0.40R" in text
+    assert "-$0.40" in text
+    assert "no-macro counterfactual" in text
+
+
+def test_format_telegram_omits_regret_when_zero():
+    # Control leg always produces regret_delta=0.0 — omit to save chars.
+    ctx = TradeCloseContext(
+        ticket=7, pnl_usd=1.0, magic=19760418, leg_label="Control-XAU",
+        symbol="XAUUSD", direction="long", entry_price=4000, exit_price=4010,
+        sl=3990, tp1=4020, trigger="breakout", rr_realized=1.0,
+        regime_at_entry="TRENDING", regime_confidence=0.9,
+        regret_delta=0.0,
+    )
+    text = format_trade_close_telegram(ctx)
+    assert "Regret" not in text
+
+
+def test_format_telegram_includes_regret_positive_sign():
+    # Positive regret_delta means macro HURT this trade.
+    ctx = TradeCloseContext(
+        ticket=8, pnl_usd=-10.0, magic=19760428, leg_label="Treatment-XAU",
+        symbol="XAUUSD", direction="long", entry_price=4000, exit_price=4010,
+        sl=3990, tp1=4020, trigger="breakout", rr_realized=-0.5,
+        regime_at_entry="TRENDING", regime_confidence=0.9,
+        regret_delta=12.34,
+    )
+    text = format_trade_close_telegram(ctx)
+    assert "+$12.34" in text
 
 
 # ---------------------------------------------------------------------------
@@ -440,3 +469,45 @@ def test_build_context_trail_defaults_to_none_when_missing(journal_dir: Path, tm
     )
     assert ctx.trail_activate_r is None
     assert ctx.trail_distance_r is None
+
+
+# ---------------------------------------------------------------------------
+# R6 B2 — regret_delta wiring
+# ---------------------------------------------------------------------------
+
+
+def test_build_context_regret_delta_none_without_closure(journal_dir: Path, tmp_path: Path):
+    """Pre-R6 callers pass no closure_event — regret_delta stays None."""
+    journal_path = journal_dir / "journal" / "live_trades.jsonl"
+    _write_journal(journal_path, [
+        {"time": "2026-04-20T14:30:00+00:00", "mt5_ticket": 100,
+         "entry": 100.0, "sl": 90.0, "direction": "long", "magic": 19760418},
+    ])
+    ctx = build_trade_close_context(
+        ticket=100, pnl_usd=5.0, exit_price=105.0, close_time=None,
+        journal_paths=[journal_path],
+        structured_log_path=tmp_path / "missing.jsonl",
+    )
+    assert ctx.regret_delta is None
+
+
+def test_build_context_regret_delta_populated_from_closure_event(journal_dir: Path, tmp_path: Path):
+    """R6 caller supplies closure_event → regret_delta is computed."""
+    journal_path = journal_dir / "journal" / "live_trades.jsonl"
+    _write_journal(journal_path, [
+        {"time": "2026-04-20T14:30:00+00:00", "mt5_ticket": 101,
+         "entry": 100.0, "sl": 90.0, "direction": "long", "magic": 19760418},
+    ])
+    closure = {
+        "event": "trade_reconciled",
+        "ticket": 101, "pnl_usd": 66.31,
+        "magic": 19760418, "direction": "long",
+    }
+    ctx = build_trade_close_context(
+        ticket=101, pnl_usd=66.31, exit_price=105.0, close_time=None,
+        journal_paths=[journal_path],
+        structured_log_path=tmp_path / "missing.jsonl",
+        closure_event=closure,
+    )
+    # Control leg: heuristic yields 0.0 — non-None proves the wire worked.
+    assert ctx.regret_delta == 0.0

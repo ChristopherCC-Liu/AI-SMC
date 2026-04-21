@@ -1756,6 +1756,20 @@ def main():
                             JOURNAL_PATH,
                             DATA_ROOT / f"journal{_other_suffix}" / "live_trades.jsonl",
                         ]
+                        # R6 B2: synthesise the closure_event so build_trade_close_context
+                        # populates regret_delta on the Treatment leg (and cleanly
+                        # reports 0 on Control). deal already carries magic from the
+                        # broker; direction comes from the journal row the enricher
+                        # just looked up (ctx.direction is built a few lines down,
+                        # so we pass what we know and the helper fills in gaps).
+                        _closure_event = {
+                            "event": "trade_reconciled",
+                            "ticket": int(deal.get("ticket", 0) or 0),
+                            "pnl_usd": pnl,
+                            "magic": deal.get("magic"),
+                            "ts": (deal.get("close_time").isoformat()
+                                   if deal.get("close_time") is not None else None),
+                        }
                         _ctx = build_trade_close_context(
                             ticket=int(deal.get("ticket", 0) or 0),
                             pnl_usd=pnl,
@@ -1763,6 +1777,7 @@ def main():
                             close_time=deal.get("close_time"),
                             journal_paths=_journal_candidates,
                             structured_log_path=Path("logs/structured.jsonl"),
+                            closure_event=_closure_event,
                         )
                         _telegram_body = format_trade_close_telegram(_ctx)
                     except Exception as _enrich_exc:

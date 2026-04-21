@@ -50,6 +50,7 @@ __all__ = [
     "load_day_trades",
     "synthesize_unassigned_closures",
     "compute_regret_row",
+    "compute_regret_for_ticket",
     "compute_summary",
     "build_regret_records",
     "count_anti_stack_blocks",
@@ -281,6 +282,77 @@ def compute_regret_row(
         "confidence": confidence,
         "notes": notes,
     }
+
+
+# ---------------------------------------------------------------------------
+# Single-ticket regret (O3 Telegram feed — R6 B2)
+# ---------------------------------------------------------------------------
+
+
+def compute_regret_for_ticket(
+    ticket: int,
+    closure: dict[str, Any],
+    closures_by_ticket: dict[int, float] | None = None,
+) -> float | None:
+    """Scalar ``regret_delta`` in USD for a single reconciled closure.
+
+    Definition: ``regret_delta = no_macro_pnl - actual_pnl``.
+
+    Sign convention:
+      - ``> 0``  →  macro filtering *hurt* this trade (counterfactual without
+        macro would have earned more). Treatment leg only.
+      - ``< 0``  →  macro *helped* (counterfactual would have been worse).
+      - ``== 0.0`` →  Control leg by construction (macro was already off) or a
+        Treatment trade where the heuristic concluded macro was neutral.
+      - ``None`` →  cannot compute: ticket absent from closure, magic missing /
+        unresolvable, no pnl in either ``closure`` or ``closures_by_ticket``.
+
+    The caller (``trade_close_enrichment.build_trade_close_context``) passes
+    the raw ``trade_reconciled`` / ``trade_closed`` event dict as ``closure``;
+    ``closures_by_ticket`` is an optional pre-built map used when the full
+    day's events have already been indexed.
+
+    Kept deliberately thin: real regret math lives in ``compute_regret_row``;
+    this wrapper just shapes a per-closure event into the journal-row shape
+    that function expects, then extracts the ``no_macro - actual`` scalar.
+    """
+    try:
+        ticket_int = int(ticket)
+    except (TypeError, ValueError):
+        return None
+
+    closures_by_ticket = dict(closures_by_ticket) if closures_by_ticket else {}
+    pnl = _coerce_float(closure.get("pnl_usd"))
+    if pnl is not None and ticket_int not in closures_by_ticket:
+        closures_by_ticket[ticket_int] = pnl
+
+    if ticket_int not in closures_by_ticket:
+        return None
+
+    magic = _coerce_int(closure.get("magic"))
+    if magic is None:
+        return None
+    if magic not in {MAGIC_CONTROL, MAGIC_TREATMENT}:
+        return None
+
+    synthetic_trade: dict[str, Any] = {
+        "time": closure.get("ts") or closure.get("time"),
+        "action": "CLOSED",
+        "mode": "LIVE_EXEC",
+        "direction": closure.get("direction") or "unknown",
+        "magic": magic,
+        "ticket": ticket_int,
+    }
+
+    row = compute_regret_row(synthetic_trade, closures_by_ticket=closures_by_ticket)
+    if row.get("confidence") == "unknown":
+        return None
+
+    actual = row.get("actual_pnl")
+    no_macro = row.get("no_macro_pnl")
+    if actual is None or no_macro is None:
+        return None
+    return round(float(no_macro) - float(actual), 2)
 
 
 # ---------------------------------------------------------------------------
