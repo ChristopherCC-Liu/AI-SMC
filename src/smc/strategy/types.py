@@ -50,17 +50,30 @@ class BiasDirection(BaseModel):
 class TradeZone(BaseModel):
     """A price zone on H1 where institutional footprints overlap.
 
-    .. versionchanged:: Round 5 A-track Task #9
-       Added ``"synthetic"`` zone type for ATH breakout synthetic zones
-       (VWAP bands / session H/L / round numbers / previous-week H/L)
-       when historical OB/FVG zones are absent in new-high regimes.
+    .. versionchanged:: Round 5 A-track Task #9 (+ R-review refinement)
+       Added four ``synthetic_*`` zone types (``synthetic_vwap``,
+       ``synthetic_session``, ``synthetic_round``, ``synthetic_prev_week``)
+       for ATH breakout synthetic zones when historical OB/FVG zones
+       are absent in new-high regimes.  Separate sub-types (not a
+       single ``"synthetic"``) so downstream journal / dashboard /
+       post-mortem analysis can inspect which generator sourced the
+       anchor.
     """
 
     model_config = ConfigDict(frozen=True)
 
     zone_high: float
     zone_low: float
-    zone_type: Literal["ob", "fvg", "ob_fvg_overlap", "synthetic"]
+    zone_type: Literal[
+        "ob",
+        "fvg",
+        "ob_fvg_overlap",
+        # Round 5 A-track Task #9: provenance-tagged synthetic zones.
+        "synthetic_vwap",         # M15 VWAP ± 1 std dev band
+        "synthetic_session",      # Asian/London/NY session high/low
+        "synthetic_round",        # Psychological round-number level
+        "synthetic_prev_week",    # Prior ISO-week high/low
+    ]
     direction: Literal["long", "short"]
     timeframe: Timeframe
     confidence: float  # 0.0 – 1.0

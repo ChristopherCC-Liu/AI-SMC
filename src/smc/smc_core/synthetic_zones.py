@@ -39,10 +39,12 @@ from smc.strategy.types import TradeZone
 
 __all__ = [
     "SyntheticZoneConfig",
+    "SyntheticZoneSubtype",
     "build_synthetic_zones",
     "ATH_TRIGGER_PERCENTILE",
     "DEFAULT_ROUND_NUMBER_STEP",
     "DEFAULT_ROUND_NUMBER_WINDOW_PCT",
+    "SYNTHETIC_CONFIDENCE",
 ]
 
 
@@ -83,6 +85,19 @@ _MAX_SESSION_ZONES: int = 3
 _MAX_ROUND_NUMBER_ZONES: int = 3
 _MAX_PREV_WEEK_ZONES: int = 2
 
+# Round 5 A-track Task #9 R-review: provenance subtype literal + uniform
+# confidence.  Separate subtypes so journal/dashboard/post-mortem can
+# inspect which generator sourced each anchor; 0.4 is below historical
+# OB (0.6-0.8) so the confluence ranker deprioritizes synthetic zones
+# when real OBs/FVGs are also present.
+SyntheticZoneSubtype = Literal[
+    "synthetic_vwap",
+    "synthetic_session",
+    "synthetic_round",
+    "synthetic_prev_week",
+]
+SYNTHETIC_CONFIDENCE: float = 0.4
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -112,21 +127,24 @@ class SyntheticZoneConfig:
 def _make_zone(
     anchor: float,
     direction: Literal["long", "short"],
+    zone_type: SyntheticZoneSubtype,
     *,
     timeframe: Timeframe = Timeframe.H1,
-    confidence: float = 0.5,
+    confidence: float = SYNTHETIC_CONFIDENCE,
     half_width_pct: float = _ZONE_HALF_WIDTH_PCT,
 ) -> TradeZone:
-    """Build a frozen ``TradeZone`` of zone_type="synthetic" around ``anchor``.
+    """Build a frozen ``TradeZone`` of the given synthetic subtype around ``anchor``.
 
     The half-width is a percentage of the anchor price so XAU (4000) and
-    BTC (70k) both produce visually-reasonable zone boxes.
+    BTC (70k) both produce visually-reasonable zone boxes.  The caller
+    passes the ``zone_type`` so each generator's output is tagged with
+    its provenance (``synthetic_vwap`` / ``synthetic_session`` / etc.).
     """
     half = anchor * (half_width_pct / 100.0)
     return TradeZone(
         zone_high=round(anchor + half, 2),
         zone_low=round(anchor - half, 2),
-        zone_type="synthetic",
+        zone_type=zone_type,
         direction=direction,
         timeframe=timeframe,
         confidence=round(confidence, 3),
@@ -177,7 +195,7 @@ def _vwap_bands(
             _make_zone(
                 anchor=anchor,
                 direction=_direction_for_anchor(anchor, current_price),
-                confidence=0.55,  # slightly above synthetic baseline
+                zone_type="synthetic_vwap",
                 half_width_pct=cfg.zone_half_width_pct,
             )
         )
@@ -219,7 +237,7 @@ def _session_highs_lows(
                 _make_zone(
                     anchor=anchor,
                     direction=_direction_for_anchor(anchor, current_price),
-                    confidence=0.5,
+                    zone_type="synthetic_session",
                     half_width_pct=cfg.zone_half_width_pct,
                 )
             )
@@ -257,7 +275,7 @@ def _round_numbers(
             _make_zone(
                 anchor=anchor,
                 direction=_direction_for_anchor(anchor, current_price),
-                confidence=0.45,
+                zone_type="synthetic_round",
                 half_width_pct=cfg.zone_half_width_pct,
             )
         )
@@ -298,7 +316,7 @@ def _prev_week_high_low(
             _make_zone(
                 anchor=anchor,
                 direction=_direction_for_anchor(anchor, current_price),
-                confidence=0.55,
+                zone_type="synthetic_prev_week",
                 half_width_pct=cfg.zone_half_width_pct,
             )
         )
@@ -366,7 +384,11 @@ def build_synthetic_zones(
     -------
     list[TradeZone]
         Up to 10 synthetic zones (VWAP ≤ 2, session ≤ 3, round ≤ 3,
-        prev-week ≤ 2), each with ``zone_type="synthetic"``.
+        prev-week ≤ 2), each tagged with a provenance subtype —
+        ``synthetic_vwap`` / ``synthetic_session`` / ``synthetic_round`` /
+        ``synthetic_prev_week``.  All share confidence = 0.4 so the
+        confluence ranker deprioritizes them below historical OB/FVG
+        zones when both paths produce anchors.
     """
     cfg = cfg if cfg is not None else SyntheticZoneConfig()
 

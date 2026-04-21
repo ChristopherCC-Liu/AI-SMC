@@ -166,7 +166,7 @@ class TestATHDroughtRegression:
             now=_UTC_BASE,
         )
         for z in zones:
-            assert z.zone_type == "synthetic"
+            assert z.zone_type.startswith("synthetic_")
             assert isinstance(z, TradeZone)
 
     def test_zones_have_direction_relative_to_price(self) -> None:
@@ -320,7 +320,7 @@ class TestNullSafety:
         # Round numbers + prev week remain — expect ≥ 1 zone.
         assert len(zones) >= 1
         for z in zones:
-            assert z.zone_type == "synthetic"
+            assert z.zone_type.startswith("synthetic_")
 
     def test_missing_h1_returns_only_m15_sources(self) -> None:
         zones = build_synthetic_zones(
@@ -383,6 +383,89 @@ class TestDeduplication:
 # ---------------------------------------------------------------------------
 # Config exports
 # ---------------------------------------------------------------------------
+
+
+class TestZoneSubtypeProvenance:
+    """R-review: synthetic zones must carry per-source provenance subtype."""
+
+    def test_valid_subtype_values(self) -> None:
+        zones = build_synthetic_zones(
+            m15_df=_make_m15_df(),
+            h1_df=_make_h1_df(),
+            current_price=4900.0,
+            price_52w_high=4950.0,
+            price_52w_low=2000.0,
+            now=_UTC_BASE,
+        )
+        valid = {
+            "synthetic_vwap",
+            "synthetic_session",
+            "synthetic_round",
+            "synthetic_prev_week",
+        }
+        for z in zones:
+            assert z.zone_type in valid, (
+                f"unexpected subtype {z.zone_type}; must be one of {valid}"
+            )
+
+    def test_round_subtype_appears_when_inside_window(self) -> None:
+        zones = build_synthetic_zones(
+            m15_df=_make_m15_df(),
+            h1_df=_make_h1_df(),
+            current_price=4900.0,
+            price_52w_high=4950.0,
+            price_52w_low=2000.0,
+            now=_UTC_BASE,
+        )
+        subtypes = {z.zone_type for z in zones}
+        # $50 step within ±1.5% of 4900 → 4850 + 4950 reachable.
+        assert "synthetic_round" in subtypes
+
+    def test_vwap_subtype_appears_when_m15_has_bars(self) -> None:
+        zones = build_synthetic_zones(
+            m15_df=_make_m15_df(n_bars=96),
+            h1_df=_make_h1_df(),
+            current_price=4900.0,
+            price_52w_high=4950.0,
+            price_52w_low=2000.0,
+            now=_UTC_BASE,
+        )
+        subtypes = {z.zone_type for z in zones}
+        # With 20-period lookback on 96 bars, VWAP bands should emit.
+        assert "synthetic_vwap" in subtypes
+
+    def test_all_zones_confidence_is_uniform_04(self) -> None:
+        """R-review: all synthetic zones share confidence=0.4."""
+        from smc.smc_core.synthetic_zones import SYNTHETIC_CONFIDENCE
+        assert SYNTHETIC_CONFIDENCE == 0.4
+        zones = build_synthetic_zones(
+            m15_df=_make_m15_df(),
+            h1_df=_make_h1_df(),
+            current_price=4900.0,
+            price_52w_high=4950.0,
+            price_52w_low=2000.0,
+            now=_UTC_BASE,
+        )
+        for z in zones:
+            assert z.confidence == 0.4
+
+    def test_confluence_weight_same_for_all_subtypes(self) -> None:
+        """R-review: confluence weights for all 4 synthetic sub-types are 0.35."""
+        from smc.strategy.confluence import _score_zone_quality
+        from smc.strategy.types import TradeZone
+        subtypes = (
+            "synthetic_vwap", "synthetic_session",
+            "synthetic_round", "synthetic_prev_week",
+        )
+        scores: list[float] = []
+        for st in subtypes:
+            z = TradeZone(
+                zone_high=4910.0, zone_low=4890.0,
+                zone_type=st,  # type: ignore[arg-type]
+                direction="long", timeframe=Timeframe.H1, confidence=0.4,
+            )
+            scores.append(_score_zone_quality(z))
+        assert len(set(scores)) == 1, f"scores diverged: {scores}"
 
 
 class TestAggregatorIntegration:
