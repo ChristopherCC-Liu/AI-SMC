@@ -16,16 +16,18 @@
 //|  Deployment:                                                       |
 //|    1. MT5 → Options → EA Trading → Allow WebRequest for URL        |
 //|       http://127.0.0.1:8080                                        |
-//|    2. Copy this file to <MT5 data folder>/MQL5/Experts/            |
-//|    3. In MetaEditor, compile → attach to XAUUSD chart              |
-//|    4. Attach a 2nd instance to BTCUSD chart                        |
+//|    2. Copy AISMCReceiver.mq5  → <MT5 data folder>/MQL5/Experts/    |
+//|    3. Copy include/aismc_panel.mqh → <MT5 data folder>/MQL5/Include|
+//|    4. In MetaEditor, compile → attach to XAUUSD chart              |
+//|    5. Attach a 2nd instance to BTCUSD chart                        |
 //+------------------------------------------------------------------+
 #property copyright "AI-SMC"
-#property version   "2.00"
+#property version   "2.10"
 #property strict
 #property description "Polls Python strategy server, executes SMC signals (dual-magic)."
 
 #include <Trade/Trade.mqh>
+#include <aismc_panel.mqh>
 
 input string   SignalURL            = "http://127.0.0.1:8080/signal";
 input int      PollIntervalSec      = 15;
@@ -58,6 +60,11 @@ input double   TrailDistanceR       = 0.5;  // Trail N x initial_risk behind cur
 input int      TrailDistancePoints  = 50;   // Fallback fixed trail distance when TrailDistanceR == 0
 input int      TrailingMinIntervalSec = 5;  // Debounce PositionModify calls per ticket
 
+// Round 6 B5: on-chart live status panel (render-only, reads EA globals).
+input bool     ShowPanel            = true;
+input int      PanelCorner          = 0;    // ENUM_BASE_CORNER; 0 = top-left
+input int      PanelFontSize        = 9;
+
 // audit-r4 v5 Option B: max legs we track (control + treatment + headroom).
 #define AISMC_MAX_LEGS 8
 
@@ -87,6 +94,23 @@ int            g_leg_magic       [AISMC_MAX_LEGS];
 string         g_leg_last_sig_id [AISMC_MAX_LEGS];
 datetime       g_leg_last_buy_ts [AISMC_MAX_LEGS];
 datetime       g_leg_last_sell_ts[AISMC_MAX_LEGS];
+// Last observed action label per leg ("BUY"/"SELL"/"HOLD"/"RANGE BUY"/...).
+// Panel reads this to render the Control/Treat rows.  Updated in ExecuteLeg.
+string         g_leg_last_action [AISMC_MAX_LEGS];
+// Last observed mode per leg — used together with last-buy/sell_ts to
+// compute cooldown remaining for the panel.  Populated in ExecuteLeg.
+int            g_leg_last_cooldown[AISMC_MAX_LEGS];
+
+// Round 6 B5: panel-only snapshot of last /signal response.  Parsed once
+// per poll; panel reads these every tick (render-only, never drives exec).
+string         g_last_regime              = "";
+double         g_last_confidence          = -1.0;  // -1 == unknown
+double         g_last_trail_activate_r    = 0.0;
+double         g_last_trail_distance_r    = 0.0;
+// Daily P&L baseline — captured on first tick of the UTC day.
+double         g_day_start_balance = 0.0;
+int            g_day_start_doy     = -1;
+datetime       g_last_panel_update = 0;
 
 
 int OnInit()
@@ -99,11 +123,16 @@ int OnInit()
 
    for (int i = 0; i < AISMC_MAX_LEGS; i++)
    {
-      g_leg_magic[i]        = 0;
-      g_leg_last_sig_id[i]  = "";
-      g_leg_last_buy_ts[i]  = 0;
-      g_leg_last_sell_ts[i] = 0;
+      g_leg_magic[i]         = 0;
+      g_leg_last_sig_id[i]   = "";
+      g_leg_last_buy_ts[i]   = 0;
+      g_leg_last_sell_ts[i]  = 0;
+      g_leg_last_action[i]   = "";
+      g_leg_last_cooldown[i] = 0;
    }
+
+   // Round 6 B5: create chart panel — render-only, safe to skip via input.
+   if (ShowPanel) PanelInit(PanelCorner, PanelFontSize);
 
    PrintFormat("AISMCReceiver v2 init on %s (default_magic=%d, poll=%ds, dual-magic)",
                _Symbol, default_magic, PollIntervalSec);
@@ -113,12 +142,25 @@ int OnInit()
 
 void OnDeinit(const int reason)
 {
+   // Round 6 B5: wipe every AISMC_PANEL_* object we may have created.
+   // Safe to call even if PanelInit never ran.
+   PanelDeinit();
    PrintFormat("AISMCReceiver deinit on %s (reason=%d)", _Symbol, reason);
 }
 
 
 void OnTick()
 {
+   // Round 6 B5: panel updates run every tick (throttled 1s) even when
+   // EnableTrading is false, so the user can still see state on a chart
+   // with trading paused.  The render path is read-only.
+   datetime now = TimeCurrent();
+   if (ShowPanel && (now - g_last_panel_update) >= 1)
+   {
+      g_last_panel_update = now;
+      RefreshPanel(now);
+   }
+
    if (!EnableTrading) return;
 
    // Round 4 v5: trailing runs every tick, NOT gated by PollIntervalSec,
@@ -126,10 +168,94 @@ void OnTick()
    // ManageTrailingStops prevents flooding PositionModify on the broker.
    if (EnableTrailing) ManageTrailingStops();
 
-   datetime now = TimeCurrent();
    if (now - g_last_poll_ts < PollIntervalSec) return;
    g_last_poll_ts = now;
    PollAndExecute();
+}
+
+
+//+------------------------------------------------------------------+
+//| Round 6 B5: compute PanelState from live EA globals + account     |
+//| info, then hand off to PanelUpdate.  Pure read — never writes.    |
+//+------------------------------------------------------------------+
+void RefreshPanel(const datetime now)
+{
+   // Daily P&L baseline — reset when UTC day-of-year changes.
+   MqlDateTime d;
+   TimeToStruct(now, d);
+   if (d.day_of_year != g_day_start_doy)
+   {
+      g_day_start_doy     = d.day_of_year;
+      g_day_start_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   }
+
+   // Accumulate floating P&L across all AI-SMC magics on THIS symbol.
+   double floating = 0.0;
+   int    tracked  = 0;
+   int    total    = PositionsTotal();
+   for (int i = 0; i < total; i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if (ticket == 0) continue;
+      if (!PositionSelectByTicket(ticket)) continue;
+      if (PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      long mg = PositionGetInteger(POSITION_MAGIC);
+      if (mg != MagicXAU && mg != MagicBTC
+          && mg != MagicXAU + 10 && mg != MagicBTC + 10
+          && mg != 19760428) continue;
+      floating += PositionGetDouble(POSITION_PROFIT);
+      tracked++;
+   }
+
+   PanelState s;
+   s.symbol           = _Symbol;
+   s.bid              = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   s.ask              = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   s.balance          = AccountInfoDouble(ACCOUNT_BALANCE);
+   s.equity           = AccountInfoDouble(ACCOUNT_EQUITY);
+   s.floating_pnl     = floating;
+   s.daily_pnl        = s.balance - g_day_start_balance + floating;
+   s.regime           = g_last_regime;
+   s.confidence       = g_last_confidence;
+   s.trail_activate_r = g_last_trail_activate_r;
+   s.trail_distance_r = g_last_trail_distance_r;
+
+   // Control = leg 0, Treatment = leg 1 (convention from /signal array).
+   s.control_action   = g_leg_last_action[0];
+   s.control_cooldown = LegCooldownRemaining(0, now);
+   s.treat_action     = g_leg_last_action[1];
+   s.treat_cooldown   = LegCooldownRemaining(1, now);
+
+   s.tickets_tracked  = tracked;
+   s.last_poll_ts     = g_last_poll_ts;
+   s.now              = now;
+
+   PanelUpdate(s);
+}
+
+
+//+------------------------------------------------------------------+
+//| Round 6 B5: best-effort cooldown remaining in seconds for a leg.  |
+//| Returns the maximum of (remaining buy cd, remaining sell cd) so   |
+//| the panel shows the most restrictive lockout.  -1 when none.      |
+//+------------------------------------------------------------------+
+int LegCooldownRemaining(const int leg_idx, const datetime now)
+{
+   if (leg_idx < 0 || leg_idx >= AISMC_MAX_LEGS) return -1;
+   int cd = g_leg_last_cooldown[leg_idx];
+   if (cd <= 0) return -1;
+   int best = 0;
+   if (g_leg_last_buy_ts[leg_idx] > 0)
+   {
+      int rem = cd - (int)(now - g_leg_last_buy_ts[leg_idx]);
+      if (rem > best) best = rem;
+   }
+   if (g_leg_last_sell_ts[leg_idx] > 0)
+   {
+      int rem = cd - (int)(now - g_leg_last_sell_ts[leg_idx]);
+      if (rem > best) best = rem;
+   }
+   return best > 0 ? best : -1;
 }
 
 
@@ -355,6 +481,23 @@ void PollAndExecute()
    string body = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
    if (VerboseLog) PrintFormat("Signal (%s): %s", _Symbol, body);
 
+   // Round 6 B5: snapshot fields for the panel.  JsonStr is a flat
+   // first-match extractor — for keys that appear in both signals[0]
+   // and the top-level flat mirror it returns the control leg's copy.
+   // Non-breaking on pre-R5 servers that omit these keys (JsonStr
+   // returns "" → we keep the prior value, not overwrite with junk).
+   string regime = JsonStr(body, "regime_label");
+   if (StringLen(regime) > 0 && regime != "null") g_last_regime = regime;
+   string conf_s = JsonStr(body, "confidence");
+   if (StringLen(conf_s) > 0 && conf_s != "null")
+      g_last_confidence = StringToDouble(conf_s);
+   string act_r  = JsonStr(body, "trail_activate_r");
+   if (StringLen(act_r) > 0 && act_r != "null")
+      g_last_trail_activate_r = StringToDouble(act_r);
+   string dist_r = JsonStr(body, "trail_distance_r");
+   if (StringLen(dist_r) > 0 && dist_r != "null")
+      g_last_trail_distance_r = StringToDouble(dist_r);
+
    // audit-r4 v5 Option B: iterate the signals array.  The response may
    // still carry flat top-level fields for backward compat but we prefer
    // the array — if it's missing (unlikely after server upgrade), fall
@@ -474,6 +617,11 @@ void ExecuteLeg(const string &leg_body, int leg_idx)
       return;
    }
 
+   // Round 6 B5: remember the action label for the panel (HOLD / BUY / SELL
+   // / RANGE BUY / RANGE SELL).  Overwritten even on skip so the panel
+   // reflects the current signal, not an older placed trade.
+   g_leg_last_action[leg_idx] = action;
+
    bool placed = false;
    if (action == "BUY" || action == "RANGE BUY")
       placed = ExecuteDirection(true, leg_body, leg_idx, magic);
@@ -507,6 +655,9 @@ void ExecuteLegacyFlat(const string &body)
       return;
    }
 
+   // Round 6 B5: mirror leg-0 action for the panel on legacy-flat responses.
+   g_leg_last_action[0] = action;
+
    bool placed = false;
    if (action == "BUY" || action == "RANGE BUY")
       placed = ExecuteDirection(true, body, 0, magic);
@@ -533,6 +684,10 @@ bool ExecuteDirection(bool is_buy, const string &body, int leg_idx, int magic)
    // audit-r3 R5: cooldown resolved from /signal.trading_mode (ranging=300,
    // trending=1800, fallback=1800).
    int cooldown = ResolveCooldownSec(body);
+   // Round 6 B5: remember the active cooldown window for this leg so the
+   // panel can show "CD MM:SS" remaining without re-parsing the body.
+   if (leg_idx >= 0 && leg_idx < AISMC_MAX_LEGS)
+      g_leg_last_cooldown[leg_idx] = cooldown;
    datetime now = TimeCurrent();
    if (is_buy && now - g_leg_last_buy_ts[leg_idx] < cooldown)
    {
