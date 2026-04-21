@@ -460,10 +460,17 @@ def format_trade_close_telegram(ctx: TradeCloseContext) -> str:
     # R6 B2: regret_delta in USD ("no-macro counterfactual minus actual").
     # Omit the line when exactly 0 (Control leg or neutral Treatment) to keep
     # the Telegram body terse — a $0.00 line carries no signal.
+    # Append "(macro hurt)" / "(macro helped)" so the sign isn't misread on a
+    # phone: "+" looks like good news at a glance but means macro *cost* PnL.
     if ctx.regret_delta is not None and abs(ctx.regret_delta) >= 0.01:
-        sign_char = "+" if ctx.regret_delta >= 0 else "-"
+        if ctx.regret_delta > 0:
+            sign_char = "+"
+            label = "macro hurt"
+        else:
+            sign_char = "-"
+            label = "macro helped"
         lines.append(
-            f"Regret: {sign_char}${abs(ctx.regret_delta):.2f} vs no-macro counterfactual"
+            f"Regret: {sign_char}${abs(ctx.regret_delta):.2f} ({label})"
         )
 
     msg = "\n".join(lines)

@@ -312,8 +312,8 @@ def test_format_telegram_under_1000_chars():
 
 
 def test_format_telegram_includes_regret_when_present():
-    # R6 B2: regret_delta is USD, not R. Negative means macro helped
-    # (no-macro counterfactual would have been $0.40 worse).
+    # R6 B2 + team-lead tweak: regret_delta in USD with parenthetical label
+    # so the sign isn't misread on a phone. Negative = macro helped.
     ctx = TradeCloseContext(
         ticket=6, pnl_usd=1.0, magic=19760428, leg_label="Treatment-XAU",
         symbol="XAUUSD", direction="long", entry_price=4000, exit_price=4010,
@@ -324,7 +324,7 @@ def test_format_telegram_includes_regret_when_present():
     text = format_trade_close_telegram(ctx)
     assert "Regret" in text
     assert "-$0.40" in text
-    assert "no-macro counterfactual" in text
+    assert "(macro helped)" in text
 
 
 def test_format_telegram_omits_regret_when_zero():
@@ -341,7 +341,8 @@ def test_format_telegram_omits_regret_when_zero():
 
 
 def test_format_telegram_includes_regret_positive_sign():
-    # Positive regret_delta means macro HURT this trade.
+    # Positive regret_delta means macro HURT this trade; the parenthetical
+    # label must say so explicitly so "+$12.34" isn't misread as good news.
     ctx = TradeCloseContext(
         ticket=8, pnl_usd=-10.0, magic=19760428, leg_label="Treatment-XAU",
         symbol="XAUUSD", direction="long", entry_price=4000, exit_price=4010,
@@ -351,6 +352,9 @@ def test_format_telegram_includes_regret_positive_sign():
     )
     text = format_trade_close_telegram(ctx)
     assert "+$12.34" in text
+    assert "(macro hurt)" in text
+    # Guard against bug where both labels get appended on the same line.
+    assert "macro helped" not in text
 
 
 # ---------------------------------------------------------------------------
