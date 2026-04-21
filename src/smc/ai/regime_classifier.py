@@ -376,18 +376,109 @@ def extract_regime_context(
 # ---------------------------------------------------------------------------
 
 
+# R7-B1 slope-based trend overrides for ATR-compressed grind-up/down years.
+# Without these, XAU 2024 (ATR median 1.1% but SMA50 slope +0.08%/bar and
+# price in 52w top decile) classifies as TRANSITION/CONSOLIDATION despite
+# being a textbook trend year. Thresholds picked from 2024 D1 measurements:
+#   median slope = 0.08%/bar, median 52w_pct = 0.87, median close_vs_sma50 = 2.2%.
+_SLOPE_TREND_MIN_ABS = 0.05           # %/bar — steady SMA50 drift
+_ATH_BREAKOUT_52W_PCT_MIN = 0.95      # price sits in top 5% of 52-week range
+_ATH_BREAKOUT_CLOSE_VS_SMA50 = 3.0    # close >= 3% above SMA50 confirms momentum
+
+
+def _slope_based_upgrade(
+    ctx: RegimeContext,
+) -> tuple[MarketRegimeAI, Literal["bullish", "bearish", "neutral"], float, str] | None:
+    """Detect grind-up / grind-down trend regimes that ATR misses.
+
+    Returns (regime, direction, confidence, reasoning) when the slope +
+    positional context warrants a trend label even though ATR% is below
+    the `trending` threshold. Returns None when the standard ATR fallback
+    should own the classification.
+    """
+    if ctx.d1_sma50_direction not in ("up", "down"):
+        return None
+
+    abs_slope = abs(ctx.d1_sma50_slope)
+    if abs_slope < _SLOPE_TREND_MIN_ABS:
+        return None
+
+    # ATH_BREAKOUT: bullish slope + price in the top 5% of its 52w range
+    # AND close materially above SMA50 (filters reversal wicks).
+    if (
+        ctx.d1_sma50_direction == "up"
+        and ctx.price_52w_percentile >= _ATH_BREAKOUT_52W_PCT_MIN
+        and ctx.d1_close_vs_sma50 >= _ATH_BREAKOUT_CLOSE_VS_SMA50
+    ):
+        # Confidence scales with slope magnitude; capped at 0.8 for
+        # rule-based path so AI debate can still outrank when enabled.
+        confidence = min(0.8, 0.6 + abs_slope * 2.0)
+        return (
+            "ATH_BREAKOUT",
+            "bullish",
+            confidence,
+            (
+                f"ATH break: slope {ctx.d1_sma50_slope:+.4f}%/bar, "
+                f"52w pct {ctx.price_52w_percentile:.2f}, "
+                f"close {ctx.d1_close_vs_sma50:+.2f}% above SMA50"
+            ),
+        )
+
+    # TREND_UP: slope up and either already above SMA50 or HH dominant.
+    if ctx.d1_sma50_direction == "up" and (
+        ctx.d1_close_vs_sma50 > 0 or ctx.d1_higher_highs > ctx.d1_lower_lows
+    ):
+        confidence = min(0.8, 0.55 + abs_slope * 2.0)
+        return (
+            "TREND_UP",
+            "bullish",
+            confidence,
+            (
+                f"Slope-driven TREND_UP: "
+                f"ATR compressed ({ctx.d1_atr_pct:.2f}%), "
+                f"SMA50 slope {ctx.d1_sma50_slope:+.4f}%/bar, "
+                f"close {ctx.d1_close_vs_sma50:+.2f}% vs SMA50, "
+                f"52w pct {ctx.price_52w_percentile:.2f}"
+            ),
+        )
+
+    # TREND_DOWN: symmetric bearish grind.
+    if ctx.d1_sma50_direction == "down" and (
+        ctx.d1_close_vs_sma50 < 0 or ctx.d1_lower_lows > ctx.d1_higher_highs
+    ):
+        confidence = min(0.8, 0.55 + abs_slope * 2.0)
+        return (
+            "TREND_DOWN",
+            "bearish",
+            confidence,
+            (
+                f"Slope-driven TREND_DOWN: "
+                f"ATR compressed ({ctx.d1_atr_pct:.2f}%), "
+                f"SMA50 slope {ctx.d1_sma50_slope:+.4f}%/bar, "
+                f"close {ctx.d1_close_vs_sma50:+.2f}% vs SMA50, "
+                f"52w pct {ctx.price_52w_percentile:.2f}"
+            ),
+        )
+
+    return None
+
+
 def _atr_fallback(ctx: RegimeContext) -> AIRegimeAssessment:
     """Map the existing ATR regime to a MarketRegimeAI enum using SMA50 direction.
 
-    Mapping:
+    Mapping (ATR path):
         trending + SMA50 up   → TREND_UP
         trending + SMA50 down → TREND_DOWN
         trending + SMA50 flat → TRANSITION (ambiguous momentum)
         transitional           → TRANSITION
         ranging                → CONSOLIDATION
 
-    ATH_BREAKOUT is NOT reachable via ATR fallback — it requires
-    macro context that only the AI debate path can assess.
+    R7-B1 slope-upgrade overlay (Round 7 backlog #3):
+    When the ATR path would otherwise emit TRANSITION or CONSOLIDATION
+    but the SMA50 slope is persistent (|slope| >= 0.05%/bar) and price
+    structure agrees, upgrade to TREND_UP / TREND_DOWN / ATH_BREAKOUT.
+    This closes the 2024 ATH gap where ATR% stayed below 1.4% yet the
+    market was clearly directional.
     """
     regime: MarketRegimeAI
     trend_dir: Literal["bullish", "bearish", "neutral"]
@@ -404,6 +495,18 @@ def _atr_fallback(ctx: RegimeContext) -> AIRegimeAssessment:
                 f"(slope {ctx.d1_sma50_slope:+.4f}%), "
                 f"HH={ctx.d1_higher_highs} LL={ctx.d1_lower_lows}"
             )
+            # R7-B1: promote strong uptrend to ATH_BREAKOUT when warranted.
+            if (
+                ctx.price_52w_percentile >= _ATH_BREAKOUT_52W_PCT_MIN
+                and ctx.d1_close_vs_sma50 >= _ATH_BREAKOUT_CLOSE_VS_SMA50
+            ):
+                regime = "ATH_BREAKOUT"
+                confidence = min(0.85, confidence + 0.05)
+                reasoning = (
+                    f"ATH break (ATR trending {ctx.d1_atr_pct:.2f}%, "
+                    f"52w pct {ctx.price_52w_percentile:.2f}, "
+                    f"close {ctx.d1_close_vs_sma50:+.2f}% vs SMA50)"
+                )
         elif ctx.d1_sma50_direction == "down":
             regime = "TREND_DOWN"
             trend_dir = "bearish"
@@ -424,27 +527,39 @@ def _atr_fallback(ctx: RegimeContext) -> AIRegimeAssessment:
             )
 
     elif ctx.atr_regime == "ranging":
-        regime = "CONSOLIDATION"
-        trend_dir = "neutral"
-        confidence = min(0.75, 0.5 + (1.0 - (ctx.d1_atr_pct or 0.5)) * 0.5)
-        reasoning = (
-            f"ATR ranging ({ctx.d1_atr_pct:.2f}%), "
-            f"range {ctx.d1_recent_range_pct:.2f}% of price"
-        )
+        # R7-B1: a compressed-ATR grind with a persistent SMA50 slope
+        # looks ranging on the surface but is actually a trend-year
+        # ATH break (XAU 2024 is the canonical example).
+        upgrade = _slope_based_upgrade(ctx)
+        if upgrade is not None:
+            regime, trend_dir, confidence, reasoning = upgrade
+        else:
+            regime = "CONSOLIDATION"
+            trend_dir = "neutral"
+            confidence = min(0.75, 0.5 + (1.0 - (ctx.d1_atr_pct or 0.5)) * 0.5)
+            reasoning = (
+                f"ATR ranging ({ctx.d1_atr_pct:.2f}%), "
+                f"range {ctx.d1_recent_range_pct:.2f}% of price"
+            )
 
     else:
-        # transitional
-        regime = "TRANSITION"
-        trend_dir = "neutral"
-        if ctx.d1_sma50_direction == "up":
-            trend_dir = "bullish"
-        elif ctx.d1_sma50_direction == "down":
-            trend_dir = "bearish"
-        confidence = 0.45
-        reasoning = (
-            f"ATR transitional ({ctx.d1_atr_pct:.2f}%), SMA50 {ctx.d1_sma50_direction} "
-            f"(slope {ctx.d1_sma50_slope:+.4f}%) — regime ambiguous"
-        )
+        # transitional: same upgrade check — slope can reveal trend regime.
+        upgrade = _slope_based_upgrade(ctx)
+        if upgrade is not None:
+            regime, trend_dir, confidence, reasoning = upgrade
+        else:
+            regime = "TRANSITION"
+            trend_dir = "neutral"
+            if ctx.d1_sma50_direction == "up":
+                trend_dir = "bullish"
+            elif ctx.d1_sma50_direction == "down":
+                trend_dir = "bearish"
+            confidence = 0.45
+            reasoning = (
+                f"ATR transitional ({ctx.d1_atr_pct:.2f}%), "
+                f"SMA50 {ctx.d1_sma50_direction} "
+                f"(slope {ctx.d1_sma50_slope:+.4f}%) — regime ambiguous"
+            )
 
     return AIRegimeAssessment(
         regime=regime,

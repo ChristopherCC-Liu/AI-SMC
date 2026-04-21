@@ -464,18 +464,45 @@ class TestAtrFallbackMapping:
         assert result.trend_direction == "neutral"
 
     def test_ranging_maps_to_consolidation(self):
-        ctx = self._ctx(atr_regime="ranging", d1_atr_pct=0.7)
+        # R7-B1: need flat slope + middling 52w-pct so the slope-based
+        # upgrade does NOT fire; only then does ATR=ranging map to
+        # CONSOLIDATION.
+        ctx = self._ctx(
+            atr_regime="ranging",
+            d1_atr_pct=0.7,
+            d1_sma50_direction="flat",
+            d1_sma50_slope=0.0,
+            price_52w_percentile=0.5,
+            d1_close_vs_sma50=0.5,
+        )
         result = _atr_fallback(ctx)
         assert result.regime == "CONSOLIDATION"
         assert result.trend_direction == "neutral"
 
     def test_transitional_maps_to_transition(self):
-        ctx = self._ctx(atr_regime="transitional", d1_atr_pct=1.1)
+        # R7-B1: same flat-slope requirement — otherwise the upgrade
+        # promotes transitional to TREND_UP/DOWN.
+        ctx = self._ctx(
+            atr_regime="transitional",
+            d1_atr_pct=1.1,
+            d1_sma50_direction="flat",
+            d1_sma50_slope=0.0,
+            price_52w_percentile=0.5,
+            d1_close_vs_sma50=0.5,
+        )
         result = _atr_fallback(ctx)
         assert result.regime == "TRANSITION"
 
     def test_transitional_with_sma_up_is_bullish(self):
-        ctx = self._ctx(atr_regime="transitional", d1_sma50_direction="up")
+        # Flat slope so the upgrade stays off — we want to confirm the
+        # direction-only legacy behaviour still holds.
+        ctx = self._ctx(
+            atr_regime="transitional",
+            d1_sma50_direction="up",
+            d1_sma50_slope=0.0,
+            price_52w_percentile=0.5,
+            d1_close_vs_sma50=0.5,
+        )
         result = _atr_fallback(ctx)
         assert result.trend_direction == "bullish"
 
@@ -491,6 +518,131 @@ class TestAtrFallbackMapping:
             ctx = self._ctx(atr_regime=atr_regime)
             result = _atr_fallback(ctx)
             assert 0.0 <= result.confidence <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# R7-B1 slope-based upgrade (grind-up / grind-down / ATH_BREAKOUT)
+# ---------------------------------------------------------------------------
+
+
+class TestSlopeBasedUpgrade:
+    """Compressed-ATR grind markets (e.g. XAU 2024) must classify as
+    TREND_UP / TREND_DOWN / ATH_BREAKOUT rather than CONSOLIDATION/TRANSITION
+    when the SMA50 slope is persistent enough.
+    """
+
+    def _ctx(self, **overrides) -> RegimeContext:
+        defaults = dict(
+            d1_atr_pct=1.0,
+            d1_sma50_direction="up",
+            d1_sma50_slope=0.08,  # matches 2024 median
+            d1_close_vs_sma50=2.0,
+            d1_recent_range_pct=5.0,
+            d1_higher_highs=5,
+            d1_lower_lows=1,
+            h4_atr_pct=0.5,
+            h4_trend_bars=10,
+            h4_volatility_rank=0.5,
+            current_price=2400.0,
+            ath_distance_pct=1.0,
+            price_52w_percentile=0.85,
+            external=None,
+            atr_regime="ranging",
+        )
+        defaults.update(overrides)
+        return RegimeContext(**defaults)
+
+    def test_ranging_grind_up_upgrades_to_trend_up(self):
+        """2024-like signature: ATR compressed but slope persistent."""
+        ctx = self._ctx(
+            atr_regime="ranging",
+            d1_sma50_direction="up",
+            d1_sma50_slope=0.08,
+            d1_close_vs_sma50=2.0,
+            price_52w_percentile=0.85,
+        )
+        result = _atr_fallback(ctx)
+        assert result.regime == "TREND_UP"
+        assert result.trend_direction == "bullish"
+        assert result.confidence >= 0.6
+
+    def test_ranging_grind_down_upgrades_to_trend_down(self):
+        ctx = self._ctx(
+            atr_regime="ranging",
+            d1_sma50_direction="down",
+            d1_sma50_slope=-0.08,
+            d1_close_vs_sma50=-2.0,
+            price_52w_percentile=0.3,
+            d1_higher_highs=1,
+            d1_lower_lows=5,
+        )
+        result = _atr_fallback(ctx)
+        assert result.regime == "TREND_DOWN"
+        assert result.trend_direction == "bearish"
+
+    def test_transitional_grind_up_upgrades_to_trend_up(self):
+        ctx = self._ctx(
+            atr_regime="transitional",
+            d1_sma50_direction="up",
+            d1_sma50_slope=0.1,
+            d1_close_vs_sma50=1.5,
+            price_52w_percentile=0.8,
+        )
+        result = _atr_fallback(ctx)
+        assert result.regime == "TREND_UP"
+
+    def test_ath_breakout_fires_at_52w_top_decile(self):
+        """Top-5% of 52w range + slope up + close >= 3% above SMA50."""
+        ctx = self._ctx(
+            atr_regime="ranging",
+            d1_sma50_direction="up",
+            d1_sma50_slope=0.1,
+            d1_close_vs_sma50=5.0,
+            price_52w_percentile=0.98,
+        )
+        result = _atr_fallback(ctx)
+        assert result.regime == "ATH_BREAKOUT"
+        assert result.trend_direction == "bullish"
+
+    def test_slope_too_small_stays_consolidation(self):
+        """Below 0.05 %/bar slope → no upgrade, legacy CONSOLIDATION."""
+        ctx = self._ctx(
+            atr_regime="ranging",
+            d1_sma50_direction="up",
+            d1_sma50_slope=0.02,
+            price_52w_percentile=0.5,
+        )
+        result = _atr_fallback(ctx)
+        assert result.regime == "CONSOLIDATION"
+
+    def test_slope_up_but_close_below_sma50_stays_transition(self):
+        """Strong slope but close already below SMA50 → not a real trend;
+        legacy TRANSITION label preserved."""
+        ctx = self._ctx(
+            atr_regime="transitional",
+            d1_sma50_direction="up",
+            d1_sma50_slope=0.08,
+            d1_close_vs_sma50=-0.5,
+            d1_higher_highs=1,
+            d1_lower_lows=1,
+            price_52w_percentile=0.5,
+        )
+        result = _atr_fallback(ctx)
+        assert result.regime == "TRANSITION"
+
+    def test_atr_trending_path_still_promotes_to_ath_breakout(self):
+        """When ATR already says trending AND 52w-pct + close-vs-SMA50
+        qualify, the classification should be ATH_BREAKOUT not TREND_UP."""
+        ctx = self._ctx(
+            atr_regime="trending",
+            d1_atr_pct=1.6,
+            d1_sma50_direction="up",
+            d1_sma50_slope=0.15,
+            d1_close_vs_sma50=4.0,
+            price_52w_percentile=0.96,
+        )
+        result = _atr_fallback(ctx)
+        assert result.regime == "ATH_BREAKOUT"
 
 
 # ---------------------------------------------------------------------------
