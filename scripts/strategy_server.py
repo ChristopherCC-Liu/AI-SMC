@@ -186,6 +186,11 @@ def _build_leg_signal(symbol: str, suffix: str) -> dict[str, Any]:
     trail_activate_r = best.get("trail_activate_r")
     trail_distance_r = best.get("trail_distance_r")
     regime_label = best.get("regime_label")
+    # Round 6 B5: EA on-chart panel needs regime confidence + source tag
+    # ([AI] / [ATR] / [DEF]) to render the "TRANSITION 0.72 neutral [AI]"
+    # line. None-safe — panel falls back to label-only when absent.
+    regime_confidence = best.get("regime_confidence")
+    regime_source = best.get("regime_source")
 
     return {
         "leg": suffix,
@@ -209,6 +214,9 @@ def _build_leg_signal(symbol: str, suffix: str) -> dict[str, Any]:
         "trail_activate_r": trail_activate_r,
         "trail_distance_r": trail_distance_r,
         "regime_label": regime_label,
+        # Round 6 B5: EA on-chart panel regime metadata.
+        "regime_confidence": regime_confidence,
+        "regime_source": regime_source,
     }
 
 

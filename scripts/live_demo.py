@@ -604,6 +604,23 @@ def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
             _risk_pts = abs(e.entry_price - e.stop_loss)
             _tp1_pts = abs(e.take_profit_1 - e.entry_price)
             _exec_rr = round(_tp1_pts / _risk_pts, 3) if _risk_pts > 0 else 0.0
+            # Round 5 A-track Task #8 + R6 B5: regime-aware trail params +
+            # regime metadata for EA panel. Sourced from aggregator's last
+            # classification. None when aggregator hasn't seen AI yet.
+            _ai_assess = getattr(aggregator, "_last_ai_assessment", None) if aggregator is not None else None
+            _trail_params = None
+            _regime_label = None
+            _regime_confidence = None
+            _regime_source = None
+            if _ai_assess is not None:
+                from smc.ai.param_router import get_trail_params
+                try:
+                    _trail_params = get_trail_params(_ai_assess.regime)
+                except Exception:
+                    _trail_params = None
+                _regime_label = getattr(_ai_assess, "regime", None)
+                _regime_confidence = round(float(getattr(_ai_assess, "confidence", 0.0) or 0.0), 3)
+                _regime_source = getattr(_ai_assess, "source", None)
             state["best_setup"] = {
                 "direction": e.direction,
                 "entry": e.entry_price,
@@ -616,6 +633,12 @@ def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
                 # audit-r2 ops #18 (TP1 debate):
                 "planned_rr_ratio": _exec_rr,  # trending has no nominal-vs-exec divergence
                 "exec_rr_ratio": _exec_rr,
+                # Round 5 A2 + R6 B5: regime-aware trail + panel fields.
+                "trail_activate_r": _trail_params.activate_r if _trail_params else None,
+                "trail_distance_r": _trail_params.distance_r if _trail_params else None,
+                "regime_label": _regime_label,
+                "regime_confidence": _regime_confidence,
+                "regime_source": _regime_source,
             }
         else:
             # RangeSetup: planned (aggressive TP=tp_ext) vs exec (midpoint TP)
@@ -626,6 +649,21 @@ def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
             _risk_pts = abs(_entry - _sl)
             _planned_rr = round(abs(_tp_planned - _entry) / _risk_pts, 3) if _risk_pts > 0 else 0.0
             _exec_rr = round(abs(_tp_exec - _entry) / _risk_pts, 3) if _risk_pts > 0 else 0.0
+            # Round 5 A2 + R6 B5: same regime injection for range setups.
+            _ai_assess_r = getattr(aggregator, "_last_ai_assessment", None) if aggregator is not None else None
+            _trail_params_r = None
+            _regime_label_r = None
+            _regime_confidence_r = None
+            _regime_source_r = None
+            if _ai_assess_r is not None:
+                from smc.ai.param_router import get_trail_params
+                try:
+                    _trail_params_r = get_trail_params(_ai_assess_r.regime)
+                except Exception:
+                    _trail_params_r = None
+                _regime_label_r = getattr(_ai_assess_r, "regime", None)
+                _regime_confidence_r = round(float(getattr(_ai_assess_r, "confidence", 0.0) or 0.0), 3)
+                _regime_source_r = getattr(_ai_assess_r, "source", None)
             state["best_setup"] = {
                 "direction": best_setup.direction,
                 "entry": _entry,
@@ -638,6 +676,12 @@ def save_state(cycle, price, action, reason, ai_analysis, regime, setups,
                 # audit-r2 ops #18 (TP1 debate):
                 "planned_rr_ratio": _planned_rr,
                 "exec_rr_ratio": _exec_rr,
+                # Round 5 A2 + R6 B5: regime-aware trail + panel fields.
+                "trail_activate_r": _trail_params_r.activate_r if _trail_params_r else None,
+                "trail_distance_r": _trail_params_r.distance_r if _trail_params_r else None,
+                "regime_label": _regime_label_r,
+                "regime_confidence": _regime_confidence_r,
+                "regime_source": _regime_source_r,
             }
 
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
