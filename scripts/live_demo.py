@@ -432,13 +432,21 @@ def determine_action(setups, ai_analysis, regime, *,
                      h1_atr=0.0, price=0.0,
                      range_trader=None, breakout_detector=None,
                      asian_range_quota=None, phase1a_breaker=None,
-                     htf_bias=None, cfg=None, m15_df=None):
+                     htf_bias=None, cfg=None, m15_df=None,
+                     ai_regime_assessment=None,
+                     ai_mode_router_enabled: bool = False,
+                     ai_regime_trust_threshold: float = 0.6):
     """Dual-mode action router: trending (v1 5-gate) or ranging (mean-reversion).
 
     Always detects range for display. Mode router decides which path runs.
     Returns (action, reason, best_setup, mode_decision).
     Round 5 T0 (P0-9): htf_bias piped to _determine_ranging → check_range_guards
     Guard 6 (HTF alignment). None is safe (backward-compat default).
+
+    Round 7 P0-1: when ``ai_mode_router_enabled`` is True and
+    ``ai_regime_assessment`` is provided, the AI regime classifier output
+    is forwarded to ``route_trading_mode`` so it can override legacy
+    Priority 1-3 logic on confident trend/consolidation/transition calls.
     """
     session, session_penalty = get_session_info(cfg=cfg)
     ai_dir = ai_analysis.get("ai_direction", ai_analysis.get("direction", "neutral"))
@@ -457,7 +465,8 @@ def determine_action(setups, ai_analysis, regime, *,
     if range_bounds is not None and h1_df is not None:
         guards_passed = check_bounds_only_guards(range_bounds, session, h1_df, cfg=cfg)
 
-    # Route trading mode
+    # Route trading mode — Round 7 P0-1: gate AI regime override at caller
+    effective_assessment = ai_regime_assessment if ai_mode_router_enabled else None
     mode = route_trading_mode(
         ai_direction=ai_dir,
         ai_confidence=effective_conf,
@@ -467,6 +476,8 @@ def determine_action(setups, ai_analysis, regime, *,
         guards_passed=guards_passed,
         current_price=price,
         cfg=cfg,
+        ai_regime_assessment=effective_assessment,
+        ai_regime_trust_threshold=ai_regime_trust_threshold,
     )
 
     if mode.mode == "trending":
@@ -1241,6 +1252,9 @@ def main():
                 htf_bias=htf_bias,
                 cfg=cfg,
                 m15_df=m15_df,
+                ai_regime_assessment=getattr(aggregator, "_last_ai_assessment", None),
+                ai_mode_router_enabled=_path_cfg.ai_mode_router_enabled,
+                ai_regime_trust_threshold=_path_cfg.ai_regime_trust_threshold,
             )
             # Round 5 T0 (P0-2b): quota record_open moved *after* successful
             # order_send below (inside LIVE_EXEC branch). MT5 failures no longer

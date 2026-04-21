@@ -1,6 +1,10 @@
 """Pure-function mode router: decides trending vs ranging vs v1-passthrough.
 
 Priority logic:
+  0. (Round 7 P0-1, optional) AI regime classifier (TREND_UP / TREND_DOWN /
+     ATH_BREAKOUT / CONSOLIDATION / TRANSITION) — only fires when the caller
+     passes ``ai_regime_assessment`` AND its confidence ≥ trust threshold.
+     Otherwise falls through to the legacy 1-3 logic untouched.
   1. AI bullish/bearish + confidence >= 0.5 + session != ASIAN_CORE → trending (v1 5-gate)
   2. range_bounds exists + 5 guards pass + session in active sessions → ranging
   3. Fallback → v1_passthrough (allowed in ALL sessions including ASIAN_CORE)
@@ -13,14 +17,34 @@ Round 4.5 hotfix (用户指令 UTC 03:30):
 
 Round 4.6-Z: parameterized — cfg kwarg dispatches per-instrument sessions.
   _RANGING_SESSIONS removed; callers pass cfg=InstrumentConfig or default=XAUUSD.
+
+Round 7 P0-1: AI-aware priority-0 branch added behind a caller-gated flag.
+  The caller (scripts/live_demo.py::determine_action) reads
+  ``SMCConfig.ai_mode_router_enabled`` and passes the aggregator's last
+  ``AIRegimeAssessment`` only when the flag is ON.  When OFF (default) or
+  assessment is None, the router's behaviour is byte-identical to Round 4.
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from smc.instruments.types import InstrumentConfig
 from smc.strategy.range_types import RangeBounds, TradingMode
 
+if TYPE_CHECKING:
+    from smc.ai.models import AIRegimeAssessment
+
 __all__ = ["route_trading_mode"]
+
+
+# Trend-class regimes that force the trending path when AI is confident.
+_TREND_REGIMES: frozenset[str] = frozenset({"TREND_UP", "TREND_DOWN", "ATH_BREAKOUT"})
+
+# TRANSITION exception: allow trending only when ATR regime agrees AND the
+# AI direction engine has ≥ this much conviction.  Intentionally 0.45 to
+# mirror Priority 1's post-Round-5-T5 threshold (see lines 66-75 below).
+_TRANSITION_TREND_DIR_CONF: float = 0.45
 
 
 def route_trading_mode(
@@ -33,6 +57,8 @@ def route_trading_mode(
     current_price: float | None = None,
     *,
     cfg: InstrumentConfig | None = None,
+    ai_regime_assessment: "AIRegimeAssessment | None" = None,
+    ai_regime_trust_threshold: float = 0.6,
 ) -> TradingMode:
     """Decide between trending, ranging, and v1-passthrough trading mode.
 
@@ -53,6 +79,16 @@ def route_trading_mode(
     guards_passed:
         True if all 5 range guards pass (computed by caller via
         ``check_range_guards()``).
+    ai_regime_assessment:
+        Round 7 P0-1: optional AIRegimeAssessment from
+        ``classify_regime_ai``.  When provided AND its confidence is at
+        or above ``ai_regime_trust_threshold``, the AI regime drives a
+        new Priority-0 branch (see module docstring).  When None or
+        below threshold, the function behaves identically to Round 4 v5.
+    ai_regime_trust_threshold:
+        Round 7 P0-1: minimum confidence required on the assessment for
+        the AI-aware branch to fire.  Typically sourced from
+        ``SMCConfig.ai_regime_trust_threshold`` by the caller.
 
     Returns
     -------
@@ -63,11 +99,115 @@ def route_trading_mode(
         from smc.instruments import get_instrument_config
         cfg = get_instrument_config("XAUUSD")
 
+    # ------------------------------------------------------------------
+    # Priority 0 (Round 7 P0-1): AI regime classifier override
+    #
+    # Only fires when the caller opted in by passing a non-None
+    # ``ai_regime_assessment`` AND its confidence clears the trust gate.
+    # Otherwise we fall straight through to Priority 1-3 unchanged.
+    # ------------------------------------------------------------------
+    if (
+        ai_regime_assessment is not None
+        and ai_regime_assessment.confidence >= ai_regime_trust_threshold
+    ):
+        ai_regime = ai_regime_assessment.regime
+        ai_regime_conf = ai_regime_assessment.confidence
+
+        # --- Trend regimes: force trending path (v1 5-gate) ---
+        # Sprint 11 bug fixed here: ATR "transitional" + AI TREND_UP/ATH
+        # had been routing to ranging; now we trust the AI regime when
+        # it is confident and push straight to v1 trend-following.
+        if ai_regime in _TREND_REGIMES:
+            return TradingMode(
+                mode="trending",
+                reason=(
+                    f"AI regime {ai_regime} (conf={ai_regime_conf:.2f}) "
+                    f"— forcing trending path"
+                ),
+                ai_direction=ai_direction,
+                ai_confidence=ai_confidence,
+                regime=regime,
+                range_bounds=range_bounds,
+            )
+
+        # --- CONSOLIDATION: allow ranging when guards + session align ---
+        if ai_regime == "CONSOLIDATION":
+            price_in_range = (
+                current_price is None
+                or range_bounds is None
+                or (range_bounds.lower <= current_price <= range_bounds.upper)
+            )
+            if (
+                range_bounds is not None
+                and guards_passed
+                and session in cfg.ranging_sessions
+                and price_in_range
+            ):
+                return TradingMode(
+                    mode="ranging",
+                    reason=(
+                        f"AI regime CONSOLIDATION (conf={ai_regime_conf:.2f}) "
+                        f"— mean-reversion mode, session={session}"
+                    ),
+                    ai_direction=ai_direction,
+                    ai_confidence=ai_confidence,
+                    regime=regime,
+                    range_bounds=range_bounds,
+                )
+            # CONSOLIDATION but preconditions missing → v1_passthrough.
+            return TradingMode(
+                mode="v1_passthrough",
+                reason=(
+                    f"AI regime CONSOLIDATION (conf={ai_regime_conf:.2f}) "
+                    f"but range/guards/session preconditions missing "
+                    f"— v1 pipeline"
+                ),
+                ai_direction=ai_direction,
+                ai_confidence=ai_confidence,
+                regime=regime,
+                range_bounds=range_bounds,
+            )
+
+        # --- TRANSITION: default v1_passthrough, exception for ATR-trending
+        #     + directional AI conviction (conservative momentum-follow). ---
+        if ai_regime == "TRANSITION":
+            if (
+                regime == "trending"
+                and ai_direction in ("bullish", "bearish")
+                and ai_confidence >= _TRANSITION_TREND_DIR_CONF
+            ):
+                return TradingMode(
+                    mode="trending",
+                    reason=(
+                        f"AI regime TRANSITION (conf={ai_regime_conf:.2f}) "
+                        f"+ ATR trending + AI direction {ai_direction} "
+                        f"(conf={ai_confidence:.2f}) — momentum-follow"
+                    ),
+                    ai_direction=ai_direction,
+                    ai_confidence=ai_confidence,
+                    regime=regime,
+                    range_bounds=range_bounds,
+                )
+            return TradingMode(
+                mode="v1_passthrough",
+                reason=(
+                    f"AI regime TRANSITION (conf={ai_regime_conf:.2f}) "
+                    f"— waiting for clarity, v1-passthrough"
+                ),
+                ai_direction=ai_direction,
+                ai_confidence=ai_confidence,
+                regime=regime,
+                range_bounds=range_bounds,
+            )
+        # Unknown regime label (future-proofing) — fall through to legacy.
+
+    # ------------------------------------------------------------------
     # Priority 1: AI strong directional + NOT ASIAN_CORE → trending (v1 5-gate)
     # Round 5 T5 tweak: threshold 0.5 → 0.45. decision-reviewer observed
     # today's XAU ai_confidence=0.47 (bearish) was stuck below 0.5 → never
     # entered trending path. 0.45 lets edge-case convictions through; v1
     # 5-gate aggregator still filters false trends downstream.
+    # ------------------------------------------------------------------
     if (
         ai_direction in ("bullish", "bearish")
         and ai_confidence >= 0.45

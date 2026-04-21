@@ -81,6 +81,7 @@ class SMCConfig(BaseSettings):
         "range_reversal_confirm_enabled",
         "sl_fitness_judge_enabled",
         "synthetic_zones_enabled",
+        "ai_mode_router_enabled",
         mode="before",
     )
     @classmethod
@@ -269,6 +270,29 @@ class SMCConfig(BaseSettings):
         ge=0.0,
         le=1.0,
         description="Minimum AI confidence to use AI regime. Below this, ATR fallback activates.",
+    )
+    ai_mode_router_enabled: bool = Field(
+        default=False,
+        description=(
+            "Round 7 P0-1: when True, mode_router consults the AI regime "
+            "classifier output (AIRegimeAssessment) for regime-aware mode "
+            "selection — forces 'trending' on TREND_UP/TREND_DOWN/"
+            "ATH_BREAKOUT, allows 'ranging' on CONSOLIDATION, forces "
+            "'v1_passthrough' on TRANSITION.  Default False preserves "
+            "Round 4 v5 Priority 1-3 behaviour.  Toggle via "
+            "SMC_AI_MODE_ROUTER_ENABLED after backtest validates on "
+            "2020-2024 dual-mode A/B."
+        ),
+    )
+    ai_regime_trust_threshold: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Round 7 P0-1: minimum AIRegimeAssessment.confidence required "
+            "for the new AI-aware branch to fire.  Below this, the router "
+            "falls through to the legacy Priority 1-3 logic unchanged."
+        ),
     )
     max_concurrent_per_symbol: int = Field(
         default=3,
