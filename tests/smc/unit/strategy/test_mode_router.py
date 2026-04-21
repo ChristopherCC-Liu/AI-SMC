@@ -544,10 +544,20 @@ class TestAIRegimeIntegration:
         assert result.mode == "ranging"
         assert "CONSOLIDATION" in result.reason
 
-    def test_consolidation_without_guards_to_v1(
+    def test_consolidation_without_guards_falls_through_to_legacy(
         self, sample_range_bounds: RangeBounds
     ) -> None:
-        """CONSOLIDATION but guards fail → v1_passthrough (not legacy fallback)."""
+        """P0-1c: CONSOLIDATION + guards fail falls through to legacy Pri 1-3.
+
+        Before P0-1c the router forced v1_passthrough here, starving
+        Priority 1 of AI-directional trending entries (2023 A/B
+        regression Δ PF -0.23, 14 divergences).  Now the AI
+        CONSOLIDATION view only informs the telemetry tag; legacy
+        Priority 1-3 decides.  With ai_direction neutral + low conf,
+        legacy falls to Priority 3 (v1_passthrough via "AI unsure") —
+        same mode outcome in this case, but reason + tag distinguish
+        the provenance from the pre-fix forced path.
+        """
         assessment = _make_ai_assessment("CONSOLIDATION", confidence=0.7)
         result = route_trading_mode(
             ai_direction="neutral",
@@ -559,8 +569,45 @@ class TestAIRegimeIntegration:
             ai_regime_assessment=assessment,
         )
         assert result.mode == "v1_passthrough"
-        assert "CONSOLIDATION" in result.reason
-        assert "preconditions missing" in result.reason
+        # Reason comes from legacy Priority 3, not the AI CONSOLIDATION branch
+        assert "AI unsure" in result.reason
+        assert result.ai_regime_decision == (
+            "consolidation_fell_through_no_range_conf_0.70"
+        )
+
+    def test_p0_1c_consolidation_with_bullish_direction_allows_trending(
+        self,
+    ) -> None:
+        """P0-1c regression test (backtest-lead's flagged bug).
+
+        Scenario: AI says CONSOLIDATION with 0.72 confidence BUT the
+        direction engine is bullish with 0.7 conviction and no range
+        bounds exist.  Pre-fix: router forced v1_passthrough → 14
+        divergences / −0.23 PF in 2023.  Post-fix: falls through to
+        Priority 1 → trending.
+        """
+        assessment = _make_ai_assessment(
+            "CONSOLIDATION",
+            confidence=0.72,
+            trend_direction="neutral",
+        )
+        result = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.7,
+            regime="transitional",
+            session="LONDON",
+            range_bounds=None,  # no range → preconditions fail
+            guards_passed=False,
+            ai_regime_assessment=assessment,
+        )
+        # Legacy Priority 1 picks trending because ai_direction bullish
+        # + conf 0.7 >= 0.45 + session LONDON (not ASIAN_CORE).
+        assert result.mode == "trending"
+        # Telemetry still records the CONSOLIDATION fell-through so the
+        # measurement team can count this legitimate override.
+        assert result.ai_regime_decision == (
+            "consolidation_fell_through_no_range_conf_0.72"
+        )
 
     # -- TRANSITION: default v1, exception when ATR trending + AI dir conviction --
 
@@ -809,9 +856,13 @@ class TestAIRegimeDecisionTelemetry:
         assert result.mode == "ranging"
         assert result.ai_regime_decision == "consolidation_to_ranging_conf_0.70"
 
-    def test_consolidation_preconditions_missing_tag(
+    def test_consolidation_fell_through_no_range_tag(
         self, sample_range_bounds: RangeBounds
     ) -> None:
+        """P0-1c replaces the old consolidation_preconditions_missing tag
+        with consolidation_fell_through_no_range — semantics are different
+        now: the AI observation informs telemetry but does NOT force the
+        route.  Legacy Priority 1-3 decides the mode."""
         assessment = _make_ai_assessment("CONSOLIDATION", confidence=0.70)
         result = route_trading_mode(
             ai_direction="neutral",
@@ -822,10 +873,10 @@ class TestAIRegimeDecisionTelemetry:
             guards_passed=False,
             ai_regime_assessment=assessment,
         )
+        # Legacy Priority 3 decides → v1_passthrough
         assert result.mode == "v1_passthrough"
-        assert (
-            result.ai_regime_decision
-            == "consolidation_preconditions_missing_conf_0.70"
+        assert result.ai_regime_decision == (
+            "consolidation_fell_through_no_range_conf_0.70"
         )
 
     def test_transition_to_v1_tag(

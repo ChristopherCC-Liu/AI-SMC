@@ -164,22 +164,16 @@ def route_trading_mode(
                         f"consolidation_to_ranging_conf_{ai_regime_conf:.2f}"
                     ),
                 )
-            # CONSOLIDATION but preconditions missing → v1_passthrough.
-            return TradingMode(
-                mode="v1_passthrough",
-                reason=(
-                    f"AI regime CONSOLIDATION (conf={ai_regime_conf:.2f}) "
-                    f"but range/guards/session preconditions missing "
-                    f"— v1 pipeline"
-                ),
-                ai_direction=ai_direction,
-                ai_confidence=ai_confidence,
-                regime=regime,
-                range_bounds=range_bounds,
-                ai_regime_decision=(
-                    f"consolidation_preconditions_missing_conf_"
-                    f"{ai_regime_conf:.2f}"
-                ),
+            # P0-1c fix: CONSOLIDATION + range preconditions missing must NOT
+            # force v1_passthrough — that starves Priority 1 of AI-bullish/
+            # bearish trending entries (2023 backtest: 14 divergences,
+            # Δ PF −0.23).  Instead, tag the fell-through state and let
+            # Priority 1-3 decide (trending if ai_direction + conf ≥ 0.45,
+            # ranging if legacy Priority 2 conditions hold elsewhere,
+            # else v1_passthrough).  The AI's CONSOLIDATION view stays
+            # informational via the telemetry tag below.
+            fell_through_tag = (
+                f"consolidation_fell_through_no_range_conf_{ai_regime_conf:.2f}"
             )
         elif ai_regime == "TRANSITION":
             # --- TRANSITION: default v1_passthrough, exception for ATR-trending
