@@ -584,7 +584,7 @@ class TestAIRegimeIntegration:
     def test_transition_momentum_exception_allows_trending(
         self,
     ) -> None:
-        """TRANSITION + ATR trending + AI bullish ≥ 0.45 → momentum-follow."""
+        """TRANSITION + ATR trending + AI bullish ≥ 0.5 → momentum-follow."""
         assessment = _make_ai_assessment("TRANSITION", confidence=0.7)
         result = route_trading_mode(
             ai_direction="bullish",
@@ -597,6 +597,37 @@ class TestAIRegimeIntegration:
         assert result.mode == "trending"
         assert "TRANSITION" in result.reason
         assert "momentum-follow" in result.reason
+
+    def test_transition_momentum_exception_boundary_exact_0_5(
+        self,
+    ) -> None:
+        """TRANSITION exception fires at exactly 0.5 (inclusive)."""
+        assessment = _make_ai_assessment("TRANSITION", confidence=0.7)
+        result = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.5,
+            regime="trending",
+            session="LONDON",
+            range_bounds=None,
+            ai_regime_assessment=assessment,
+        )
+        assert result.mode == "trending"
+
+    def test_transition_momentum_exception_blocked_below_0_5(
+        self,
+    ) -> None:
+        """TRANSITION exception does NOT fire at 0.49 (stricter than Pri-1)."""
+        assessment = _make_ai_assessment("TRANSITION", confidence=0.7)
+        result = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.49,  # below 0.5 TRANSITION floor
+            regime="trending",
+            session="LONDON",
+            range_bounds=None,
+            ai_regime_assessment=assessment,
+        )
+        assert result.mode == "v1_passthrough"
+        assert "TRANSITION" in result.reason
 
     # -- Regressions for the two live incidents the feature is meant to fix --
 
@@ -693,3 +724,138 @@ class TestAIRegimeIntegration:
         assert result.ai_confidence == 0.37
         assert result.regime == "ranging"
         assert result.range_bounds == sample_range_bounds
+
+
+# ---------------------------------------------------------------------------
+# Round 7 P0-1 follow-up: ai_regime_decision telemetry tag
+# ---------------------------------------------------------------------------
+
+
+class TestAIRegimeDecisionTelemetry:
+    """``TradingMode.ai_regime_decision`` must tag every Priority-0 outcome
+    so downstream measurement can count AI-override rates and distinguish
+    gate-off / low-conf / fired / blocked scenarios.
+    """
+
+    def test_no_assessment_no_tag(self) -> None:
+        """Assessment None → ai_regime_decision is None (caller fills)."""
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.2,
+            regime="ranging",
+            session="LONDON",
+            range_bounds=None,
+        )
+        assert result.ai_regime_decision is None
+
+    def test_low_conf_tag(self, sample_range_bounds: RangeBounds) -> None:
+        """Below-threshold → fell_through_low_conf_{conf}."""
+        assessment = _make_ai_assessment("CONSOLIDATION", confidence=0.55)
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.2,
+            regime="ranging",
+            session="LONDON",
+            range_bounds=sample_range_bounds,
+            guards_passed=True,
+            ai_regime_assessment=assessment,
+            ai_regime_trust_threshold=0.6,
+        )
+        assert result.ai_regime_decision == "fell_through_low_conf_0.55"
+
+    def test_trend_up_tag(self, sample_range_bounds: RangeBounds) -> None:
+        """Forced trending → forced_trending_by_TREND_UP_conf_{conf}."""
+        assessment = _make_ai_assessment("TREND_UP", confidence=0.85)
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.3,
+            regime="ranging",
+            session="LONDON",
+            range_bounds=sample_range_bounds,
+            guards_passed=True,
+            ai_regime_assessment=assessment,
+        )
+        assert result.ai_regime_decision == "forced_trending_by_TREND_UP_conf_0.85"
+
+    def test_ath_breakout_tag(self, sample_range_bounds: RangeBounds) -> None:
+        assessment = _make_ai_assessment("ATH_BREAKOUT", confidence=0.78)
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.3,
+            regime="transitional",
+            session="LONDON",
+            range_bounds=sample_range_bounds,
+            ai_regime_assessment=assessment,
+        )
+        assert (
+            result.ai_regime_decision
+            == "forced_trending_by_ATH_BREAKOUT_conf_0.78"
+        )
+
+    def test_consolidation_to_ranging_tag(
+        self, sample_range_bounds: RangeBounds
+    ) -> None:
+        assessment = _make_ai_assessment("CONSOLIDATION", confidence=0.70)
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.2,
+            regime="transitional",
+            session="LONDON",
+            range_bounds=sample_range_bounds,
+            guards_passed=True,
+            current_price=2360.0,
+            ai_regime_assessment=assessment,
+        )
+        assert result.mode == "ranging"
+        assert result.ai_regime_decision == "consolidation_to_ranging_conf_0.70"
+
+    def test_consolidation_preconditions_missing_tag(
+        self, sample_range_bounds: RangeBounds
+    ) -> None:
+        assessment = _make_ai_assessment("CONSOLIDATION", confidence=0.70)
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.2,
+            regime="transitional",
+            session="LONDON",
+            range_bounds=sample_range_bounds,
+            guards_passed=False,
+            ai_regime_assessment=assessment,
+        )
+        assert result.mode == "v1_passthrough"
+        assert (
+            result.ai_regime_decision
+            == "consolidation_preconditions_missing_conf_0.70"
+        )
+
+    def test_transition_to_v1_tag(
+        self, sample_range_bounds: RangeBounds
+    ) -> None:
+        assessment = _make_ai_assessment("TRANSITION", confidence=0.72)
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.2,
+            regime="ranging",
+            session="LONDON",
+            range_bounds=sample_range_bounds,
+            guards_passed=True,
+            ai_regime_assessment=assessment,
+        )
+        assert result.mode == "v1_passthrough"
+        assert result.ai_regime_decision == "transition_to_v1_conf_0.72"
+
+    def test_transition_momentum_follow_tag(self) -> None:
+        assessment = _make_ai_assessment("TRANSITION", confidence=0.70)
+        result = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.55,
+            regime="trending",
+            session="LONDON",
+            range_bounds=None,
+            ai_regime_assessment=assessment,
+        )
+        assert result.mode == "trending"
+        assert (
+            result.ai_regime_decision
+            == "transition_momentum_follow_conf_0.70"
+        )

@@ -42,9 +42,10 @@ __all__ = ["route_trading_mode"]
 _TREND_REGIMES: frozenset[str] = frozenset({"TREND_UP", "TREND_DOWN", "ATH_BREAKOUT"})
 
 # TRANSITION exception: allow trending only when ATR regime agrees AND the
-# AI direction engine has ≥ this much conviction.  Intentionally 0.45 to
-# mirror Priority 1's post-Round-5-T5 threshold (see lines 66-75 below).
-_TRANSITION_TREND_DIR_CONF: float = 0.45
+# AI direction engine has ≥ this much conviction.  Deliberately STRICTER
+# than Priority 1's 0.45 floor — TRANSITION is an ambiguity regime, so we
+# demand higher directional conviction before overriding v1_passthrough.
+_TRANSITION_TREND_DIR_CONF: float = 0.5
 
 
 def route_trading_mode(
@@ -104,20 +105,22 @@ def route_trading_mode(
     #
     # Only fires when the caller opted in by passing a non-None
     # ``ai_regime_assessment`` AND its confidence clears the trust gate.
-    # Otherwise we fall straight through to Priority 1-3 unchanged.
+    # Below-threshold and None assessments fall through to Priority 1-3
+    # unchanged; we still tag the decision so downstream telemetry can
+    # count how often the AI path actually fired.
     # ------------------------------------------------------------------
-    if (
-        ai_regime_assessment is not None
-        and ai_regime_assessment.confidence >= ai_regime_trust_threshold
-    ):
+    fell_through_tag: str | None = None
+    if ai_regime_assessment is not None:
         ai_regime = ai_regime_assessment.regime
         ai_regime_conf = ai_regime_assessment.confidence
 
-        # --- Trend regimes: force trending path (v1 5-gate) ---
-        # Sprint 11 bug fixed here: ATR "transitional" + AI TREND_UP/ATH
-        # had been routing to ranging; now we trust the AI regime when
-        # it is confident and push straight to v1 trend-following.
-        if ai_regime in _TREND_REGIMES:
+        if ai_regime_conf < ai_regime_trust_threshold:
+            fell_through_tag = f"fell_through_low_conf_{ai_regime_conf:.2f}"
+        elif ai_regime in _TREND_REGIMES:
+            # --- Trend regimes: force trending path (v1 5-gate) ---
+            # Sprint 11 bug fixed here: ATR "transitional" + AI TREND_UP/ATH
+            # had been routing to ranging; now we trust the AI regime when
+            # it is confident and push straight to v1 trend-following.
             return TradingMode(
                 mode="trending",
                 reason=(
@@ -128,10 +131,12 @@ def route_trading_mode(
                 ai_confidence=ai_confidence,
                 regime=regime,
                 range_bounds=range_bounds,
+                ai_regime_decision=(
+                    f"forced_trending_by_{ai_regime}_conf_{ai_regime_conf:.2f}"
+                ),
             )
-
-        # --- CONSOLIDATION: allow ranging when guards + session align ---
-        if ai_regime == "CONSOLIDATION":
+        elif ai_regime == "CONSOLIDATION":
+            # --- CONSOLIDATION: allow ranging when guards + session align ---
             price_in_range = (
                 current_price is None
                 or range_bounds is None
@@ -153,6 +158,9 @@ def route_trading_mode(
                     ai_confidence=ai_confidence,
                     regime=regime,
                     range_bounds=range_bounds,
+                    ai_regime_decision=(
+                        f"consolidation_to_ranging_conf_{ai_regime_conf:.2f}"
+                    ),
                 )
             # CONSOLIDATION but preconditions missing → v1_passthrough.
             return TradingMode(
@@ -166,11 +174,14 @@ def route_trading_mode(
                 ai_confidence=ai_confidence,
                 regime=regime,
                 range_bounds=range_bounds,
+                ai_regime_decision=(
+                    f"consolidation_preconditions_missing_conf_"
+                    f"{ai_regime_conf:.2f}"
+                ),
             )
-
-        # --- TRANSITION: default v1_passthrough, exception for ATR-trending
-        #     + directional AI conviction (conservative momentum-follow). ---
-        if ai_regime == "TRANSITION":
+        elif ai_regime == "TRANSITION":
+            # --- TRANSITION: default v1_passthrough, exception for ATR-trending
+            #     + directional AI conviction (conservative momentum-follow).
             if (
                 regime == "trending"
                 and ai_direction in ("bullish", "bearish")
@@ -187,6 +198,9 @@ def route_trading_mode(
                     ai_confidence=ai_confidence,
                     regime=regime,
                     range_bounds=range_bounds,
+                    ai_regime_decision=(
+                        f"transition_momentum_follow_conf_{ai_regime_conf:.2f}"
+                    ),
                 )
             return TradingMode(
                 mode="v1_passthrough",
@@ -198,8 +212,13 @@ def route_trading_mode(
                 ai_confidence=ai_confidence,
                 regime=regime,
                 range_bounds=range_bounds,
+                ai_regime_decision=(
+                    f"transition_to_v1_conf_{ai_regime_conf:.2f}"
+                ),
             )
-        # Unknown regime label (future-proofing) — fall through to legacy.
+        else:
+            # Unknown regime label (future-proofing) — tag and fall through.
+            fell_through_tag = f"fell_through_unknown_regime_{ai_regime}"
 
     # ------------------------------------------------------------------
     # Priority 1: AI strong directional + NOT ASIAN_CORE → trending (v1 5-gate)
@@ -220,6 +239,7 @@ def route_trading_mode(
             ai_confidence=ai_confidence,
             regime=regime,
             range_bounds=range_bounds,
+            ai_regime_decision=fell_through_tag,
         )
 
     # Priority 2: range detected + 5 guards pass + active session → ranging
@@ -253,6 +273,7 @@ def route_trading_mode(
             ai_confidence=ai_confidence,
             regime=regime,
             range_bounds=range_bounds,
+            ai_regime_decision=fell_through_tag,
         )
 
     # Priority 3: fallback — v1 pipeline runs in all sessions including ASIAN_CORE
@@ -266,4 +287,5 @@ def route_trading_mode(
         ai_confidence=ai_confidence,
         regime=regime,
         range_bounds=range_bounds,
+        ai_regime_decision=fell_through_tag,
     )

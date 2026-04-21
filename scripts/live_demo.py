@@ -480,6 +480,16 @@ def determine_action(setups, ai_analysis, regime, *,
         ai_regime_trust_threshold=ai_regime_trust_threshold,
     )
 
+    # Round 7 P0-1 telemetry: the router cannot distinguish "gate off" from
+    # "caller forgot to pass the assessment" — tag it here so dashboards can
+    # count "gate off" vs "low-conf" vs actual overrides.
+    if (
+        not ai_mode_router_enabled
+        and ai_regime_assessment is not None
+        and mode.ai_regime_decision is None
+    ):
+        mode = mode.model_copy(update={"ai_regime_decision": "fell_through_gate_off"})
+
     if mode.mode == "trending":
         action, reason, best = _determine_trending(
             setups, ai_dir, ai_conf, effective_conf, session,

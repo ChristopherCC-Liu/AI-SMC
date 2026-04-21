@@ -80,3 +80,14 @@ class TradingMode(BaseModel):
     ai_confidence: float  # 0.0 – 1.0
     regime: MarketRegime  # "trending" | "transitional" | "ranging"
     range_bounds: RangeBounds | None = None
+    # Round 7 P0-1: telemetry tag for downstream observability.
+    # None = gate OFF or legacy Priority 1-3 path took the decision.
+    # Examples:
+    #   "forced_trending_by_TREND_UP_conf_0.85"
+    #   "consolidation_to_ranging_conf_0.70"
+    #   "consolidation_preconditions_missing_conf_0.70"
+    #   "transition_to_v1_conf_0.72"
+    #   "transition_momentum_follow_conf_0.70"
+    #   "fell_through_low_conf_0.55"
+    #   "fell_through_gate_off"  (populated by the caller when gate is OFF)
+    ai_regime_decision: str | None = None
