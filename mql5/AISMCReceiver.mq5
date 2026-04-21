@@ -64,9 +64,17 @@ input int      TrailingMinIntervalSec = 5;  // Debounce PositionModify calls per
 // Round 4 v5: per-ticket initial SL memo for R-based trailing activation.
 // 128 is generous — in practice mt5 positions count is low single digits.
 #define AISMC_MAX_TRACKED 128
-ulong    g_track_ticket    [AISMC_MAX_TRACKED];
-double   g_track_initial_sl[AISMC_MAX_TRACKED];
-datetime g_track_last_trail[AISMC_MAX_TRACKED];
+ulong    g_track_ticket     [AISMC_MAX_TRACKED];
+double   g_track_initial_sl [AISMC_MAX_TRACKED];
+datetime g_track_last_trail [AISMC_MAX_TRACKED];
+// Round 5 A-track Task #8: per-ticket regime-aware trailing SL.
+// When 0.0 → fall back to the EA-level TrailActivateR/TrailDistanceR inputs
+// (preserves legacy behaviour on pre-R5 deploys where /signal lacks the
+// trail_activate_r / trail_distance_r fields).  Populated at position
+// open from the signal's regime preset (TREND → 0.3/0.5, CONSOLIDATION
+// → 0.5/0.3, TRANSITION → 0.5/0.5, ATH_BREAKOUT → 0.8/0.7).
+double   g_track_activate_r [AISMC_MAX_TRACKED];
+double   g_track_distance_r [AISMC_MAX_TRACKED];
 int      g_track_count = 0;
 
 CTrade         g_trade;
@@ -142,11 +150,63 @@ double GetInitialSL(ulong ticket, double fallback_sl)
    int idx = TrackedIndex(ticket);
    if (idx >= 0) return g_track_initial_sl[idx];
    if (g_track_count >= AISMC_MAX_TRACKED) return fallback_sl;
-   g_track_ticket    [g_track_count] = ticket;
-   g_track_initial_sl[g_track_count] = fallback_sl;
-   g_track_last_trail[g_track_count] = 0;
+   g_track_ticket     [g_track_count] = ticket;
+   g_track_initial_sl [g_track_count] = fallback_sl;
+   g_track_last_trail [g_track_count] = 0;
+   // Round 5 A-track Task #8: trail params default to 0.0 → signals
+   // "use EA-level input default" in ManageTrailingStops.  RecordTrailParams
+   // overwrites these when the signal carries regime-specific values.
+   g_track_activate_r [g_track_count] = 0.0;
+   g_track_distance_r [g_track_count] = 0.0;
    g_track_count++;
    return fallback_sl;
+}
+
+
+// Round 5 A-track Task #8: store per-ticket regime-derived trail params
+// (called right after a successful Buy()/Sell()).  When values are <=0
+// the per-ticket slot stays 0.0 and ManageTrailingStops falls back to
+// the EA-level TrailActivateR/TrailDistanceR inputs.
+void RecordTrailParams(ulong ticket, double activate_r, double distance_r)
+{
+   if (ticket == 0) return;
+   if (activate_r <= 0.0 && distance_r <= 0.0) return;  // nothing to record
+   int idx = TrackedIndex(ticket);
+   if (idx < 0)
+   {
+      // Seed the slot so subsequent ManageTrailingStops sees the params
+      // even before the first GetInitialSL call.
+      if (g_track_count >= AISMC_MAX_TRACKED) return;
+      g_track_ticket     [g_track_count] = ticket;
+      g_track_initial_sl [g_track_count] = 0.0;  // will be filled by GetInitialSL
+      g_track_last_trail [g_track_count] = 0;
+      g_track_activate_r [g_track_count] = 0.0;
+      g_track_distance_r [g_track_count] = 0.0;
+      idx = g_track_count;
+      g_track_count++;
+   }
+   if (activate_r > 0.0) g_track_activate_r[idx] = activate_r;
+   if (distance_r > 0.0) g_track_distance_r[idx] = distance_r;
+}
+
+
+// Round 5 A-track Task #8: resolve the effective activate_r / distance_r
+// for a ticket — per-ticket override when recorded, EA input otherwise.
+double GetEffectiveActivateR(ulong ticket)
+{
+   int idx = TrackedIndex(ticket);
+   if (idx >= 0 && g_track_activate_r[idx] > 0.0)
+      return g_track_activate_r[idx];
+   return TrailActivateR;
+}
+
+
+double GetEffectiveDistanceR(ulong ticket)
+{
+   int idx = TrackedIndex(ticket);
+   if (idx >= 0 && g_track_distance_r[idx] > 0.0)
+      return g_track_distance_r[idx];
+   return TrailDistanceR;
 }
 
 
@@ -213,15 +273,21 @@ void ManageTrailingStops()
       }
       if (initial_risk <= 0) continue;  // malformed — skip
 
-      double activate_pts = TrailActivateR * initial_risk;
+      // Round 5 A-track Task #8: per-ticket regime-aware activate/distance.
+      // Falls back to EA-level TrailActivateR/TrailDistanceR when not
+      // recorded (pre-R5 /signal response without trail_activate_r/_r).
+      double eff_activate_r = GetEffectiveActivateR(ticket);
+      double eff_distance_r = GetEffectiveDistanceR(ticket);
+
+      double activate_pts = eff_activate_r * initial_risk;
       if (profit_pts < activate_pts) continue;
 
       // Round 4 v5 hotfix (task #56): R-proportional trail distance so
       // a wide-SL trade (e.g. 1343 pts SL) trails by 672 pts — locking
       // meaningful profit — instead of the old fixed 50 pts that
       // would exit at 3.7% of the intended RR.
-      double trail_dist_pts = (TrailDistanceR > 0.0)
-                                ? TrailDistanceR * initial_risk
+      double trail_dist_pts = (eff_distance_r > 0.0)
+                                ? eff_distance_r * initial_risk
                                 : (double)TrailDistancePoints;
       double candidate_sl;
       if (type == POSITION_TYPE_BUY)
@@ -513,9 +579,19 @@ bool ExecuteDirection(bool is_buy, const string &body, int leg_idx, int magic)
              ? g_trade.Buy(lot, _Symbol, price, sl, tp, "AI-SMC EA")
              : g_trade.Sell(lot, _Symbol, price, sl, tp, "AI-SMC EA");
 
-   PrintFormat("Leg %d (magic=%d) %s %.2f lot %s @ %.2f SL=%.2f TP=%.2f conf=%.2f → retcode=%u %s",
+   // Round 5 A-track Task #8: record the regime-derived trailing SL
+   // parameters against the freshly-opened ticket.  Missing fields in
+   // the signal body parse to "" → StringToDouble returns 0.0 → the
+   // RecordTrailParams no-ops and ManageTrailingStops uses the EA
+   // input defaults (legacy behaviour preserved).
+   double signal_activate_r = StringToDouble(JsonStr(body, "trail_activate_r"));
+   double signal_distance_r = StringToDouble(JsonStr(body, "trail_distance_r"));
+   ulong  new_ticket        = g_trade.ResultDeal();
+
+   PrintFormat("Leg %d (magic=%d) %s %.2f lot %s @ %.2f SL=%.2f TP=%.2f conf=%.2f trailR=(%.2f/%.2f) → retcode=%u %s",
                leg_idx, magic,
                is_buy ? "BUY" : "SELL", lot, _Symbol, price, sl, tp, conf,
+               signal_activate_r, signal_distance_r,
                g_trade.ResultRetcode(),
                ok ? "OK" : g_trade.ResultComment());
 
@@ -524,6 +600,11 @@ bool ExecuteDirection(bool is_buy, const string &body, int leg_idx, int magic)
    {
       if (is_buy) g_leg_last_buy_ts[leg_idx]  = TimeCurrent();
       else        g_leg_last_sell_ts[leg_idx] = TimeCurrent();
+      // Round 5 A-track Task #8: attach trail params to the new ticket
+      // (when present).  ResultDeal returns the deal ticket — which is
+      // what PositionSelectByTicket uses in ManageTrailingStops.
+      if (new_ticket != 0)
+         RecordTrailParams(new_ticket, signal_activate_r, signal_distance_r);
    }
    return ok;
 }

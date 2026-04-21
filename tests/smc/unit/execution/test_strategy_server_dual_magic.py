@@ -359,3 +359,96 @@ class TestMacroMagicEnvOverride:
         body = resp.json()
         treatment = body["signals"][1]
         assert treatment["magic"] == 30001000
+
+
+# ---------------------------------------------------------------------------
+# Round 5 A-track Task #8 — regime-dynamic trailing SL fields
+# ---------------------------------------------------------------------------
+
+
+class TestRegimeDynamicTrailing:
+    """/signal forwards trail_activate_r / trail_distance_r / regime_label
+    from live_state.best_setup so the EA can apply per-ticket trailing."""
+
+    def _fresh_ts(self) -> str:
+        """Use a recent timestamp so fresh=true in the response."""
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def test_trail_fields_forward_from_state(self, client, tmp_path):
+        _write_state(tmp_path, "XAUUSD", "", {
+            "timestamp": self._fresh_ts(),
+            "cycle": 99,
+            "action": "BUY",
+            "trading_mode": "trending",
+            "best_setup": {
+                "direction": "long",
+                "entry": 4000.0, "sl": 3980.0, "tp1": 4050.0,
+                "position_size_lots": 0.3,
+                "confluence": 0.75,
+                "trail_activate_r": 0.3,
+                "trail_distance_r": 0.5,
+                "regime_label": "TREND_UP",
+            },
+        })
+        resp = client.get("/signal?symbol=XAUUSD")
+        body = resp.json()
+        control = body["signals"][0]
+        assert control["trail_activate_r"] == 0.3
+        assert control["trail_distance_r"] == 0.5
+        assert control["regime_label"] == "TREND_UP"
+
+    def test_trail_fields_null_when_missing(self, client, tmp_path):
+        """HOLD signal without best_setup → trail fields are None/null."""
+        _write_state(tmp_path, "XAUUSD", "", {
+            "timestamp": self._fresh_ts(),
+            "cycle": 5,
+            "action": "HOLD",
+        })
+        resp = client.get("/signal?symbol=XAUUSD")
+        body = resp.json()
+        control = body["signals"][0]
+        assert control["trail_activate_r"] is None
+        assert control["trail_distance_r"] is None
+        assert control["regime_label"] is None
+
+    def test_ath_breakout_trail_values(self, client, tmp_path):
+        _write_state(tmp_path, "XAUUSD", "", {
+            "timestamp": self._fresh_ts(),
+            "cycle": 10,
+            "action": "BUY",
+            "best_setup": {
+                "direction": "long",
+                "entry": 4000.0, "sl": 3960.0, "tp1": 4080.0,
+                "position_size_lots": 0.2,
+                "trail_activate_r": 0.8,
+                "trail_distance_r": 0.7,
+                "regime_label": "ATH_BREAKOUT",
+            },
+        })
+        resp = client.get("/signal?symbol=XAUUSD")
+        body = resp.json()
+        control = body["signals"][0]
+        assert control["trail_activate_r"] == 0.8
+        assert control["trail_distance_r"] == 0.7
+        assert control["regime_label"] == "ATH_BREAKOUT"
+
+    def test_consolidation_tight_scalp_trail(self, client, tmp_path):
+        _write_state(tmp_path, "XAUUSD", "", {
+            "timestamp": self._fresh_ts(),
+            "cycle": 11,
+            "action": "SELL",
+            "best_setup": {
+                "direction": "short",
+                "entry": 4000.0, "sl": 4020.0, "tp1": 3950.0,
+                "position_size_lots": 0.2,
+                "trail_activate_r": 0.5,
+                "trail_distance_r": 0.3,
+                "regime_label": "CONSOLIDATION",
+            },
+        })
+        resp = client.get("/signal?symbol=XAUUSD")
+        body = resp.json()
+        control = body["signals"][0]
+        assert control["trail_activate_r"] == 0.5
+        assert control["trail_distance_r"] == 0.3

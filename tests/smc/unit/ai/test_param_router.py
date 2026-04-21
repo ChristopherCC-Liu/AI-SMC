@@ -214,3 +214,88 @@ class TestPresetConsistency:
                 assert params.confluence_floor == 0.55
             else:
                 assert params.confluence_floor == 0.45, f"{regime} floor != base"
+
+
+# ---------------------------------------------------------------------------
+# Round 5 A-track Task #8 — Regime-dynamic trailing SL
+# ---------------------------------------------------------------------------
+
+
+class TestTrailParams:
+    """Round 5 A-track Task #8: get_trail_params per-regime presets."""
+
+    def test_trail_params_is_namedtuple(self) -> None:
+        from smc.ai.param_router import TrailParams, get_trail_params
+        p = get_trail_params("TREND_UP")
+        assert isinstance(p, TrailParams)
+        # NamedTuple supports both index + field access.
+        assert p[0] == p.activate_r
+        assert p[1] == p.distance_r
+
+    def test_trend_up_locks_fast(self) -> None:
+        from smc.ai.param_router import get_trail_params
+        p = get_trail_params("TREND_UP")
+        assert p.activate_r == 0.3
+        assert p.distance_r == 0.5
+
+    def test_trend_down_mirrors_trend_up(self) -> None:
+        from smc.ai.param_router import get_trail_params
+        up = get_trail_params("TREND_UP")
+        down = get_trail_params("TREND_DOWN")
+        assert up == down  # symmetric
+
+    def test_consolidation_tight_scalp(self) -> None:
+        from smc.ai.param_router import get_trail_params
+        p = get_trail_params("CONSOLIDATION")
+        assert p.activate_r == 0.5
+        assert p.distance_r == 0.3
+
+    def test_transition_baseline(self) -> None:
+        from smc.ai.param_router import get_trail_params
+        p = get_trail_params("TRANSITION")
+        assert p.activate_r == 0.5
+        assert p.distance_r == 0.5
+
+    def test_ath_breakout_gives_room(self) -> None:
+        """ATH breakouts should have the widest activate + distance."""
+        from smc.ai.param_router import get_trail_params
+        p = get_trail_params("ATH_BREAKOUT")
+        assert p.activate_r == 0.8
+        assert p.distance_r == 0.7
+
+    def test_all_five_regimes_have_presets(self) -> None:
+        from smc.ai.param_router import TRAIL_PRESETS
+        expected: tuple[MarketRegimeAI, ...] = (
+            "TREND_UP", "TREND_DOWN", "CONSOLIDATION", "TRANSITION", "ATH_BREAKOUT",
+        )
+        assert set(TRAIL_PRESETS.keys()) == set(expected)
+
+    def test_trail_values_in_sensible_range(self) -> None:
+        """All activate_r / distance_r ∈ (0, 1) — > 1R is never desirable."""
+        from smc.ai.param_router import TRAIL_PRESETS
+        for regime, params in TRAIL_PRESETS.items():
+            assert 0.0 < params.activate_r <= 1.0, f"{regime} activate_r"
+            assert 0.0 < params.distance_r <= 1.0, f"{regime} distance_r"
+
+    def test_get_trail_params_is_total_over_regimes(self) -> None:
+        """get_trail_params must succeed for every MarketRegimeAI literal."""
+        from smc.ai.param_router import get_trail_params
+        regimes: list[MarketRegimeAI] = [
+            "TREND_UP", "TREND_DOWN", "CONSOLIDATION", "TRANSITION", "ATH_BREAKOUT",
+        ]
+        for r in regimes:
+            p = get_trail_params(r)
+            assert p.activate_r > 0.0
+            assert p.distance_r > 0.0
+
+    def test_unknown_regime_raises(self) -> None:
+        from smc.ai.param_router import get_trail_params
+        with pytest.raises(KeyError):
+            get_trail_params("INVALID")  # type: ignore[arg-type]
+
+    def test_trail_params_is_immutable(self) -> None:
+        """NamedTuple is immutable — can't reassign fields."""
+        from smc.ai.param_router import get_trail_params
+        p = get_trail_params("TREND_UP")
+        with pytest.raises(AttributeError):
+            p.activate_r = 0.9  # type: ignore[misc]

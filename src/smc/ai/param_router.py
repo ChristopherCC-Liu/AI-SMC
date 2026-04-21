@@ -12,9 +12,25 @@ Usage::
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from smc.ai.models import MarketRegimeAI, RegimeParams
 
-__all__ = ["route", "PRESETS"]
+__all__ = ["route", "PRESETS", "get_trail_params", "TrailParams", "TRAIL_PRESETS"]
+
+
+class TrailParams(NamedTuple):
+    """Immutable pair of (activate_r, distance_r) for regime-aware trailing SL.
+
+    Round 5 A-track Task #8: the EA reads these per-ticket from the
+    /signal response (instead of the global ``TrailActivateR`` /
+    ``TrailDistanceR`` inputs) so trend regimes lock profit early
+    (0.3R activate) while ATH breakouts give the move room to run
+    (0.8R activate, 0.7R trail distance).
+    """
+
+    activate_r: float  # start trailing at N × initial_risk profit
+    distance_r: float  # trail N × initial_risk behind current price
 
 # ---------------------------------------------------------------------------
 # Regime parameter presets (v1.1 spec)
@@ -109,3 +125,44 @@ def route(regime: MarketRegimeAI) -> RegimeParams:
     never happen in practice since ``MarketRegimeAI`` is a Literal type.
     """
     return PRESETS[regime]
+
+
+# ---------------------------------------------------------------------------
+# Trailing SL presets (Round 5 A-track Task #8)
+# ---------------------------------------------------------------------------
+#
+# 2024 PF collapse (W13 deep dive: avg win $6.98 vs avg loss $19.20) was
+# driven by a fixed 50-pt trail behaving as 1/27 of SL in high-ATR periods —
+# winners locked in $0.50 while losers gave up the full 1343 pts.  The
+# R-proportional trail (Round 4 v5 hotfix) fixed scaling, but still used
+# one global preset.  A2 makes the trail regime-aware:
+#
+#   TREND_UP / TREND_DOWN — lock profit fast (0.3R activate, 0.5R trail).
+#       Trends reverse suddenly; once price runs 0.3R in our favour we want
+#       to protect that + give 0.5R of breathing room.
+#   CONSOLIDATION — tight scalp (0.5R activate, 0.3R trail).  Range-bound
+#       mean-reversion exits need to be fast; a wider trail in a choppy
+#       market just hands profit back.
+#   TRANSITION — baseline (0.5R / 0.5R).  Symmetric, ambiguous regime.
+#   ATH_BREAKOUT — give room (0.8R activate, 0.7R trail).  Post-breakout
+#       impulse often runs 2–4R; stopping out at 0.3R would strand a
+#       winner on the first pullback.
+
+TRAIL_PRESETS: dict[MarketRegimeAI, TrailParams] = {
+    "TREND_UP":      TrailParams(activate_r=0.3, distance_r=0.5),
+    "TREND_DOWN":    TrailParams(activate_r=0.3, distance_r=0.5),
+    "CONSOLIDATION": TrailParams(activate_r=0.5, distance_r=0.3),
+    "TRANSITION":    TrailParams(activate_r=0.5, distance_r=0.5),
+    "ATH_BREAKOUT":  TrailParams(activate_r=0.8, distance_r=0.7),
+}
+
+
+def get_trail_params(regime: MarketRegimeAI) -> TrailParams:
+    """Return the regime-specific (activate_r, distance_r) for trailing SL.
+
+    The strategy_server emits these in the ``/signal`` response per-leg
+    so the EA can set per-ticket activate/distance at position open.
+    Downstream backward-compat: if the EA sees missing fields (old
+    server), it falls back to its input defaults.
+    """
+    return TRAIL_PRESETS[regime]

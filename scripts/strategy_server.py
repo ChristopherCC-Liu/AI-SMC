@@ -178,6 +178,15 @@ def _build_leg_signal(symbol: str, suffix: str) -> dict[str, Any]:
         raw_lot = best.get("position_size_lots")
         lot = float(raw_lot) if raw_lot is not None and float(raw_lot) > 0 else MIN_LOT
 
+    # Round 5 A-track Task #8: regime-dynamic trailing SL.  Forward the
+    # per-regime activate_r + distance_r that live_demo computed from the
+    # AI regime (TREND → 0.3/0.5, CONSOLIDATION → 0.5/0.3, TRANSITION →
+    # 0.5/0.5, ATH_BREAKOUT → 0.8/0.7).  Backward-compat: when absent the
+    # EA falls back to its own TrailActivateR/TrailDistanceR inputs.
+    trail_activate_r = best.get("trail_activate_r")
+    trail_distance_r = best.get("trail_distance_r")
+    regime_label = best.get("regime_label")
+
     return {
         "leg": suffix,
         "magic": magic,
@@ -196,6 +205,10 @@ def _build_leg_signal(symbol: str, suffix: str) -> dict[str, Any]:
         # signal_id must be per-leg unique so the EA dedupes independently
         # per magic (control cooldown must not interfere with treatment).
         "signal_id": f"{symbol}_{suffix}_{state.get('cycle', 0)}_{ts_iso or ''}",
+        # Round 5 A-track Task #8: regime-aware trailing SL per-ticket.
+        "trail_activate_r": trail_activate_r,
+        "trail_distance_r": trail_distance_r,
+        "regime_label": regime_label,
     }
 
 

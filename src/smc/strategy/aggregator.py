@@ -252,6 +252,10 @@ class MultiTimeframeAggregator:
             cache_ts=bar_ts,
         )
         regime_params = ai_assessment.param_preset
+        # Round 5 A-track Task #8: expose ai_assessment so live_demo can
+        # read the AI regime (e.g. TREND_UP / ATH_BREAKOUT) and derive
+        # trail params for the strategy_server /signal response.
+        self._last_ai_assessment = ai_assessment
 
         # Round 5 A-track Task #7: shadow-mode SL fitness judge needs a
         # RegimeContext snapshot alongside the assessment.  extract_regime_context
