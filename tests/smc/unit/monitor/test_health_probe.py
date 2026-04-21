@@ -117,20 +117,26 @@ def test_build_probe_preserves_fields() -> None:
     data = {"M15": [0], "H1": [0], "H4": [0], "D1": [0]}
     p = build_probe(
         cycle=42,
+        leg_suffix="_macro",
         tick_ok=True,
         data=data,
         handle_age_sec=1234,
         debate_elapsed_ms_last=9100,
         macro_bias_fresh=True,
         balance_usd=1000.50,
+        equity_usd=1015.25,
+        floating_usd=14.75,
     )
     assert p.cycle == 42
+    assert p.leg_suffix == "_macro"
     assert p.tick_ok is True
     assert p.data_ok is True
     assert p.handle_age_sec == 1234
     assert p.debate_elapsed_ms_last == 9100
     assert p.macro_bias_fresh is True
     assert p.balance_usd == 1000.50
+    assert p.equity_usd == 1015.25
+    assert p.floating_usd == 14.75
 
 
 @pytest.mark.unit
@@ -144,18 +150,38 @@ def test_build_probe_nones_passed_through() -> None:
         macro_bias_fresh=False,
         balance_usd=None,
     )
+    assert p.leg_suffix == ""
     assert p.data_ok is False
     assert p.handle_age_sec is None
     assert p.debate_elapsed_ms_last is None
     assert p.balance_usd is None
+    assert p.equity_usd is None
+    assert p.floating_usd is None
+
+
+@pytest.mark.unit
+def test_build_probe_defaults_leg_suffix_when_none_passed() -> None:
+    """None → coerced to empty string (dataclass field is non-optional str)."""
+    p = build_probe(
+        cycle=1,
+        leg_suffix=None,  # type: ignore[arg-type]
+        tick_ok=True,
+        data={"M15": [0], "H1": [0], "H4": [0], "D1": [0]},
+        handle_age_sec=0,
+        debate_elapsed_ms_last=None,
+        macro_bias_fresh=False,
+        balance_usd=None,
+    )
+    assert p.leg_suffix == ""
 
 
 @pytest.mark.unit
 def test_health_probe_fields_is_immutable() -> None:
     p = HealthProbeFields(
-        cycle=1, tick_ok=True, data_ok=True,
+        cycle=1, leg_suffix="", tick_ok=True, data_ok=True,
         handle_age_sec=0, debate_elapsed_ms_last=None,
         macro_bias_fresh=False, balance_usd=None,
+        equity_usd=None, floating_usd=None,
     )
     with pytest.raises(FrozenInstanceError):
         p.cycle = 99  # type: ignore[misc]
@@ -164,14 +190,16 @@ def test_health_probe_fields_is_immutable() -> None:
 @pytest.mark.unit
 def test_to_event_kwargs_includes_only_expected_keys() -> None:
     p = build_probe(
-        cycle=7, tick_ok=True, data=None,
+        cycle=7, leg_suffix="_macro", tick_ok=True, data=None,
         handle_age_sec=10, debate_elapsed_ms_last=500,
         macro_bias_fresh=True, balance_usd=999.99,
+        equity_usd=1002.22, floating_usd=2.23,
     )
     kwargs = p.to_event_kwargs()
     assert set(kwargs.keys()) == {
-        "cycle", "tick_ok", "data_ok", "handle_age_sec",
+        "cycle", "leg_suffix", "tick_ok", "data_ok", "handle_age_sec",
         "debate_elapsed_ms_last", "macro_bias_fresh", "balance_usd",
+        "equity_usd", "floating_usd",
     }
 
 
@@ -186,12 +214,15 @@ def test_emit_writes_info_event_with_expected_fields(
 ) -> None:
     p = build_probe(
         cycle=3,
+        leg_suffix="_macro",
         tick_ok=True,
         data={"M15": [0], "H1": [0], "H4": [0], "D1": [0]},
         handle_age_sec=42,
         debate_elapsed_ms_last=8500,
         macro_bias_fresh=True,
         balance_usd=1234.56,
+        equity_usd=1240.00,
+        floating_usd=5.44,
     )
     emit(p)
     events = _parse_events(capsys.readouterr().err)
@@ -200,12 +231,15 @@ def test_emit_writes_info_event_with_expected_fields(
     assert ev["_severity"] == "INFO"
     assert ev["event"] == "health_probe"
     assert ev["cycle"] == 3
+    assert ev["leg_suffix"] == "_macro"
     assert ev["tick_ok"] is True
     assert ev["data_ok"] is True
     assert ev["handle_age_sec"] == 42
     assert ev["debate_elapsed_ms_last"] == 8500
     assert ev["macro_bias_fresh"] is True
     assert ev["balance_usd"] == 1234.56
+    assert ev["equity_usd"] == 1240.00
+    assert ev["floating_usd"] == 5.44
 
 
 @pytest.mark.unit

@@ -35,26 +35,39 @@ class HealthProbeFields:
     Kept as a frozen dataclass so tests can assert on a plain object
     rather than a dict, and callers can pass it as ``**kw`` to
     ``structured_log.info``.
+
+    ``leg_suffix`` carries ``_path_cfg.journal_suffix`` (``""`` for
+    XAU Control + BTC, ``"_macro"`` for XAU Treatment) so the
+    measurement-lead daily digest can aggregate uptime per leg.
+    ``equity_usd`` / ``floating_usd`` feed the ops-lead dashboard
+    P&L card — they are sibling fields to ``balance_usd`` and all
+    three come from a single ``mt5.account_info()`` probe.
     """
 
     cycle: int
+    leg_suffix: str
     tick_ok: bool
     data_ok: bool
     handle_age_sec: int | None
     debate_elapsed_ms_last: int | None
     macro_bias_fresh: bool
     balance_usd: float | None
+    equity_usd: float | None
+    floating_usd: float | None
 
     def to_event_kwargs(self) -> dict[str, Any]:
         """Return a dict suitable for ``structured_log.info("health_probe", **kw)``."""
         return {
             "cycle": self.cycle,
+            "leg_suffix": self.leg_suffix,
             "tick_ok": self.tick_ok,
             "data_ok": self.data_ok,
             "handle_age_sec": self.handle_age_sec,
             "debate_elapsed_ms_last": self.debate_elapsed_ms_last,
             "macro_bias_fresh": self.macro_bias_fresh,
             "balance_usd": self.balance_usd,
+            "equity_usd": self.equity_usd,
+            "floating_usd": self.floating_usd,
         }
 
 
@@ -86,12 +99,15 @@ def _compute_data_ok(data: Mapping[Any, Any] | None) -> bool:
 def build_probe(
     *,
     cycle: int,
+    leg_suffix: str = "",
     tick_ok: bool,
     data: Mapping[Any, Any] | None,
     handle_age_sec: int | None,
     debate_elapsed_ms_last: int | None,
     macro_bias_fresh: bool,
     balance_usd: float | None,
+    equity_usd: float | None = None,
+    floating_usd: float | None = None,
 ) -> HealthProbeFields:
     """Return the canonical ``HealthProbeFields`` snapshot for this cycle.
 
@@ -100,6 +116,7 @@ def build_probe(
     """
     return HealthProbeFields(
         cycle=int(cycle),
+        leg_suffix=str(leg_suffix or ""),
         tick_ok=bool(tick_ok),
         data_ok=_compute_data_ok(data),
         handle_age_sec=handle_age_sec,
@@ -107,6 +124,12 @@ def build_probe(
         macro_bias_fresh=bool(macro_bias_fresh),
         balance_usd=(
             float(balance_usd) if balance_usd is not None else None
+        ),
+        equity_usd=(
+            float(equity_usd) if equity_usd is not None else None
+        ),
+        floating_usd=(
+            float(floating_usd) if floating_usd is not None else None
         ),
     )
 

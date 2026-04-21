@@ -1066,25 +1066,37 @@ def main():
             print(f"  Data: {{{bars_info}}}")
 
             # Round 5 stability R2: emit one health_probe per cycle for the
-            # daily SLA digest.  Uses the balance already cached in `info`
-            # (updated from reconcile block every cycle) as a cheap audit
-            # value — no extra mt5.account_info() round-trip needed.
+            # daily SLA digest + ops dashboard P&L card.  A single fresh
+            # mt5.account_info() call gives balance/equity/floating — we
+            # accept the one IPC roundtrip per cycle because the dashboard
+            # needs a live floating-pnl number (cached `info.balance` only
+            # updates on reconcile, which would stale the card).
+            _probe_balance: float | None = None
+            _probe_equity: float | None = None
+            _probe_floating: float | None = None
             try:
-                _probe_balance = float(info.balance) if info is not None else None
+                _probe_acc = mt5.account_info()
+                if _probe_acc is not None:
+                    _probe_balance = float(_probe_acc.balance)
+                    _probe_equity = float(_probe_acc.equity)
+                    _probe_floating = round(_probe_equity - _probe_balance, 2)
             except Exception:
-                _probe_balance = None
+                pass
             try:
                 _macro_fresh = bool(macro_layer.is_cache_fresh()) if _macro_flag else False
             except Exception:
                 _macro_fresh = False
             _probe = health_probe.build_probe(
                 cycle=cycle,
+                leg_suffix=_journal_suffix,
                 tick_ok=True,  # we would have `continue`d above if not
                 data=data,
                 handle_age_sec=mt5_watchdog.handle_age_sec(mt5_wd),
                 debate_elapsed_ms_last=ai_analysis.get("ai_elapsed_ms"),
                 macro_bias_fresh=_macro_fresh,
                 balance_usd=_probe_balance,
+                equity_usd=_probe_equity,
+                floating_usd=_probe_floating,
             )
             health_probe.emit(_probe)
 
