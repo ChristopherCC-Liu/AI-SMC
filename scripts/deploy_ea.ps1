@@ -3,12 +3,14 @@
 .SYNOPSIS
     AI-SMC EA (AISMCReceiver.mq5) one-shot VPS re-deployment script.
 .DESCRIPTION
-    Run this on the TMGM VPS after any change to mql5/AISMCReceiver.mq5:
-      1. Copy the source .mq5 from C:\AI-SMC\mql5\ to the MT5 Experts folder
-      2. Compile via MetaEditor64.exe with a blocking Start-Process -Wait
-      3. Verify the .ex5 artifact exists and is > 50 KB
-      4. Extract `#property version` from the .mq5 source
-      5. Send a Telegram notification via scripts/notify_ea_deploy.py
+    Run this on the TMGM VPS after any change to mql5/:
+      1. Copy mql5\AISMCReceiver.mq5   → MT5 Experts folder
+      2. Copy mql5\include\*.mqh       → MT5 Include folder (R7+: panel
+         header + any future include dependencies)
+      3. Compile via MetaEditor64.exe with a blocking Start-Process -Wait
+      4. Verify the .ex5 artifact exists and is > 50 KB
+      5. Extract `#property version` from the .mq5 source
+      6. Send a Telegram notification via scripts/notify_ea_deploy.py
          so the user knows to F7 / re-attach the EA on XAUUSD + BTCUSD charts.
 
     Returns exit code 0 on success, non-zero on any hard failure.
@@ -18,6 +20,7 @@
       - Repo checkout:    C:\AI-SMC
       - MT5 terminal id:  7643C0B96C7AD5841307C9E1EB0B9252
       - Experts folder:   C:\Users\Administrator\AppData\Roaming\MetaQuotes\Terminal\<terminal_id>\MQL5\Experts\
+      - Include folder:   ...\MQL5\Include\  (R7: required for aismc_panel.mqh)
       - MetaEditor path:  auto-detected via env + common install roots.
 
     Caller discovery (learned the hard way today):
@@ -110,17 +113,29 @@ if (-not (Test-Path $sourceMq5)) {
     Fail ("Source .mq5 not found: " + $sourceMq5)
 }
 
-$expertsDir = Join-Path $env:APPDATA ("MetaQuotes\Terminal\" + $TerminalId + "\MQL5\Experts")
+# R7: all .mqh dependencies live under mql5\include\ and must be mirrored
+# into MQL5\Include\ before MetaEditor tries to resolve #include <...>.
+$includeSrcDir = Join-Path $RepoRoot "mql5\include"
+
+$mqlRoot       = Join-Path $env:APPDATA ("MetaQuotes\Terminal\" + $TerminalId + "\MQL5")
+$expertsDir    = Join-Path $mqlRoot "Experts"
+$includeDstDir = Join-Path $mqlRoot "Include"
+
 if (-not (Test-Path $expertsDir)) {
     Write-Host ("  Creating Experts dir: " + $expertsDir)
     New-Item -ItemType Directory -Path $expertsDir -Force | Out-Null
+}
+if (-not (Test-Path $includeDstDir)) {
+    Write-Host ("  Creating Include dir: " + $includeDstDir)
+    New-Item -ItemType Directory -Path $includeDstDir -Force | Out-Null
 }
 
 $destMq5 = Join-Path $expertsDir "AISMCReceiver.mq5"
 $destEx5 = Join-Path $expertsDir "AISMCReceiver.ex5"
 
-Write-Host ("  Source : " + $sourceMq5)
-Write-Host ("  Dest   : " + $destMq5)
+Write-Host ("  Source  : " + $sourceMq5)
+Write-Host ("  Dest    : " + $destMq5)
+Write-Host ("  Include : " + $includeSrcDir + " -> " + $includeDstDir)
 
 $eaVersion = Extract-EaVersion -Mq5Path $sourceMq5
 Write-Host ("  Version: " + $eaVersion)
@@ -141,6 +156,35 @@ Write-Host ("  Copied {0:N0} bytes" -f (Get-Item $destMq5).Length)
 if (Test-Path $destEx5) {
     Remove-Item $destEx5 -Force
     Write-Host "  Removed stale .ex5"
+}
+
+# ── 2b. Sync include files ────────────────────────────────────────────────────
+# R7: AISMCReceiver.mq5 now depends on `#include <aismc_panel.mqh>` (and
+# potentially future .mqh siblings under mql5\include\).  We mirror the
+# whole folder — globbing by *.mqh makes new additions auto-deploy with
+# zero script edits.  Non-fatal if the repo ships no includes (e.g. on a
+# rollback to a pre-R6 EA).
+
+Write-Step "deploy_ea: syncing includes"
+
+if (-not (Test-Path $includeSrcDir)) {
+    Write-Host ("  No include dir in repo at " + $includeSrcDir + " — skipping (pre-R6 EA?)") -ForegroundColor Yellow
+} else {
+    $includeFiles = Get-ChildItem -Path $includeSrcDir -Filter "*.mqh" -File `
+        -ErrorAction SilentlyContinue
+    if (-not $includeFiles -or $includeFiles.Count -eq 0) {
+        Write-Host "  No .mqh files found in include dir — skipping"
+    } else {
+        foreach ($f in $includeFiles) {
+            $dst = Join-Path $includeDstDir $f.Name
+            try {
+                Copy-Item -Path $f.FullName -Destination $dst -Force
+                Write-Host ("  Copied {0} ({1:N0} bytes)" -f $f.Name, $f.Length)
+            } catch {
+                Fail ("Include copy failed for " + $f.Name + ": " + $_.Exception.Message)
+            }
+        }
+    }
 }
 
 # ── 3. Locate MetaEditor64.exe ────────────────────────────────────────────────
