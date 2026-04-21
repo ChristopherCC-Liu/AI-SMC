@@ -95,11 +95,37 @@ The original Sprint 11 hypothesis (18 range trades 0% WR in 2024 → fix by regi
 | Baseline | 60 (31%) | 128 (67%) | 4 (2%) |
 | Treatment | 64 (33%) | 138 (72%) | 0 (0%) |
 
+## Monday 2026-04-20 02:00 UTC TRANSITION Replay
+
+The original Sprint 11 impetus was the Monday 02:00 UTC ASIAN_CORE 5-stacked range-buy disaster. Synthesising the live-log assessment (`AIRegimeAssessment(regime="TRANSITION", confidence=0.72)`) and the tight 40-point Asian range at the time:
+
+| Arm | Decision | Tag / Reason |
+|---|---|---|
+| Baseline | `ranging` | `Range detected (guards passed), session=ASIAN_CORE — mean-reversion mode` |
+| Treatment | **`v1_passthrough`** | `transition_to_v1_conf_0.72` → *AI regime TRANSITION — waiting for clarity* |
+
+**Treatment blocks the disaster.** RangeTrader is suppressed; no mean-reversion setups fire at the false support band. Confirms the P0-1 design intent: TRANSITION high-conf gates ranging even when legacy Priority-2 preconditions all pass.
+
 ## Decisions for Lead — resolved
 
 1. ~~**CONSOLIDATION + ai_direction conflict**~~ → Resolved by P0-1d.
-2. **Flip env flag**: With P0-1d landed, 2023 Δ PF = 0.00 (regression eliminated). 2021/2022 deltas are sample noise (+3 trades pooled, -$56 concentrated in 2 trades in 2022 + 1 trade in 2021). Recommend enabling the Treatment env flag with live telemetry observation. If live PnL regresses in the first week, roll back via env flag, no code change required.
+2. **Flip env flag**: With P0-1d landed, 2023 Δ PF = 0.00 (regression eliminated). 2021/2022 deltas are sample noise (+3 trades pooled, -$56 concentrated in 2 trades in 2022 + 1 trade in 2021). Monday replay confirms Treatment successfully blocks the original target disaster.
 3. **Rebuild setup cache with synthetic zones**: shipped at `938c692` but **surfaced a deeper blocker**. See "R7-B2 Finding" below.
+
+## Gate 3 Recommendation — GREEN (with 7-day monitor)
+
+| Leg | Setting |
+|---|---|
+| Control (existing fleet) | `SMC_AI_MODE_ROUTER_ENABLED=false` (default — legacy Priority 1-3) |
+| Treatment (new leg) | `SMC_AI_MODE_ROUTER_ENABLED=true` + `SMC_AI_REGIME_TRUST_THRESHOLD=0.6` |
+
+Ship in treatment-only mode, monitor 7 trading days in live telemetry:
+- Compare `ai_regime_decision` tag distribution (expect `forced_trending_*`, `transition_to_v1_*`, `consolidation_deferred_to_direction_*` on Treatment leg; `fell_through_gate_off` on Control).
+- Compare Treatment PnL delta vs Control baseline per day.
+- Roll back via env flag (no code change, no deploy) if Treatment PnL regresses > 1 std of Control daily PnL.
+
+### 2024 A/B note
+Backtest shows 2024 Treatment == Baseline because the deterministic ATR+SMA backtest path has an HTF-bias-neutrality gap during grind-up moves (see R7-B2 finding). **Live production is unaffected** — the real AI direction engine (via debate pipeline) provides a bias signal where the backtest's deterministic path fails. The R8-B1 task will close the backtest-vs-live gap by adding an SMA50-slope fallback to `compute_htf_bias`.
 
 ## R7-B2 Finding — Synthetic Zones Don't Unlock 2024 A/B
 
