@@ -48,6 +48,7 @@ def build_leg_breakdown(
     target_date: date,
     *,
     closures_by_ticket: dict[int, float] | None = None,
+    closure_events: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return a list of per-leg stat rows.
 
@@ -68,6 +69,16 @@ def build_leg_breakdown(
         supplied, we prefer this over the journal ``result`` field (the
         structured log is authoritative for closed PnL).  Empty / None means
         fall back to journal ``result``.
+    closure_events:
+        Optional: raw trade_reconciled / trade_closed events from
+        structured.jsonl on ``target_date``.  In the Round 4 v5
+        DELEGATED_TO_EA architecture, journal rows capture entry *signals*
+        and never carry closed PnL (EA executes and reconciler emits a
+        separate structured event).  When tickets can't be matched back
+        to a journal row (VPS journal's ``mt5_ticket`` is populated only
+        post-execute and may be null at write time), these closures would
+        be lost.  We aggregate them into an ``"unassigned:closures"`` leg
+        so daily totals don't silently drop 7 trades on the floor.
 
     Returns
     -------
@@ -91,13 +102,62 @@ def build_leg_breakdown(
     day_end = day_start + timedelta(days=1)
     closures_by_ticket = closures_by_ticket or {}
 
+    # Pass 1: legs sourced from journal (strict leg attribution).
     out: list[dict[str, Any]] = []
+    assigned_tickets: set[int] = set()
     for label, path in journal_paths.items():
-        rows = _scan_leg_journal(path, day_start, day_end, closures_by_ticket)
+        rows = _scan_leg_journal(
+            path, day_start, day_end, closures_by_ticket, assigned_tickets,
+        )
         if not rows:
             continue
         out.append(_leg_stats(label, rows))
+
+    # Pass 2: unattributed closures that didn't match any journal ticket.
+    # Critical for DELEGATED_TO_EA: journal row often has mt5_ticket=null
+    # when it was written (EA assigns ticket only after OrderSend succeeds).
+    if closure_events:
+        unassigned_pnls = _collect_unassigned_closure_pnls(
+            closure_events, day_start, day_end, assigned_tickets,
+        )
+        if unassigned_pnls:
+            out.append(_leg_stats("unassigned:closures", unassigned_pnls))
+
     return out
+
+
+def _collect_unassigned_closure_pnls(
+    events: Iterable[dict[str, Any]],
+    day_start: datetime,
+    day_end: datetime,
+    assigned_tickets: set[int],
+) -> list[float]:
+    """Return pnl_usd for trade_reconciled events whose ticket wasn't
+    attributed to a leg in pass 1.  ``trade_closed`` is skipped because it
+    duplicates ``trade_reconciled`` (both fire on every close)."""
+    seen: set[int] = set()
+    pnls: list[float] = []
+    for ev in events:
+        if ev.get("event") != "trade_reconciled":
+            continue
+        ts = _parse_ts(ev.get("ts"))
+        if ts is None or ts < day_start or ts >= day_end:
+            continue
+        ticket = ev.get("ticket")
+        if ticket is None:
+            continue
+        try:
+            t = int(ticket)
+        except (TypeError, ValueError):
+            continue
+        if t in assigned_tickets or t in seen:
+            continue
+        seen.add(t)
+        pnl = _coerce_float(ev.get("pnl_usd"))
+        if pnl is None:
+            continue
+        pnls.append(pnl)
+    return pnls
 
 
 def _scan_leg_journal(
@@ -105,8 +165,13 @@ def _scan_leg_journal(
     day_start: datetime,
     day_end: datetime,
     closures_by_ticket: dict[int, float],
+    assigned_tickets: set[int],
 ) -> list[float]:
-    """Return list of per-trade PnL (USD) for closed trades on the day."""
+    """Return list of per-trade PnL (USD) for closed trades on the day.
+
+    Records any successfully-attributed ticket into ``assigned_tickets`` so
+    the second pass (unattributed closures) can skip them.
+    """
     if not path.exists():
         return []
     pnls: list[float] = []
@@ -138,6 +203,12 @@ def _scan_leg_journal(
         if pnl is None:
             continue
         pnls.append(pnl)
+        ticket = entry.get("ticket") or entry.get("mt5_ticket")
+        if ticket is not None:
+            try:
+                assigned_tickets.add(int(ticket))
+            except (TypeError, ValueError):
+                pass
     return pnls
 
 
