@@ -237,6 +237,42 @@ def get_daily_digest(
     return JSONResponse(digest)
 
 
+@app.get("/api/regime")
+def get_regime(limit: int = Query(default=5, ge=1, le=20)) -> JSONResponse:
+    """Round 5 O1: tail last N ``ai_regime_classified`` events.
+
+    Cross-symbol (regime events are written by whichever leg runs the AI
+    classifier — not partitioned per symbol). Filter out ``source=="default"``
+    cold-start noise so the dashboard only surfaces real regime calls.
+    """
+    from smc.monitor.dashboard_feeds import tail_regime_events
+
+    events = tail_regime_events(ROOT / "logs" / "structured.jsonl", limit=limit)
+    return JSONResponse({"events": events, "server_time": datetime.now(timezone.utc).isoformat()})
+
+
+@app.get("/api/pnl")
+def get_pnl() -> JSONResponse:
+    """Round 5 O2: today's P&L per leg (control_xau / treatment_xau / control_btc).
+
+    Aggregates realized P&L from ``mt5.history_deals_get(today_00Z, now)``
+    grouped by composite (symbol, magic) key — BTC has no treatment leg,
+    so ``treatment_btc`` never appears.  Floating P&L comes from
+    ``mt5.positions_get()`` directly.  Not symbol-scoped — response
+    carries all three legs side-by-side.  5s cache inside
+    ``build_pnl_snapshot()`` matches the dashboard poll cadence so MT5
+    is hit at most once per cycle.
+    """
+    from smc.monitor.dashboard_feeds import build_pnl_snapshot
+
+    try:
+        import MetaTrader5 as mt5_mod  # type: ignore
+    except ImportError:
+        mt5_mod = None
+    snapshot = build_pnl_snapshot(mt5_mod, data_root=DATA)
+    return JSONResponse(snapshot)
+
+
 @app.get("/api/config")
 def get_config(symbol: str = Query(default="XAUUSD")) -> JSONResponse:
     root = _symbol_data_root(symbol)

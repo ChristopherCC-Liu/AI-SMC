@@ -123,6 +123,72 @@
     </div>
   </div>
 
+  <!-- Round 5 O2: 今日 P&L by leg -->
+  <div class="card p-5 md:p-6">
+    <div class="flex items-baseline justify-between mb-3">
+      <div>
+        <div class="text-xs uppercase tracking-wider text-muted">今日 P&L (per leg)</div>
+        <div class="text-xs text-muted mt-0.5" x-text="pnlLegSource"></div>
+      </div>
+      <div class="num text-3xl md:text-4xl font-bold" :style="{ color: pnlLegTotalColor }" x-text="pnlLegTotalLabel"></div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <template x-for="leg in pnlLegRows" :key="leg.key">
+        <div class="p-3 rounded-lg card-hi">
+          <div class="text-xs text-muted" x-text="leg.label"></div>
+          <div class="num text-2xl font-bold mt-1" :style="{ color: leg.color }" x-text="leg.realizedDisplay"></div>
+          <div class="text-xs text-muted mt-1 num">
+            浮动 <span :style="{ color: leg.floatingColor }" x-text="leg.floatingDisplay"></span>
+            · <span x-text="leg.trades"></span> 笔
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- Round 5 O1: AI Latest Reasoning -->
+  <div class="card p-5 md:p-6 border-l-4" style="border-left-color: #A78BFA">
+    <div class="flex items-center justify-between mb-3">
+      <div>
+        <div class="text-xs uppercase tracking-wider text-muted">AI 最新识别 (regime)</div>
+        <div class="text-xs text-muted mt-0.5" x-text="regimeHeader"></div>
+      </div>
+      <div class="text-xs text-muted">每 30 秒刷新</div>
+    </div>
+    <div x-show="regimeEvents.length === 0" class="text-sm text-muted py-4">暂无 regime 分类事件</div>
+    <template x-if="regimeEvents.length > 0">
+      <div>
+        <!-- 最新一条 — 大号展示 -->
+        <div class="flex items-baseline gap-3 flex-wrap">
+          <span class="num text-2xl md:text-3xl font-bold" :style="{ color: regimeColor(regimeEvents[0].regime) }" x-text="regimeEvents[0].regime"></span>
+          <span class="text-sm" :style="{ color: directionColor(regimeEvents[0].direction) }" x-text="directionLabel(regimeEvents[0].direction)"></span>
+          <span class="text-xs text-muted num" x-text="'置信度 ' + ((regimeEvents[0].confidence || 0) * 100).toFixed(0) + '%'"></span>
+        </div>
+        <!-- 置信度条 -->
+        <div class="mt-2 h-2 bg-slate-700 rounded-full overflow-hidden">
+          <div class="h-full transition-all duration-500"
+               :style="{ width: ((regimeEvents[0].confidence || 0) * 100) + '%', background: regimeColor(regimeEvents[0].regime) }"></div>
+        </div>
+        <!-- reasoning 可滚 -->
+        <div x-show="regimeEvents[0].reasoning" class="mt-3 text-sm text-muted leading-relaxed max-h-32 overflow-y-auto pr-2" x-text="regimeEvents[0].reasoning"></div>
+        <!-- 历史 4 条 -->
+        <details x-show="regimeEvents.length > 1" class="mt-3">
+          <summary class="text-xs text-muted hover:text-text select-none">历史最近 <span x-text="regimeEvents.length - 1"></span> 条</summary>
+          <ul class="mt-2 space-y-1 text-xs">
+            <template x-for="ev in regimeEvents.slice(1)" :key="ev.ts">
+              <li class="flex items-center gap-2 num">
+                <span class="text-muted" x-text="formatTime(ev.ts)"></span>
+                <span class="font-medium" :style="{ color: regimeColor(ev.regime) }" x-text="ev.regime"></span>
+                <span class="text-muted" x-text="'(' + ((ev.confidence || 0) * 100).toFixed(0) + '%)'"></span>
+                <span class="text-muted" x-text="directionLabel(ev.direction)"></span>
+              </li>
+            </template>
+          </ul>
+        </details>
+      </div>
+    </template>
+  </div>
+
   <!-- 卡片 2: 健康条 -->
   <div class="card p-5 md:p-6">
     <div class="flex items-center justify-between mb-3">
@@ -540,6 +606,11 @@
       digest: null,
       // Round 3 Sprint 2 guards snapshot: null until first fetch.
       guards: null,
+      // Round 5 O1: last N ai_regime_classified events (newest first).
+      regimeEvents: [],
+      regimeServerTime: null,
+      // Round 5 O2: per-leg today's P&L snapshot.
+      pnl: null,
       config: structuredClone(DEFAULT_CONFIG),
       loading: false,
       error: null,
@@ -555,7 +626,10 @@
         await this.fetchSymbols();
         this.fetchAll();
         this.loadConfigFromServer();
+        // Round 5 O1: regime on its own 30s timer (LLM-backed, slow to change).
+        this.fetchRegime();
         setInterval(() => this.fetchAll(), 5000);
+        setInterval(() => this.fetchRegime(), 30000);
       },
 
       switchSymbol(sym) {
@@ -585,12 +659,14 @@
           // Round 5 T1 F2: fetch /api/positions in parallel for real Hero data.
           // Round 3 Sprint 1: + /api/daily_digest for "今日概览" card.
           // Round 3 Sprint 2: + /api/guards for "风控闸门" traffic-light card.
-          const [sRes, jRes, pRes, dRes, gRes] = await Promise.all([
+          // Round 5 O2: + /api/pnl for per-leg today P&L card (not symbol-scoped).
+          const [sRes, jRes, pRes, dRes, gRes, plRes] = await Promise.all([
             fetch(`/api/state?symbol=${sym}`),
             fetch(`/api/journal?symbol=${sym}&limit=50`),
             fetch(`/api/positions?symbol=${sym}`),
             fetch(`/api/daily_digest?symbol=${sym}`),
             fetch(`/api/guards?symbol=${sym}`),
+            fetch(`/api/pnl`),
           ]);
           if (sRes.ok) {
             const s = await sRes.json();
@@ -615,10 +691,25 @@
           if (gRes && gRes.ok) {
             this.guards = await gRes.json();
           }
+          if (plRes && plRes.ok) {
+            this.pnl = await plRes.json();
+          }
           this.error = null;
         } catch (e) {
           this.error = String(e);
         }
+      },
+
+      // Round 5 O1: regime fetch on its own 30s cadence.
+      async fetchRegime() {
+        try {
+          const r = await fetch("/api/regime?limit=5");
+          if (r.ok) {
+            const d = await r.json();
+            this.regimeEvents = d.events || [];
+            this.regimeServerTime = d.server_time || null;
+          }
+        } catch (e) { /* keep last value on failure */ }
       },
 
       async loadConfigFromServer() {
@@ -865,6 +956,68 @@
         if (dd.source !== "live_state") return "未采集（Sprint 2 soft-dep）";
         const limit = dd.max_daily_loss_pct;
         return `/ 限额 ${limit}%`;
+      },
+
+      // Round 5 O1: regime card helpers.
+      regimeColor(regime) {
+        if (regime === "TRENDING") return "#10B981";     // green
+        if (regime === "CONSOLIDATION") return "#A78BFA"; // accent
+        if (regime === "TRANSITION") return "#F59E0B";    // warn
+        return "#94A3B8";
+      },
+      directionColor(direction) {
+        if (direction === "bullish") return "#10B981";
+        if (direction === "bearish") return "#EF4444";
+        return "#94A3B8";
+      },
+      directionLabel(direction) {
+        const map = { bullish: "看多 ↑", bearish: "看空 ↓", neutral: "中性 ·" };
+        return map[direction] || "?";
+      },
+      get regimeHeader() {
+        if (!this.regimeEvents.length) return "";
+        const top = this.regimeEvents[0];
+        return `source: ${top.source || "?"} · ${this.formatTime(top.ts)}`;
+      },
+
+      // Round 5 O2: per-leg P&L card helpers.
+      // Leg keys match PNL_LEG_KEYS in smc.monitor.dashboard_feeds:
+      // control_xau / treatment_xau / control_btc — BTC has no treatment leg.
+      get pnlLegRows() {
+        const legs = this.pnl?.legs || {};
+        const keys = [
+          { key: "control_xau",   label: "XAUUSD Control" },
+          { key: "treatment_xau", label: "XAUUSD Treatment" },
+          { key: "control_btc",   label: "BTCUSD Control" },
+        ];
+        return keys.map(k => {
+          const l = legs[k.key] || { realized: 0, floating: 0, trades: 0 };
+          const r = Number(l.realized || 0);
+          const f = Number(l.floating || 0);
+          return {
+            ...k,
+            trades: l.trades || 0,
+            realizedDisplay: (r >= 0 ? "+$" : "-$") + Math.abs(r).toFixed(2),
+            floatingDisplay: (f >= 0 ? "+$" : "-$") + Math.abs(f).toFixed(2),
+            color: r > 0 ? "#10B981" : r < 0 ? "#EF4444" : "#94A3B8",
+            floatingColor: f > 0 ? "#10B981" : f < 0 ? "#EF4444" : "#94A3B8",
+          };
+        });
+      },
+      get pnlLegTotalLabel() {
+        const t = this.pnl?.total?.realized;
+        if (t == null) return "—";
+        return (t >= 0 ? "+$" : "-$") + Math.abs(t).toFixed(2);
+      },
+      get pnlLegTotalColor() {
+        const t = Number(this.pnl?.total?.realized || 0);
+        return t > 0 ? "#10B981" : t < 0 ? "#EF4444" : "#94A3B8";
+      },
+      get pnlLegSource() {
+        if (!this.pnl) return "尚未加载";
+        const src = this.pnl.source === "mt5_live" ? "MT5 实时" : "MT5 不可用 (仅浮动缓存)";
+        const n = this.pnl.total?.trades || 0;
+        return `${src} · 今日 ${n} 笔已平仓`;
       },
 
       // Round 3 Sprint 1: daily digest getters.
