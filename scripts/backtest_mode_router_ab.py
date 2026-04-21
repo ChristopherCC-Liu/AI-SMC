@@ -69,7 +69,9 @@ from smc.strategy.session import get_session_info
 # Paths & constants
 # ---------------------------------------------------------------------------
 
-_CACHE_DIR = PROJECT_ROOT / ".scratch" / "round4" / "setup_cache"
+_DEFAULT_CACHE_DIR = PROJECT_ROOT / ".scratch" / "round4" / "setup_cache"
+_SYNTH_CACHE_DIR = PROJECT_ROOT / ".scratch" / "round7" / "setup_cache_synth"
+_CACHE_DIR = _DEFAULT_CACHE_DIR  # rebound in main() when --synth passed
 _REGIME_CACHE_PATH = PROJECT_ROOT / "data" / "regime_cache.parquet"
 _DATA_DIR = PROJECT_ROOT / "data" / "parquet" / "XAUUSD"
 _OUTPUT_DIR = PROJECT_ROOT / ".scratch" / "round7"
@@ -735,8 +737,11 @@ def _replay_monday_morning() -> str | None:
 
 
 def main() -> None:
+    global _CACHE_DIR
+
     years = _ALL_YEARS
     fast_mode = "--fast" in sys.argv
+    use_synth_cache = "--synth" in sys.argv
     for arg in sys.argv[1:]:
         if arg.startswith("--years="):
             raw = arg.split("=", 1)[1]
@@ -747,6 +752,10 @@ def main() -> None:
                 years = [int(raw)]
     if fast_mode:
         years = [2024]
+
+    if use_synth_cache:
+        _CACHE_DIR = _SYNTH_CACHE_DIR
+        print(f"Using synthetic-zone setup cache at {_CACHE_DIR}", flush=True)
 
     print(f"Round 7 P0-2 — mode_router A/B backtest", flush=True)
     print(f"Years: {years}", flush=True)
