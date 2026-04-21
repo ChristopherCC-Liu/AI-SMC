@@ -681,6 +681,8 @@ def cmd_live(
             sl_fitness_low_vol_percentile=cfg.sl_fitness_low_vol_percentile,
             sl_fitness_transition_conf_floor=cfg.sl_fitness_transition_conf_floor,
             sl_fitness_counter_trend_ai_conf=cfg.sl_fitness_counter_trend_ai_conf,
+            synthetic_zones_enabled=cfg.synthetic_zones_enabled,
+            synthetic_zones_min_historical=cfg.synthetic_zones_min_historical,
         )
 
         # Build live loop

@@ -94,6 +94,8 @@ class MultiTimeframeAggregator:
         sl_fitness_low_vol_percentile: float = 0.3,
         sl_fitness_transition_conf_floor: float = 0.6,
         sl_fitness_counter_trend_ai_conf: float = 0.6,
+        synthetic_zones_enabled: bool = False,
+        synthetic_zones_min_historical: int = 2,
     ) -> None:
         self._detector = detector
         self._enable_ob_test_trigger = enable_ob_test_trigger
@@ -112,6 +114,9 @@ class MultiTimeframeAggregator:
         self._sl_fitness_low_vol_percentile = sl_fitness_low_vol_percentile
         self._sl_fitness_transition_conf_floor = sl_fitness_transition_conf_floor
         self._sl_fitness_counter_trend_ai_conf = sl_fitness_counter_trend_ai_conf
+        # Round 5 A-track Task #9: ATH synthetic zones (augment, not replace).
+        self._synthetic_zones_enabled = synthetic_zones_enabled
+        self._synthetic_zones_min_historical = synthetic_zones_min_historical
         # If the detector was not created with a swing_length_map,
         # inject the default one so all aggregator pipelines benefit.
         if not detector.swing_length_map:
@@ -295,6 +300,65 @@ class MultiTimeframeAggregator:
             return ()
 
         zones = scan_zones(h1_snap, bias)
+
+        # Round 5 A-track Task #9: synthetic zone augmentation for ATH regimes.
+        # When historical zones are scarce (< min_historical) AND price sits
+        # in the top 5% of the 52-week range, fall back to synthesized
+        # anchors (VWAP bands / session H/L / round numbers / prev-week H/L).
+        # This addresses the W14+W15 2024 drought (6 months of zero setups
+        # during XAU's ATH rally) without displacing real OB/FVG zones.
+        if self._synthetic_zones_enabled and len(zones) < self._synthetic_zones_min_historical:
+            try:
+                from smc.smc_core.synthetic_zones import build_synthetic_zones
+                d1_df = data.get(Timeframe.D1)
+                # 52w range — pull from the last 252 D1 bars (1 trading year).
+                if d1_df is not None and len(d1_df) >= 10:
+                    n_52w = min(len(d1_df), 252)
+                    recent_52w = d1_df[-n_52w:]
+                    p_52w_high = float(recent_52w["high"].max() or 0.0)
+                    p_52w_low = float(recent_52w["low"].min() or 0.0)
+                else:
+                    p_52w_high = 0.0
+                    p_52w_low = 0.0
+
+                synthetic = build_synthetic_zones(
+                    m15_df=data.get(Timeframe.M15),
+                    h1_df=data.get(Timeframe.H1),
+                    current_price=current_price,
+                    price_52w_high=p_52w_high,
+                    price_52w_low=p_52w_low,
+                    now=bar_ts,
+                )
+                # Filter to bias-aligned zones so we don't resurrect
+                # counter-trend synthetic anchors.
+                bias_dir = "long" if bias.direction == "bullish" else "short"
+                synthetic_aligned = tuple(z for z in synthetic if z.direction == bias_dir)
+                if synthetic_aligned:
+                    zones = tuple(list(zones) + list(synthetic_aligned))
+                    self._last_setup_diagnostic["synthetic_zones_added"] = len(synthetic_aligned)
+                    try:
+                        from smc.monitor.structured_log import info as _log_info
+                        _log_info(
+                            "synthetic_zones_augment",
+                            added=len(synthetic_aligned),
+                            historical=len(zones) - len(synthetic_aligned),
+                            price=round(current_price, 2),
+                            p_52w_high=p_52w_high,
+                            p_52w_low=p_52w_low,
+                        )
+                    except Exception:
+                        pass
+            except Exception as exc:
+                try:
+                    from smc.monitor.structured_log import warn as _log_warn
+                    _log_warn(
+                        "synthetic_zones_error",
+                        error_type=type(exc).__name__,
+                        error_msg=str(exc)[:200],
+                    )
+                except Exception:
+                    pass
+
         if not zones:
             self._last_setup_diagnostic["stage_reject"] = "no_h1_zones"
             return ()

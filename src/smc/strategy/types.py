@@ -48,13 +48,19 @@ class BiasDirection(BaseModel):
 
 
 class TradeZone(BaseModel):
-    """A price zone on H1 where institutional footprints overlap."""
+    """A price zone on H1 where institutional footprints overlap.
+
+    .. versionchanged:: Round 5 A-track Task #9
+       Added ``"synthetic"`` zone type for ATH breakout synthetic zones
+       (VWAP bands / session H/L / round numbers / previous-week H/L)
+       when historical OB/FVG zones are absent in new-high regimes.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     zone_high: float
     zone_low: float
-    zone_type: Literal["ob", "fvg", "ob_fvg_overlap"]
+    zone_type: Literal["ob", "fvg", "ob_fvg_overlap", "synthetic"]
     direction: Literal["long", "short"]
     timeframe: Timeframe
     confidence: float  # 0.0 – 1.0

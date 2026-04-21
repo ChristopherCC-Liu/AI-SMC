@@ -85,6 +85,12 @@ def _score_zone_quality(zone: TradeZone) -> float:
         "ob_fvg_overlap": 1.0,
         "ob": 0.7,
         "fvg": 0.4,
+        # Round 5 A-track Task #9: ATH synthetic zones (VWAP / session H/L
+        # / round numbers / prev week H/L).  Weaker than historical OB/FVG
+        # — these are derived, not traded-through.  Kept above the default
+        # fallback so they still clear the tradeable threshold when
+        # confluence_score is otherwise strong.
+        "synthetic": 0.35,
     }
     type_score = type_scores.get(zone.zone_type, 0.3)
 

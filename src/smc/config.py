@@ -80,6 +80,7 @@ class SMCConfig(BaseSettings):
         "ai_regime_enabled",
         "range_reversal_confirm_enabled",
         "sl_fitness_judge_enabled",
+        "synthetic_zones_enabled",
         mode="before",
     )
     @classmethod
@@ -341,6 +342,31 @@ class SMCConfig(BaseSettings):
         ge=0.0,
         le=1.0,
         description="Rule 1: AI confidence threshold for asserting counter-trend VETO.",
+    )
+    # ------------------------------------------------------------------
+    # Round 5 A-track — SMC ATH synthetic zones (Task #9)
+    # ------------------------------------------------------------------
+    synthetic_zones_enabled: bool = Field(
+        default=False,
+        description=(
+            "Round 5 Task #9: when True and historical zones < "
+            "synthetic_zones_min_historical, the aggregator augments "
+            "with synthetic zones (VWAP bands, session H/L, round "
+            "numbers, prev-week H/L) during ATH regimes.  Addresses "
+            "the 2024 W14+W15 setup drought (6 months zero setups "
+            "during XAU's $2,300→$2,685 rally).  Default False for "
+            "safety.  Toggle via SMC_SYNTHETIC_ZONES_ENABLED."
+        ),
+    )
+    synthetic_zones_min_historical: int = Field(
+        default=2,
+        ge=0,
+        le=10,
+        description=(
+            "Augment with synthetic zones when historical zone count "
+            "is strictly less than this.  Default 2 — kick in when "
+            "only 0 or 1 historical zones detected."
+        ),
     )
     ath_reference_price: float = Field(
         default=3500.0,
