@@ -81,10 +81,11 @@ struct PanelState
    double daily_pnl;         // balance - start-of-day-balance; 0 if unknown
 
    // Regime / signal state (from /signal parse)
-   string regime;            // e.g. "TRANSITION"
-   double confidence;        // 0..1; negative means "unknown"
-   double trail_activate_r;  // last signal's trail activate R
-   double trail_distance_r;  // last signal's trail distance R
+   string regime;             // e.g. "TRANSITION"
+   double regime_confidence;  // 0..1; negative means "unknown"
+   string regime_source;      // e.g. "ai_debate" / "atr_fallback"
+   double trail_activate_r;   // last Control-leg trail activate R
+   double trail_distance_r;   // last Control-leg trail distance R
 
    // Per-leg status
    string control_action;    // last action (BUY/SELL/HOLD)
@@ -205,6 +206,18 @@ string PanelFormatConfidence(const double c)
    else if (c < 0.7) tag = " neutral";
    else              tag = " strong";
    return DoubleToString(c, 2) + tag;
+}
+
+// Collapse verbose source labels into 3-char tags that fit the narrow
+// confidence cell.  Empty / unknown sources render as nothing so we
+// don't pollute the display with placeholder text.
+string PanelFormatSource(const string src)
+{
+   if      (src == "ai_debate")    return " [AI]";
+   else if (src == "atr_fallback") return " [ATR]";
+   else if (src == "default")      return " [DEF]";
+   else if (StringLen(src) > 0)    return " [" + src + "]";
+   return "";
 }
 
 string PanelFormatDuration(const int total_sec)
@@ -430,16 +443,19 @@ void PanelUpdate(const PanelState &s)
                  PanelFormatPnL(s.floating_pnl),
                  PanelColorForPnL(s.floating_pnl));
 
-   // Row 3 : regime + confidence
+   // Row 3 : regime + confidence.  Source tag is appended to the
+   // confidence cell so "0.72 neutral [AI]" vs "[ATR]" / "[DEF]" tells
+   // the user which pipeline produced the call.
    int y3 = y2 + PANEL_ROW_H + 4;
    string regime_text = (StringLen(s.regime) > 0) ? s.regime : "—";
    PanelSetLabel("row3_val",
                  ox + 60, y3,
                  regime_text, PanelColorForRegime(s.regime));
+   string conf_text = PanelFormatConfidence(s.regime_confidence)
+                      + PanelFormatSource(s.regime_source);
    PanelSetLabel("row3_conf",
                  ox + 145, y3,
-                 PanelFormatConfidence(s.confidence),
-                 PANEL_COLOR_TEXT);
+                 conf_text, PANEL_COLOR_TEXT);
 
    // Row 4 : trail params — e.g. "0.5R @ 0.5R"
    int y4 = y3 + PANEL_ROW_H;

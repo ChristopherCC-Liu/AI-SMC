@@ -103,8 +103,18 @@ int            g_leg_last_cooldown[AISMC_MAX_LEGS];
 
 // Round 6 B5: panel-only snapshot of last /signal response.  Parsed once
 // per poll; panel reads these every tick (render-only, never drives exec).
+//
+// Regime fields are populated once strategy_server exposes them at the
+// /signal top-level (CONTRACT sent to ops-lead).  Until then JsonStr
+// returns "" → the globals keep their init value and the panel shows "—".
+//
+// trail_activate_r / trail_distance_r live inside signals[i] (per-leg).
+// Our flat JsonStr returns the first match — signals[0] = Control leg.
+// Treatment typically shares the regime preset so this is good enough;
+// if the legs ever diverge the panel will need per-leg display (future).
 string         g_last_regime              = "";
-double         g_last_confidence          = -1.0;  // -1 == unknown
+double         g_last_regime_confidence   = -1.0;  // -1 == unknown
+string         g_last_regime_source       = "";    // e.g. "ai_debate"
 double         g_last_trail_activate_r    = 0.0;
 double         g_last_trail_distance_r    = 0.0;
 // Daily P&L baseline — captured on first tick of the UTC day.
@@ -215,10 +225,11 @@ void RefreshPanel(const datetime now)
    s.equity           = AccountInfoDouble(ACCOUNT_EQUITY);
    s.floating_pnl     = floating;
    s.daily_pnl        = s.balance - g_day_start_balance + floating;
-   s.regime           = g_last_regime;
-   s.confidence       = g_last_confidence;
-   s.trail_activate_r = g_last_trail_activate_r;
-   s.trail_distance_r = g_last_trail_distance_r;
+   s.regime            = g_last_regime;
+   s.regime_confidence = g_last_regime_confidence;
+   s.regime_source     = g_last_regime_source;
+   s.trail_activate_r  = g_last_trail_activate_r;
+   s.trail_distance_r  = g_last_trail_distance_r;
 
    // Control = leg 0, Treatment = leg 1 (convention from /signal array).
    s.control_action   = g_leg_last_action[0];
@@ -483,14 +494,27 @@ void PollAndExecute()
 
    // Round 6 B5: snapshot fields for the panel.  JsonStr is a flat
    // first-match extractor — for keys that appear in both signals[0]
-   // and the top-level flat mirror it returns the control leg's copy.
-   // Non-breaking on pre-R5 servers that omit these keys (JsonStr
-   // returns "" → we keep the prior value, not overwrite with junk).
-   string regime = JsonStr(body, "regime_label");
+   // and the top-level flat mirror it returns the Control-leg copy.
+   //
+   // `regime`/`regime_confidence`/`regime_source` are added at /signal
+   // top-level by a pending ops-lead change (CONTRACT in-flight).  Once
+   // live they'll populate the panel immediately; until then JsonStr
+   // returns "" and the panel shows "—" for those rows.
+   //
+   // `trail_activate_r`/`trail_distance_r` come from inside signals[0]
+   // (per-leg).  Control + Treatment typically share the regime preset
+   // so the first match is representative.
+   //
+   // All extractions filter "" (absent key) AND literal "null" (Python
+   // None serialised by JSONResponse) so the panel retains the last
+   // valid value instead of flashing blanks between polls.
+   string regime = JsonStr(body, "regime");
    if (StringLen(regime) > 0 && regime != "null") g_last_regime = regime;
-   string conf_s = JsonStr(body, "confidence");
-   if (StringLen(conf_s) > 0 && conf_s != "null")
-      g_last_confidence = StringToDouble(conf_s);
+   string rconf  = JsonStr(body, "regime_confidence");
+   if (StringLen(rconf) > 0 && rconf != "null")
+      g_last_regime_confidence = StringToDouble(rconf);
+   string rsrc   = JsonStr(body, "regime_source");
+   if (StringLen(rsrc) > 0 && rsrc != "null") g_last_regime_source = rsrc;
    string act_r  = JsonStr(body, "trail_activate_r");
    if (StringLen(act_r) > 0 && act_r != "null")
       g_last_trail_activate_r = StringToDouble(act_r);
