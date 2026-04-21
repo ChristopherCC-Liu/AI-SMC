@@ -119,14 +119,32 @@ def fetch_closed_pnl_since(
             )
         except (TypeError, ValueError, OverflowError):
             close_time = to_time
+        # Round 5 O3: surface exit_price + magic + volume so the
+        # trade_closed Telegram enrichment can compute rr_realized and map
+        # the ticket to its A/B leg. All fields are optional — callers
+        # that only need (ticket, pnl_usd, close_time) ignore the extras.
+        exit_price = _safe_float(getattr(d, "price", None))
+        volume = _safe_float(getattr(d, "volume", None))
         out.append(
             {
                 "ticket": int(getattr(d, "position_id", 0) or getattr(d, "ticket", 0)),
                 "pnl_usd": round(pnl, 2),
                 "close_time": close_time,
+                "exit_price": exit_price,
+                "magic": int(getattr(d, "magic", magic)),
+                "volume": volume,
             }
         )
     return out
+
+
+def _safe_float(x: Any) -> float | None:
+    if x is None:
+        return None
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
 
 
 def _project_position(p: Any, mt5: Any) -> PositionState:
