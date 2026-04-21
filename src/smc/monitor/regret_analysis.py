@@ -48,6 +48,7 @@ from typing import Any, Iterable
 
 __all__ = [
     "load_day_trades",
+    "synthesize_unassigned_closures",
     "compute_regret_row",
     "compute_summary",
     "build_regret_records",
@@ -105,6 +106,50 @@ def load_day_trades(
             entry["_journal"] = str(p)
             rows.append(entry)
     return rows
+
+
+def synthesize_unassigned_closures(
+    trades: list[dict[str, Any]],
+    closures_by_ticket: dict[int, float],
+    *,
+    target_date: date,
+) -> list[dict[str, Any]]:
+    """Return synthetic trade rows for closures whose ticket didn't match
+    any journal row in ``trades``.
+
+    In the Round 4 v5 DELEGATED_TO_EA architecture, the journal captures
+    entry *signals* and never a closed PnL.  When the journal row's
+    ``mt5_ticket`` is still null at write time (EA assigns it later),
+    matching by ticket fails and we'd lose the closure entirely.  This
+    function emits a placeholder trade per unmatched closure so regret can
+    still be computed over the day's realised P&L — even if we can't
+    attribute each closure to control vs treatment (leg="unassigned").
+    """
+    journal_tickets: set[int] = set()
+    for t in trades:
+        tk = t.get("ticket") or t.get("mt5_ticket")
+        if tk is None:
+            continue
+        try:
+            journal_tickets.add(int(tk))
+        except (TypeError, ValueError):
+            pass
+    ts_default = datetime.combine(target_date, time(12, 0), tzinfo=timezone.utc).isoformat()
+    out: list[dict[str, Any]] = []
+    for ticket, pnl in closures_by_ticket.items():
+        if ticket in journal_tickets:
+            continue
+        out.append({
+            "time": ts_default,
+            "action": "CLOSED",
+            "mode": "LIVE_EXEC",
+            "direction": "unknown",
+            "magic": None,
+            "ticket": ticket,
+            "result": pnl,
+            "_journal": "<unassigned>",
+        })
+    return out
 
 
 def extract_closures_by_ticket(
@@ -316,6 +361,8 @@ def _leg_label(trade: dict[str, Any]) -> str:
     """Derive the leg label from magic + journal path."""
     magic = _coerce_int(trade.get("magic"))
     journal = trade.get("_journal", "")
+    if journal == "<unassigned>":
+        return "unassigned"
     if "journal_macro" in journal or magic == MAGIC_TREATMENT:
         return "treatment"
     return "control"

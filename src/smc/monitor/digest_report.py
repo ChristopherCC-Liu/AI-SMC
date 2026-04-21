@@ -196,7 +196,9 @@ def build_multi_symbol_digest(
         "date": target_date.isoformat(),
         "generated_at": current.isoformat(),
         "per_symbol": per_symbol,
-        "per_leg": build_leg_breakdown(journal_paths, target_date),
+        "per_leg": build_leg_breakdown(
+            journal_paths, target_date, closure_events=events,
+        ),
         "regime_distribution": build_regime_distribution(events),
         "ai_debate": build_ai_debate_stats(events),
         "handle_resets": count_handle_resets(events),

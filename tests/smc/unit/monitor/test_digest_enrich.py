@@ -151,6 +151,72 @@ class TestLegBreakdown:
         out = build_leg_breakdown({"X:c": jpath}, TARGET)
         assert out[0]["trades"] == 1
 
+    def test_unassigned_closures_from_structured_events(self, tmp_path: Path) -> None:
+        """Closures whose ticket isn't in any journal row should land in an
+        'unassigned:closures' leg so day totals stay honest.
+
+        Reproduces the DELEGATED_TO_EA architecture: journal rows carry
+        entry signals with mt5_ticket=null; broker tickets first appear
+        only in trade_reconciled events.
+        """
+        # Empty journal — everything comes from structured events.
+        jpath = tmp_path / "journal" / "live_trades.jsonl"
+        jpath.parent.mkdir(parents=True)
+        jpath.write_text("", encoding="utf-8")
+
+        closure_events = [
+            {
+                "event": "trade_reconciled",
+                "ts": "2026-04-20T04:32:55+00:00",
+                "ticket": 262518001, "pnl_usd": -52.72,
+            },
+            {
+                "event": "trade_reconciled",
+                "ts": "2026-04-20T05:02:40+00:00",
+                "ticket": 262784309, "pnl_usd": 48.08,
+            },
+            # trade_closed duplicates trade_reconciled; should be deduped.
+            {
+                "event": "trade_closed",
+                "ts": "2026-04-20T04:32:55+00:00",
+                "ticket": 262518001, "pnl_usd": -52.72,
+            },
+        ]
+        out = build_leg_breakdown(
+            {"X:c": jpath}, TARGET, closure_events=closure_events,
+        )
+        assert len(out) == 1
+        row = out[0]
+        assert row["leg"] == "unassigned:closures"
+        assert row["trades"] == 2  # dedupe trade_closed duplicate
+        assert row["total_pnl_usd"] == pytest.approx(-4.64)
+        assert row["wins"] == 1
+        assert row["losses"] == 1
+
+    def test_unassigned_skips_tickets_matched_by_journal(self, tmp_path: Path) -> None:
+        """If a journal row provides a ticket, its closure must NOT also
+        appear under 'unassigned:closures'."""
+        jpath = tmp_path / "journal" / "live_trades.jsonl"
+        _write_journal(jpath, [
+            _mk_row("2026-04-20T02:00:00+00:00", 10.0, ticket=999),
+        ])
+        closure_events = [
+            {"event": "trade_reconciled", "ts": "2026-04-20T04:00:00+00:00",
+             "ticket": 999, "pnl_usd": 10.0},
+            {"event": "trade_reconciled", "ts": "2026-04-20T05:00:00+00:00",
+             "ticket": 888, "pnl_usd": -5.0},
+        ]
+        out = build_leg_breakdown(
+            {"X:c": jpath}, TARGET, closure_events=closure_events,
+        )
+        labels = {row["leg"] for row in out}
+        assert "X:c" in labels
+        assert "unassigned:closures" in labels
+        # Only the unmatched ticket (888) should be in unassigned.
+        unassigned = next(r for r in out if r["leg"] == "unassigned:closures")
+        assert unassigned["trades"] == 1
+        assert unassigned["total_pnl_usd"] == pytest.approx(-5.0)
+
 
 # ---------------------------------------------------------------------------
 # build_regime_distribution

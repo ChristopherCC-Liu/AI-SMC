@@ -16,6 +16,7 @@ from smc.monitor.regret_analysis import (
     count_anti_stack_blocks,
     extract_closures_by_ticket,
     load_day_trades,
+    synthesize_unassigned_closures,
 )
 
 
@@ -121,6 +122,61 @@ class TestExtractClosuresByTicket:
         closures = {555: 42.0}
         row = compute_regret_row(trade, closures_by_ticket=closures)
         assert row["actual_pnl"] == pytest.approx(42.0)
+
+
+class TestSynthesizeUnassignedClosures:
+    def test_no_closures_returns_empty(self) -> None:
+        trades = [_trade("2026-04-20T02:00:00+00:00", 10.0)]
+        out = synthesize_unassigned_closures(trades, {}, target_date=TARGET)
+        assert out == []
+
+    def test_all_closures_matched_returns_empty(self) -> None:
+        """When every closure ticket has a matching journal row, no
+        synthetic rows are needed."""
+        trades = [_trade("2026-04-20T02:00:00+00:00", 10.0, ticket=111)]
+        closures = {111: 15.0}
+        out = synthesize_unassigned_closures(trades, closures, target_date=TARGET)
+        assert out == []
+
+    def test_unmatched_closures_synthesised_as_unassigned(self) -> None:
+        """Closures without journal counterpart should carry the
+        <unassigned> journal marker so compute_regret_row tags them
+        as leg='unassigned'."""
+        trades: list[dict] = []
+        closures = {
+            262518001: -52.72,
+            262784309: 48.08,
+            262673858: 74.83,
+        }
+        synth = synthesize_unassigned_closures(trades, closures, target_date=TARGET)
+        assert len(synth) == 3
+        for row in synth:
+            assert row["_journal"] == "<unassigned>"
+            assert row["mode"] == "LIVE_EXEC"
+            assert row["result"] in {-52.72, 48.08, 74.83}
+
+        for trade_row in synth:
+            r = compute_regret_row(trade_row)
+            assert r["leg"] == "unassigned"
+            assert r["confidence"] == "heuristic"
+
+    def test_end_to_end_day1_vps_style(self) -> None:
+        """Simulate the real VPS scenario: empty journal + 7 broker
+        closures.  build_regret_records must show trade_count=7 and an
+        honest actual_total, not 0."""
+        closures = {
+            262518001: -52.72, 262579661: -38.35, 262626659: -30.11,
+            262518005: -52.72, 262579669: -38.35, 262784309: 48.08,
+            262673858: 74.83,
+        }
+        trades = synthesize_unassigned_closures([], closures, target_date=TARGET)
+        records = build_regret_records(
+            trades, closures_by_ticket=closures, anti_stack_blocks=0,
+        )
+        assert len(records) == 8  # 7 trades + 1 summary
+        summary = records[-1]
+        assert summary["trade_count"] == 7
+        assert summary["actual_total"] == pytest.approx(-89.34)
 
 
 # ---------------------------------------------------------------------------

@@ -31,7 +31,9 @@ from smc.monitor.digest_report import (  # noqa: E402
 from smc.monitor.regret_analysis import (  # noqa: E402
     build_regret_records,
     count_anti_stack_blocks,
+    extract_closures_by_ticket,
     load_day_trades,
+    synthesize_unassigned_closures,
 )
 
 
@@ -66,8 +68,20 @@ def main(argv: list[str] | None = None) -> int:
     trades = load_day_trades(journal_paths, target)
     events = scan_structured_events(log_root, target)
     anti_stack_blocks = count_anti_stack_blocks(events)
+    closures = extract_closures_by_ticket(events)
 
-    records = build_regret_records(trades, anti_stack_blocks=anti_stack_blocks)
+    # DELEGATED_TO_EA bridge: orphan closures (ticket not in any journal row
+    # due to pre-execute write ordering) are synthesised as unassigned rows
+    # so day-total PnL stays honest.
+    trades = trades + synthesize_unassigned_closures(
+        trades, closures, target_date=target,
+    )
+
+    records = build_regret_records(
+        trades,
+        anti_stack_blocks=anti_stack_blocks,
+        closures_by_ticket=closures,
+    )
 
     out_path = reports_root / f"regret_{target.isoformat()}.jsonl"
     with out_path.open("w", encoding="utf-8") as fh:
