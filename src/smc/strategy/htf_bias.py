@@ -17,11 +17,26 @@ Confluence scoring considers:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from smc.smc_core.constants import XAUUSD_POINT_SIZE
 from smc.smc_core.types import SMCSnapshot
 from smc.strategy.types import BiasDirection
 
+if TYPE_CHECKING:
+    import polars as pl
+
 __all__ = ["compute_htf_bias", "htf_bias_tier"]
+
+
+# R8-B1: SMA50-slope fallback bias (Tier 4). Fires when D1+H4 structure
+# breaks are absent (grind-up/grind-down with no pullback, XAU 2024 was
+# the canonical case). Thresholds mirror regime_classifier's
+# _SLOPE_TREND_MIN_ABS so both paths react at the same slope magnitude.
+_SLOPE_FALLBACK_MIN_ABS: float = 0.05  # %/bar
+_SLOPE_FALLBACK_CONF_FLOOR: float = 0.30
+_SLOPE_FALLBACK_CONF_CEIL: float = 0.45
+_SMA50_PERIOD: int = 50
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +50,7 @@ def htf_bias_tier(confidence: float) -> str:
       Tier 1 — D1 + H4 aligned:  conf 0.7 – 1.0
       Tier 2 — H4-only:          conf 0.4 – 0.7
       Tier 3 — D1-only:          conf 0.3 – 0.5
+      Tier 4 — SMA50 slope:      conf 0.3 – 0.45 (same floor as Tier 3 — tier_3 label returned)
       neutral                  — conf < 0.3 (includes explicit 0.0 for disagreement)
 
     Note: Tier 2 / Tier 3 ranges overlap at 0.4-0.5; we classify by the
@@ -128,6 +144,26 @@ def _ob_proximity_bonus(snapshot: SMCSnapshot, direction: str) -> float:
     return min(0.2, count * 0.05)
 
 
+def _sma50_slope_pct_per_bar(d1_df: "pl.DataFrame | None") -> float | None:
+    """Compute normalised SMA50 slope (%/bar) from D1 close series.
+
+    Returns None when fewer than 55 D1 bars are available (need 50 for SMA
+    plus 5 for slope measurement). Slope is computed as the change in
+    SMA50 over the last 5 bars, normalised by the current SMA value to
+    give a scale-free %/bar rate — matches the formula used in
+    `smc.ai.regime_classifier._sma50_direction_and_slope`.
+    """
+    if d1_df is None or len(d1_df) < _SMA50_PERIOD + 5:
+        return None
+
+    closes = d1_df["close"].to_list()
+    sma_now = sum(closes[-_SMA50_PERIOD:]) / _SMA50_PERIOD
+    sma_5ago = sum(closes[-_SMA50_PERIOD - 5 : -5]) / _SMA50_PERIOD
+    if sma_now <= 0:
+        return None
+    return (sma_now - sma_5ago) / sma_now * 100.0 / 5.0
+
+
 def _collect_key_levels(
     d1: SMCSnapshot | None,
     h4: SMCSnapshot | None,
@@ -163,17 +199,22 @@ def _collect_key_levels(
 def compute_htf_bias(
     d1_snapshot: SMCSnapshot | None,
     h4_snapshot: SMCSnapshot | None,
+    *,
+    d1_df: "pl.DataFrame | None" = None,
 ) -> BiasDirection:
     """Compute the higher-timeframe directional bias using a tiered system.
 
     Tiers
     -----
-    Tier 1 — D1 + H4 aligned:  confidence 0.7–1.0 (strongest signal)
-    Tier 2 — H4-only:          confidence 0.4–0.7 (D1 missing or neutral)
-    Tier 3 — D1-only:          confidence 0.3–0.5 (H4 missing or neutral)
+    Tier 1 — D1 + H4 aligned:    confidence 0.7–1.0 (strongest signal)
+    Tier 2 — H4-only:            confidence 0.4–0.7 (D1 missing or neutral)
+    Tier 3 — D1-only:            confidence 0.3–0.5 (H4 missing or neutral)
+    Tier 4 — SMA50 slope (R8-B1): confidence 0.3–0.45 (fallback when both
+             snapshots are neutral AND ``d1_df`` is supplied AND
+             |SMA50 slope| >= 0.05 %/bar)
 
     If D1 and H4 actively disagree (both non-neutral, opposite directions),
-    the result is neutral with confidence 0.0.
+    the result is neutral with confidence 0.0 regardless of Tier 4.
 
     Parameters
     ----------
@@ -181,6 +222,13 @@ def compute_htf_bias(
         SMCSnapshot for the D1 timeframe, or None if unavailable.
     h4_snapshot:
         SMCSnapshot for the H4 timeframe, or None if unavailable.
+    d1_df:
+        Optional D1 OHLCV DataFrame used for the Tier 4 SMA50-slope
+        fallback. When ``None`` (default), the Tier 4 branch is skipped
+        and the function's behaviour is byte-identical to pre-R8-B1
+        callers. Callers that want the fallback pass the same D1 frame
+        they already own (aggregator.generate_setups has
+        ``data.get(Timeframe.D1)`` on hand).
 
     Returns
     -------
@@ -193,7 +241,34 @@ def compute_htf_bias(
     key_levels = _collect_key_levels(d1_snapshot, h4_snapshot)
 
     # Both neutral or both missing → overall neutral
+    #
+    # R8-B1: before returning neutral, try the SMA50-slope fallback
+    # (Tier 4) when the caller provided a D1 OHLCV DataFrame. This
+    # catches grind-up / grind-down markets that never print a BOS/CHoCH
+    # on D1 (e.g. XAU 2024 Mar-Oct ATH rally — structure-break based
+    # bias returned neutral 55% of that window).
     if d1_dir == "neutral" and h4_dir == "neutral":
+        slope = _sma50_slope_pct_per_bar(d1_df)
+        if slope is not None and abs(slope) >= _SLOPE_FALLBACK_MIN_ABS:
+            slope_dir: str = "bullish" if slope > 0 else "bearish"
+            # Scale confidence with slope magnitude; 0.1 %/bar lands mid-range.
+            raw_conf = _SLOPE_FALLBACK_CONF_FLOOR + min(
+                _SLOPE_FALLBACK_CONF_CEIL - _SLOPE_FALLBACK_CONF_FLOOR,
+                (abs(slope) - _SLOPE_FALLBACK_MIN_ABS) * 3.0,
+            )
+            confidence = round(
+                min(_SLOPE_FALLBACK_CONF_CEIL, max(_SLOPE_FALLBACK_CONF_FLOOR, raw_conf)),
+                3,
+            )
+            return BiasDirection(
+                direction=slope_dir,  # type: ignore[arg-type]
+                confidence=confidence,
+                key_levels=key_levels,
+                rationale=(
+                    f"Tier 4: D1+H4 structure indeterminate; SMA50 slope "
+                    f"{slope:+.4f}%/bar ({slope_dir}) — slope-fallback bias."
+                ),
+            )
         return BiasDirection(
             direction="neutral",
             confidence=0.0,
@@ -202,11 +277,38 @@ def compute_htf_bias(
         )
 
     # Active disagreement → neutral
+    #
+    # R8-B1: when D1 and H4 structures disagree but the D1 SMA50 slope is
+    # strongly persistent (|slope| >= 0.05 %/bar), trust the slope to break
+    # the tie. Grind-up markets like XAU 2024 W14 (Apr-Jul) exhibit D1
+    # bullish + H4 bearish retracement conflicts constantly — without this
+    # fallback the pipeline short-circuits at 47% of bars. The confidence
+    # is capped at the Tier 4 ceiling (0.45) so stronger signals always win.
     if (
         d1_dir != "neutral"
         and h4_dir != "neutral"
         and d1_dir != h4_dir
     ):
+        slope = _sma50_slope_pct_per_bar(d1_df)
+        if slope is not None and abs(slope) >= _SLOPE_FALLBACK_MIN_ABS:
+            slope_dir: str = "bullish" if slope > 0 else "bearish"
+            raw_conf = _SLOPE_FALLBACK_CONF_FLOOR + min(
+                _SLOPE_FALLBACK_CONF_CEIL - _SLOPE_FALLBACK_CONF_FLOOR,
+                (abs(slope) - _SLOPE_FALLBACK_MIN_ABS) * 3.0,
+            )
+            confidence = round(
+                min(_SLOPE_FALLBACK_CONF_CEIL, max(_SLOPE_FALLBACK_CONF_FLOOR, raw_conf)),
+                3,
+            )
+            return BiasDirection(
+                direction=slope_dir,  # type: ignore[arg-type]
+                confidence=confidence,
+                key_levels=key_levels,
+                rationale=(
+                    f"Tier 4: D1 {d1_dir} vs H4 {h4_dir} disagreement broken "
+                    f"by SMA50 slope {slope:+.4f}%/bar ({slope_dir})."
+                ),
+            )
         return BiasDirection(
             direction="neutral",
             confidence=0.0,

@@ -228,10 +228,13 @@ class MultiTimeframeAggregator:
         snapshots = self._detect_all(data)
 
         # Step 2: Compute HTF bias (tiered — accepts None for missing TFs)
+        # R8-B1: pass the D1 OHLCV frame so compute_htf_bias can fall back
+        # to the SMA50-slope signal when both snapshots are structurally
+        # neutral (grind-up / grind-down years like XAU 2024 Mar-Oct).
         d1_snap = snapshots.get(Timeframe.D1)
         h4_snap = snapshots.get(Timeframe.H4)
 
-        bias = compute_htf_bias(d1_snap, h4_snap)
+        bias = compute_htf_bias(d1_snap, h4_snap, d1_df=data.get(Timeframe.D1))
 
         # Round 4.6-S-diag (USER CATCH: 系统不开单): measure-first instrumentation.
         # Records per-call diagnostic so live_demo / dashboard can surface why

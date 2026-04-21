@@ -1199,7 +1199,7 @@ def main():
             d1_snapshot = detector.detect(d1_df, Timeframe.D1) if d1_df is not None and len(d1_df) > 0 else None
             h4_df = data.get(Timeframe.H4)
             h4_snapshot = detector.detect(h4_df, Timeframe.H4) if h4_df is not None and len(h4_df) > 0 else None
-            htf_bias = compute_htf_bias(d1_snapshot, h4_snapshot)
+            htf_bias = compute_htf_bias(d1_snapshot, h4_snapshot, d1_df=d1_df)
             h1_atr = aggregator._compute_h1_atr(h1_df)
 
             # 5a. Round 4 Alt-B W2: compute macro overlay bias (config-gated).

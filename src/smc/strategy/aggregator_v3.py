@@ -162,7 +162,7 @@ class AggregatorV3(MultiTimeframeAggregator):
         d1_snap = snapshots.get(Timeframe.D1)
         h4_snap = snapshots.get(Timeframe.H4)
 
-        bias = compute_htf_bias(d1_snap, h4_snap)
+        bias = compute_htf_bias(d1_snap, h4_snap, d1_df=data.get(Timeframe.D1))
         if bias.direction == "neutral":
             return []
 
