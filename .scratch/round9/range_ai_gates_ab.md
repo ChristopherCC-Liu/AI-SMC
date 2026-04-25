@@ -1,6 +1,6 @@
 # Round 9 P1 — RangeTrader AI Gates A/B Backtest
 
-_Generated: 2026-04-25 04:46 UTC_  _Cadence: every 8 M15 bars_
+_Generated: 2026-04-25 04:51 UTC_  _Cadence: every 8 M15 bars_
 
 
 ## Executive Summary
@@ -114,6 +114,38 @@ Counts cycles where the labeled gate(s) — running in isolation — would have 
 | 2022 | 222 | 455 | 0 |
 | 2023 | 321 | 711 | 0 |
 | 2024 | 272 | 742 | 9 |
+
+
+## Live Extrapolation — Why Historical n=8 Underrepresents Live
+
+**Live cadence**: 10 RangeTrader trades fired in 5 calendar days (2026-04-17 → 2026-04-21) → ~30 trades/year extrapolated.
+
+**Backtest cadence (this report)**: 8 setups across 4 years → ~2 trades/year.
+
+**Gap**: ~15× under-representation. Live fires roughly 15 RangeTrader setups per year-equivalent for every 1 the backtest produces.
+
+**Why the gap exists**:
+1. **Cooldown JSON resets at process restart**. The 30-min per-direction cooldown is persisted to `data/range_cooldown_state.json`. Live restarts (deploy / crash recovery) wipe the file → cooldown clock zeroes → next cycle can immediately fire even if a similar setup just opened. The backtest holds in-memory cooldown state across the entire year so the same direction can only fire every 30 min, not every cycle. Net effect: backtest under-counts setups by roughly the restart frequency × cooldown coverage.
+2. **Intra-cycle order-flow shifts**. Live ticks see boundary touches that don't fall on M15 close timestamps; the backtest samples discrete M15 closes only, missing boundary tags between cycles.
+3. **Donchian fallback dominance live vs OB/swing dominance historical**. Backtest 2024 had 9 Donchian-source cycles out of ~3000; live data dominantly uses Donchian fallback (Asian sessions, low-vol windows). P0-C is calibrated specifically for the Donchian case — this is the gate that protects live without being exercised much in this backtest.
+
+**What this means for the recommendation**:
+- Backtest validates that gates **don't false-block**: false_block=0, false_allow=0 across 4 years.
+- Backtest validates that gates **fire in the correct direction**: TREND_*/ATH_BREAKOUT cycles trigger P0-C, mid-confidence TRANSITION/CONSOLIDATION pass through.
+- Backtest **cannot** validate live PnL impact because the live trade rate is 15× higher and skewed toward Donchian-source cycles. The −$127 / 5-day live disaster scaled to year would be ~−$9.3k — the gates blocking even half of that pattern is materially valuable.
+
+
+## Where the Sample Size Actually Lives
+
+This 4-year backtest is a **logic-correctness check**, not a statistical-power study. The real validation surface for R9 P0 is spread across three sources, ordered by signal strength:
+
+1. **rangetrader-lead's regression unit tests** — primary fixture. Reproduces the Apr-21 4779 BUY incident with exact slope/close metrics that drove the live loss. File: `tests/smc/unit/strategy/test_range_trader_ai_gates.py`. Cases:
+    - `test_tuesday_2026_04_21_regression_blocks_long` (line 193) — D1 SMA50 slope=−0.057%/bar, close=−2.1% vs SMA50, long range BUY at $4779 → P0-A rejects, diagnostic key `long_trend_filter_blocked` records the exact slope/close numbers.
+    - `test_uptrend_blocks_short` (line 219) — symmetric uptrend case.
+    - `test_default_off_does_not_block` (line 236) — confirms gates default OFF preserve pre-R9 behavior.
+    - `test_d1_df_none_does_not_block` (line 253) — fail-open on missing D1 history.
+2. **This backtest** — confirms gates don't false-block on historical setups, and that ablation order matches the production code path. Lower fidelity than the unit tests because it samples discrete M15 closes; the unit tests pin the exact live snapshot.
+3. **Live behaviour, post-deploy** — the 15× higher trade rate plus Donchian-dominant source mix means live PnL impact will only be knowable after the gates run on the live env. R10 should include a post-deploy live-vs-backtest reconciliation report.
 
 
 ## Scenario Replays
