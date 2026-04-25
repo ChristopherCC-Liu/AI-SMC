@@ -148,6 +148,9 @@ from smc.strategy.htf_bias import compute_htf_bias, htf_bias_tier
 from smc.monitor.timing import next_bar_close
 from smc.monitor.structured_log import crit as log_crit, warn as log_warn, info as log_info
 from smc.monitor.critical_alerter import alert_critical
+# R10 P1.2: persist aggregator gate diagnostic (one jsonl line per cycle) so
+# scripts/build_gate_funnel.py can answer "where do setups die?" offline.
+from smc.monitor.gate_diagnostic_journal import append_gate_diagnostic
 # Round 5 stability R1: MT5 handle auto-heal watchdog — detects IPC handle rot
 # (tick → None for N cycles) and reinitialises; gives up after 5 consecutive
 # failures so Task Scheduler can respawn a fresh process with a fresh handle.
@@ -165,6 +168,7 @@ from smc.execution.mt5_positions_adapter import (
 )
 from smc.risk.consec_loss_halt import ConsecLossHalt
 from smc.risk.drawdown_guard import DrawdownGuard
+from smc.risk.persistent_drawdown_guard import PersistentDrawdownGuard
 from smc.risk.margin_cap import check_margin_cap
 from smc.risk.live_position_sizer import compute_live_position_size
 # Round 4 Alt-B W2: macro overlay (COT / TIPS / DXY)
@@ -807,6 +811,13 @@ def main():
     # closed deals across restarts (silent bug surfaced by ops-sustain).
     RECONCILE_TS_PATH = DATA_ROOT / f"last_reconcile_ts{_journal_suffix}.json"
     PHASE1A_BREAKER_PATH = DATA_ROOT / f"phase1a_breaker_state{_journal_suffix}.json"
+    # Round 10 P1.1: persistent multi-day DD circuit breaker.  Replaces the
+    # daily-reset peak_balance scheme that turned the 10% drawdown_guard cap
+    # into a 24h-rolling cap.  Now the all-time peak is monotonic and a
+    # 5-day rolling weekly peak runs in parallel; halt rules are 0.90 (24h
+    # auto-resume) and 0.85 (manual reset via sentinel file).
+    PERSISTENT_PEAK_PATH = DATA_ROOT / f"persistent_peak{_journal_suffix}.json"
+    DD_MANUAL_RESET_PATH = DATA_ROOT / f"dd_manual_reset{_journal_suffix}.flag"
 
     print(f"[{datetime.now()}] AI-SMC Live Trading Loop Starting...")
     print("=" * 60)
@@ -944,22 +955,20 @@ def main():
         state_path=CONSEC_LOSS_PATH,
         consec_limit=cfg.consec_loss_limit,
     )
-    drawdown_guard = DrawdownGuard(max_daily_loss_pct=3.0, max_drawdown_pct=10.0)
-    # peak_balance and daily_pnl are tracked across cycles from reconciled
-    # closes. Initialized from the current MT5 balance at startup so the
-    # guard reasons about post-restart P&L rather than session-zero.
+    # Round 10 P1.1: persistent multi-day DD guard wraps the stateless
+    # DrawdownGuard with monotonic all-time peak + 5-day rolling weekly peak.
+    # It replaces the buggy "reset peak to today's balance every UTC midnight"
+    # logic that turned the 10% drawdown cap into a 24h-rolling cap (the
+    # incident on 2026-04-25 where account sat at -12.76% but no halt fired).
+    persistent_dd_guard = PersistentDrawdownGuard(
+        state_path=PERSISTENT_PEAK_PATH,
+        manual_reset_sentinel_path=DD_MANUAL_RESET_PATH,
+        inner_guard=DrawdownGuard(max_daily_loss_pct=3.0, max_drawdown_pct=10.0),
+    )
+    # Seed the all-time peak from current MT5 balance on first boot.
     _initial_balance = float(info.balance)
-    peak_balance = _initial_balance
+    persistent_dd_guard.update(_initial_balance)
     daily_pnl = 0.0
-    # audit-r3 R3: track the UTC date for which peak_balance was last reset.
-    # On UTC 00:00 rollover we reset peak_balance to current balance so the
-    # drawdown guard reasons about *today's* peak, not historical all-time
-    # high.  Without reset, a bad week would bake a "ghost peak" into the
-    # guard indefinitely, producing spurious drawdown_guard trips even after
-    # the account recovers intra-day.  Mirrors Phase1aCircuitBreaker /
-    # ConsecLossHalt daily-reset semantics (UTC 0:00 boundary).
-    from datetime import date as _date
-    peak_balance_reset_date: _date = datetime.now(timezone.utc).date()
     # audit-r2 ops #4: reload persisted reconcile cursor so closed deals
     # processed pre-restart are NOT re-played into consec_halt /
     # phase1a_breaker / daily_pnl on startup.  Missing or corrupt cursor
@@ -987,42 +996,9 @@ def main():
         print(f"[{now.strftime('%H:%M:%S')} UTC] CYCLE {cycle}")
         print(f"{'='*60}")
 
-        # audit-r3 R3: daily peak_balance reset at UTC 0:00 boundary.
-        # Keeps drawdown_guard.total_drawdown_pct reasoning about *today's*
-        # peak, preventing historical highs from spuriously tripping the
-        # %-based drawdown backstop after recovery.  Reset to current live
-        # balance (fall back to peak_balance if account_info fails).
-        #
-        # NOTE (decision-reviewer micro-suggestion): `peak_balance_reset_date`
-        # advances EVEN IF the balance probe fails.  This prevents a retry
-        # storm: without date advance, every cycle during an MT5 outage would
-        # re-enter this branch, call account_info() repeatedly, and flood
-        # structured logs / Telegram alerts.  Analog: k8s liveness probes
-        # have backoff, not hot-loop retry.  If the reset was imperfect today,
-        # tomorrow's boundary will try again cleanly.
-        _today_utc = now.date()
-        if _today_utc != peak_balance_reset_date:
-            _balance_info_success = False
-            try:
-                _reset_info = mt5.account_info()
-                if _reset_info is not None and float(_reset_info.balance) > 0:
-                    _reset_balance = float(_reset_info.balance)
-                    _balance_info_success = True
-                else:
-                    _reset_balance = peak_balance
-            except Exception:
-                _reset_balance = peak_balance
-            log_info(
-                "peak_balance_daily_reset",
-                cycle=cycle,
-                prev_peak=round(peak_balance, 2),
-                new_peak=round(_reset_balance, 2),
-                from_date=peak_balance_reset_date.isoformat(),
-                to_date=_today_utc.isoformat(),
-                balance_info_success=_balance_info_success,
-            )
-            peak_balance = _reset_balance
-            peak_balance_reset_date = _today_utc
+        # Round 10 P1.1: daily peak_balance reset removed — it was the bug
+        # that masked the 2026-04-25 -12.76% bleed.  PersistentDrawdownGuard
+        # now owns the peak (monotonic all-time + 5-day rolling weekly).
 
         # audit-r2 ops #3: halt paths fall through to save_state so the
         # dashboard's "为什么不开仓" card surfaces the real reason (symmetry
@@ -1062,18 +1038,44 @@ def main():
             _halt_display_reason = f"连亏 {snap.consec_losses} 单触发每日保险"
 
         if _halt_blocked_reason is None:
-            budget = drawdown_guard.check_budget(
+            # Round 10 P1.1: ratchet the persistent peak BEFORE the check so
+            # the all-time / weekly rails always see today's balance.
+            persistent_dd_guard.update(float(info.balance))
+            budget = persistent_dd_guard.check_budget(
                 balance=float(info.balance),
-                peak_balance=peak_balance,
                 daily_pnl=daily_pnl,
             )
             if not budget.can_trade:
+                # Round 10 P1.1 invariant: every halt tier shipped today is
+                # block_opens=True / force_close=False. force_close is
+                # reserved for a future ratio<=0.80 emergency tier; we
+                # assert here so a regression in either guard surfaces loud.
+                assert budget.block_opens is True, (
+                    "Round 10 invariant: a halt MUST set block_opens=True"
+                )
+                assert budget.force_close is False, (
+                    "Round 10 invariant: no shipped tier sets force_close=True"
+                )
+                _peak_snap = persistent_dd_guard.snapshot()
+                _last_event = (
+                    _peak_snap.manual_halt_history[-1]
+                    if _peak_snap.manual_halt_history
+                    else None
+                )
                 log_warn(
                     "drawdown_guard_block",
                     cycle=cycle,
                     reason=budget.rejection_reason,
                     daily_loss_pct=budget.daily_loss_pct,
                     total_drawdown_pct=budget.total_drawdown_pct,
+                    block_opens=budget.block_opens,
+                    force_close=budget.force_close,
+                    all_time_peak=round(_peak_snap.all_time_peak, 2),
+                    weekly_peak=round(_peak_snap.weekly_peak, 2),
+                    manual_halt_active=_peak_snap.manual_halt_active,
+                    halt_tier=(_last_event.tier if _last_event else None),
+                    halt_rail=(_last_event.rail if _last_event else None),
+                    halt_ratio=(_last_event.ratio_at_trip if _last_event else None),
                 )
                 print(f"  [HALT] drawdown guard: {budget.rejection_reason}")
                 _halt_blocked_reason = f"drawdown_guard:{budget.rejection_reason}"
@@ -1261,6 +1263,27 @@ def main():
             # 5. Strategy (v1 trending setups — always generated)
             setups = aggregator.generate_setups(data, price)
             print(f"  SMC Setups: {len(setups)}")
+
+            # R10 P1.2: persist the per-call gate diagnostic so
+            # scripts/build_gate_funnel.py can reconstruct where setups die
+            # (htf_bias / regime / direction / no_h1_zones / entry_none / ...).
+            # Fail-closed: helper logs warn + returns None on IO error so the
+            # trade loop is never blocked by telemetry IO.
+            _gate_diag = getattr(aggregator, "_last_setup_diagnostic", None)
+            if isinstance(_gate_diag, dict):
+                try:
+                    append_gate_diagnostic(
+                        _gate_diag,
+                        bar_ts=now,
+                        symbol=cfg.symbol,
+                        magic=_effective_magic,
+                    )
+                except Exception as _diag_exc:  # pragma: no cover — defensive
+                    log_warn(
+                        "gate_diag_persist_unexpected",
+                        cycle=cycle,
+                        err=str(_diag_exc)[:120],
+                    )
 
             # 6. Dual-mode action routing
             session, _ = get_session_info(cfg=cfg)
@@ -1912,10 +1935,11 @@ def main():
                                         pass
                         except Exception:
                             pass  # best-effort — never break trading loop
-                # Update peak_balance from live account equity for next cycle.
+                # Round 10 P1.1: ratchet the persistent peak from live equity.
+                # PersistentDrawdownGuard.update() is idempotent and monotonic.
                 try:
                     info = mt5.account_info()
-                    peak_balance = max(peak_balance, float(info.balance))
+                    persistent_dd_guard.update(float(info.balance))
                 except Exception:
                     pass
                 last_reconcile_ts = now
@@ -1979,8 +2003,11 @@ def main():
             _balance_for_sizing = _locs.get("_virtual_balance_usd", None)
             if _balance_for_sizing is None:
                 _mt5_balance_fallback = _locs.get("_live_balance_usd", None)
-                if _mt5_balance_fallback is None and peak_balance:
-                    _mt5_balance_fallback = float(peak_balance)
+                # Round 10 P1.1: peak now lives in PersistentDrawdownGuard.
+                if _mt5_balance_fallback is None:
+                    _peak_fallback = persistent_dd_guard.snapshot().all_time_peak
+                    if _peak_fallback > 0:
+                        _mt5_balance_fallback = float(_peak_fallback)
                 if _mt5_balance_fallback is not None:
                     _balance_for_sizing = _path_cfg.virtual_balance_for(
                         _journal_suffix, _mt5_balance_fallback,
