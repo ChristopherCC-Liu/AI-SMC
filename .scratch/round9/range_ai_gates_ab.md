@@ -1,6 +1,6 @@
 # Round 9 P1 — RangeTrader AI Gates A/B Backtest
 
-_Generated: 2026-04-25 04:34 UTC_  _Cadence: every 8 M15 bars_
+_Generated: 2026-04-25 04:46 UTC_  _Cadence: every 8 M15 bars_
 
 
 ## Executive Summary
@@ -16,21 +16,44 @@ _Generated: 2026-04-25 04:34 UTC_  _Cadence: every 8 M15 bars_
 > **CAUTION — Small sample size**: Only 8 setups generated across all backtested years. Statistical power for absolute PF/WR comparison is low. The result is informative for **direction of effect** (which gate fires when) and for the **counterfactual loss-prevention** count, but not for long-horizon expected return. RangeTrader's 30-min same-direction cooldown plus historical lake's discrete-cycle sampling are the main drivers of the small N — live behaviour fires more frequently because cooldown state resets at process restart and intra-cycle order flow shifts move the boundary touches.
 
 
-**Recommendation**: **SHIP** — Treatment improves both PF and net PnL (with slightly more trades (gates redirected blocked setups to opposite-direction setups in the same cycle)). P0-C (Donchian regime invalidation) does the heaviest lifting on the historical lake — when AI regime is confidently TREND_*/ATH_BREAKOUT, treatment refuses to detect a range at all and avoids the bear-flag / bull-flag mean-reversion trap. P0-A and P0-B serve as defence-in-depth for the live regime where Donchian fallback is more common (Asian sessions). Ship via the production env flags.
+**Recommendation**: **SHIP** — Treatment improves both PF and net PnL (with slightly more trades (gates redirected blocked setups to opposite-direction setups in the same cycle)). 5-arm ablation pooled PnL: A_only=$+47.89, B_only=$+0.52, C_only=$+73.21, treatment=$+73.21. P0-C (Donchian regime invalidation) does the heaviest lifting on the historical lake — Treatment ≈ C_only because P0-C runs first inside `detect_range` and zeros bounds before P0-A/B can fire. P0-A/B serve as defence-in-depth for the live regime where Donchian-based ranges are more frequent (Asian sessions) and where AI regime is mid-confidence (TRANSITION, conf < 0.6) — neither of which P0-C catches. Ship all three gates via the production env flags.
 
 
-## Per-Year Metrics
+## Per-Year Metrics (5-arm ablation)
 
-| Year | Arm | Trades | WR | PF | PnL | Max DD | Best Month | Worst Month |
-|------|-----|-------:|---:|---:|----:|-------:|-----------|-------------|
-| 2021 | baseline | 2 | 0% | 0.00 | $-15.43 | 0.2% | 2021-01 ($-15.43) | 2021-01 ($-15.43) |
-| 2021 | treatment | 2 | 0% | 0.00 | $-15.43 | 0.2% | 2021-01 ($-15.43) | 2021-01 ($-15.43) |
-| 2022 | baseline | 2 | 100% | inf | $+65.45 | 0.0% | 2022-01 ($+65.45) | 2022-01 ($+65.45) |
-| 2022 | treatment | 2 | 100% | inf | $+65.45 | 0.0% | 2022-01 ($+65.45) | 2022-01 ($+65.45) |
-| 2023 | baseline | 1 | 0% | 0.00 | $-10.11 | 0.1% | 2023-01 ($-10.11) | 2023-01 ($-10.11) |
-| 2023 | treatment | 2 | 50% | 0.01 | $-15.43 | 0.2% | 2023-02 ($+0.15) | 2023-03 ($-15.58) |
-| 2024 | baseline | 2 | 0% | 0.00 | $-38.64 | 0.4% | 2024-01 ($-38.64) | 2024-01 ($-38.64) |
-| 2024 | treatment | 2 | 50% | 4.60 | $+38.63 | 0.1% | 2024-02 ($+49.35) | 2024-01 ($-10.72) |
+| Year | Arm | Trades | Wins | Losses | WR | PF | PnL | Max DD | Best Month | Worst Month |
+|------|-----|-------:|-----:|-------:|---:|---:|----:|-------:|-----------|-------------|
+| 2021 | baseline | 2 | 0 | 2 | 0% | 0.00 | $-15.43 | 0.2% | 2021-01 ($-15.43) | 2021-01 ($-15.43) |
+| 2021 | A_only | 2 | 0 | 2 | 0% | 0.00 | $-15.43 | 0.2% | 2021-01 ($-15.43) | 2021-01 ($-15.43) |
+| 2021 | B_only | 2 | 0 | 2 | 0% | 0.00 | $-15.43 | 0.2% | 2021-01 ($-15.43) | 2021-01 ($-15.43) |
+| 2021 | C_only | 2 | 0 | 2 | 0% | 0.00 | $-15.43 | 0.2% | 2021-01 ($-15.43) | 2021-01 ($-15.43) |
+| 2021 | treatment | 2 | 0 | 2 | 0% | 0.00 | $-15.43 | 0.2% | 2021-01 ($-15.43) | 2021-01 ($-15.43) |
+| 2022 | baseline | 2 | 2 | 0 | 100% | inf | $+65.45 | 0.0% | 2022-01 ($+65.45) | 2022-01 ($+65.45) |
+| 2022 | A_only | 2 | 2 | 0 | 100% | inf | $+65.45 | 0.0% | 2022-01 ($+65.45) | 2022-01 ($+65.45) |
+| 2022 | B_only | 2 | 2 | 0 | 100% | inf | $+65.45 | 0.0% | 2022-01 ($+65.45) | 2022-01 ($+65.45) |
+| 2022 | C_only | 2 | 2 | 0 | 100% | inf | $+65.45 | 0.0% | 2022-01 ($+65.45) | 2022-01 ($+65.45) |
+| 2022 | treatment | 2 | 2 | 0 | 100% | inf | $+65.45 | 0.0% | 2022-01 ($+65.45) | 2022-01 ($+65.45) |
+| 2023 | baseline | 1 | 0 | 1 | 0% | 0.00 | $-10.11 | 0.1% | 2023-01 ($-10.11) | 2023-01 ($-10.11) |
+| 2023 | A_only | 1 | 0 | 1 | 0% | 0.00 | $-15.58 | 0.2% | 2023-03 ($-15.58) | 2023-03 ($-15.58) |
+| 2023 | B_only | 1 | 0 | 1 | 0% | 0.00 | $-15.58 | 0.2% | 2023-03 ($-15.58) | 2023-03 ($-15.58) |
+| 2023 | C_only | 2 | 1 | 1 | 50% | 0.01 | $-15.43 | 0.2% | 2023-02 ($+0.15) | 2023-03 ($-15.58) |
+| 2023 | treatment | 2 | 1 | 1 | 50% | 0.01 | $-15.43 | 0.2% | 2023-02 ($+0.15) | 2023-03 ($-15.58) |
+| 2024 | baseline | 2 | 0 | 2 | 0% | 0.00 | $-38.64 | 0.4% | 2024-01 ($-38.64) | 2024-01 ($-38.64) |
+| 2024 | A_only | 2 | 1 | 1 | 50% | 1.58 | $+13.46 | 0.2% | 2024-01 ($+13.46) | 2024-01 ($+13.46) |
+| 2024 | B_only | 2 | 0 | 2 | 0% | 0.00 | $-33.91 | 0.3% | 2024-01 ($-33.91) | 2024-01 ($-33.91) |
+| 2024 | C_only | 2 | 1 | 1 | 50% | 4.60 | $+38.63 | 0.1% | 2024-02 ($+49.35) | 2024-01 ($-10.72) |
+| 2024 | treatment | 2 | 1 | 1 | 50% | 4.60 | $+38.63 | 0.1% | 2024-02 ($+49.35) | 2024-01 ($-10.72) |
+
+
+## Per-Quarter PnL (USD, lot=0.01)
+
+| Arm | 2021-Q1 | 2021-Q2 | 2021-Q3 | 2021-Q4 | 2022-Q1 | 2022-Q2 | 2022-Q3 | 2022-Q4 | 2023-Q1 | 2023-Q2 | 2023-Q3 | 2023-Q4 | 2024-Q1 | 2024-Q2 | 2024-Q3 | 2024-Q4 | Total |
+|-----|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| baseline | $-15.43 | $0.00 | $0.00 | $0.00 | $+65.45 | $0.00 | $0.00 | $0.00 | $-10.11 | $0.00 | $0.00 | $0.00 | $-38.64 | $0.00 | $0.00 | $0.00 | $+1.27 |
+| A_only | $-15.43 | $0.00 | $0.00 | $0.00 | $+65.45 | $0.00 | $0.00 | $0.00 | $-15.58 | $0.00 | $0.00 | $0.00 | $+13.46 | $0.00 | $0.00 | $0.00 | $+47.89 |
+| B_only | $-15.43 | $0.00 | $0.00 | $0.00 | $+65.45 | $0.00 | $0.00 | $0.00 | $-15.58 | $0.00 | $0.00 | $0.00 | $-33.91 | $0.00 | $0.00 | $0.00 | $+0.52 |
+| C_only | $-15.43 | $0.00 | $0.00 | $0.00 | $+65.45 | $0.00 | $0.00 | $0.00 | $-15.43 | $0.00 | $0.00 | $0.00 | $+38.63 | $0.00 | $0.00 | $0.00 | $+73.21 |
+| treatment | $-15.43 | $0.00 | $0.00 | $0.00 | $+65.45 | $0.00 | $0.00 | $0.00 | $-15.43 | $0.00 | $0.00 | $0.00 | $+38.63 | $0.00 | $0.00 | $0.00 | $+73.21 |
 
 
 ## Gate Block Rate (Treatment Arm)
@@ -41,6 +64,36 @@ _Generated: 2026-04-25 04:34 UTC_  _Cadence: every 8 M15 bars_
 | 2022 | 2 | 0 | 0 | 0 | 0 | 2 (100%) |
 | 2023 | 2 | 2 | 0 | 0 | 2 | 2 (100%) |
 | 2024 | 2 | 2 | 0 | 0 | 2 | 2 (100%) |
+
+
+## Multi-Block Overlap Matrix (per-cycle ablation)
+
+Counts cycles where the labeled gate(s) — running in isolation — would have blocked at least one would-be baseline setup. A cell at (A∩B) means both A_only and B_only arms blocked at the same cycle.
+
+| Year | A only | B only | C only | A∩B | A∩C | B∩C | A∩B∩C | None |
+|------|-------:|-------:|-------:|----:|----:|----:|------:|-----:|
+| 2021 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 |
+| 2022 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 |
+| 2023 | 0 | 0 | 1 | 0 | 0 | 0 | 1 | 0 |
+| 2024 | 0 | 0 | 1 | 0 | 0 | 0 | 1 | 0 |
+
+> Interpretation: a cycle in `A∩B∩C` means all three gates would have rejected the same baseline setup independently — strong evidence the setup is genuinely undesirable. Cycles in only one column are gate-specific defence; cycles in `None` survived all three gates.
+
+
+## False-Block / False-Allow Estimators
+
+**Definitions** (per teammate brief):
+- **false-block**: setups baseline approved AND treatment blocked, where the baseline trade actually won.
+- **false-allow**: setups treatment approved AND baseline blocked, where the treatment trade actually lost. (Note: baseline does not actively reject setups, so this column captures direction-flips — cycles where treatment fired the OPPOSITE direction baseline picked, and that opposite trade lost.)
+
+| Year | False-Block | False-Allow | Net Correct (treatment block→loss avoided + treatment flip→win) |
+|------|------------:|------------:|----------------:|
+| 2021 | 0 | 0 | 0 |
+| 2022 | 0 | 0 | 0 |
+| 2023 | 0 | 0 | 1 |
+| 2024 | 0 | 0 | 2 |
+
+> Net Correct = (treatment-blocked-and-baseline-lost) + (treatment-flipped-and-flip-won). False-Block + False-Allow are the errors: gate fired but the baseline would have won, or treatment took an opposite-direction trade that lost.
 
 
 ## AI Regime Distribution (per year, Treatment cycles)
@@ -101,11 +154,17 @@ _Generated: 2026-04-25 04:34 UTC_  _Cadence: every 8 M15 bars_
 - **Snapshots**: SMCDetector built on 200-bar tail per cycle (no look-ahead).
 - **Regime**: ATR fallback only (no LLM calls — deterministic).
 - **Trust threshold for AI gates**: 0.6.
-- **Baseline arm**: RangeTrader instantiated with `trend_filter_enabled=False`, `ai_regime_gate_enabled=False`, `require_regime_valid=False`. Calls `detect_range` and `generate_range_setups` without AI inputs.
-- **Treatment arm**: same RangeTrader class but constructed with all 3 R9 P0 flags True. Calls thread `ai_regime_assessment=` into `detect_range` (P0-C) and `d1_df` + `ai_regime_assessment` into `generate_range_setups` (P0-A inside `_build_setup`, P0-B in the directional gate, plus the TRANSITION RR=2.0 floor).
+- **5-arm ablation design**:
+  - `baseline` — all 3 gates OFF (production pre-R9 behaviour).
+  - `A_only` — `trend_filter_enabled=True`, others OFF (P0-A solo).
+  - `B_only` — `ai_regime_gate_enabled=True`, others OFF (P0-B solo).
+  - `C_only` — `require_regime_valid=True`, others OFF (P0-C solo).
+  - `treatment` — all 3 gates ON (production post-R9).
+- **AI inputs are threaded only when the corresponding gate is ON** for that arm so each isolate's behaviour is byte-equivalent to `baseline + that single gate`.
 - **Each arm uses an independent RangeTrader instance** so the per-direction 30-min cooldown state is not shared (treatment may fire a SHORT where baseline fired a LONG, or vice-versa).
 - **Engine**: `BarBacktestEngine` from `smc.backtest.engine`. spread=3pt, slippage=0.5pt, commission=$7/lot, lot=0.01, max concurrent=3.
 - **Per-cycle setup selection**: highest-confidence setup picked from the tuple returned by `generate_range_setups` (matches `_determine_ranging` in `live_demo.py`). Replayed bar-by-bar through the fill engine.
+- **Overlap matrix** is computed from the 3 single-gate isolates: each baseline-producing cycle gets a triple `(A_blocked, B_blocked, C_blocked)` and is bucketed accordingly. This separates which gate would fire alone.
 
 
 
