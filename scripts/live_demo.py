@@ -383,7 +383,8 @@ def _determine_v1_passthrough(setups, session):
 
 def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
                        range_trader, breakout_detector, session="", h1_df=None,
-                       htf_bias=None, cfg=None, m15_df=None):
+                       htf_bias=None, cfg=None, m15_df=None,
+                       d1_df=None, ai_regime_assessment=None):
     """Ranging mode: breakout guard + mean-reversion setups at range boundaries.
 
     Returns (action, reason, best_setup). Round 4.6-F: session kwarg so
@@ -392,6 +393,8 @@ def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
     (RR>=1.2, touches>=2) — closing the 4.6-E "deferred" TODO.
     Round 5 T0 (P0-9): htf_bias enables Guard 6 HTF alignment — rejects range
     setups that oppose a confident HTF bias (confidence >= 0.5).
+    Round 9 P0-A/B: d1_df enables the D1 SMA50 trend filter and
+    ai_regime_assessment enables per-direction regime gates (both default OFF).
     """
     # Breakout invalidation — if price breaks the range, hold and wait
     breakout = breakout_detector.check_breakout(price, range_bounds, h1_atr)
@@ -402,6 +405,8 @@ def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
         h1_snapshot, m15_snapshot, price, range_bounds, h1_atr,
         session=session,
         m15_df=m15_df,
+        d1_df=d1_df,
+        ai_regime_assessment=ai_regime_assessment,
     )
 
     # Round 4.6-K: setup-level guards (RR>=1.2, touches>=2) enforcement.
@@ -432,7 +437,7 @@ def determine_action(setups, ai_analysis, regime, *,
                      h1_atr=0.0, price=0.0,
                      range_trader=None, breakout_detector=None,
                      asian_range_quota=None, phase1a_breaker=None,
-                     htf_bias=None, cfg=None, m15_df=None,
+                     htf_bias=None, cfg=None, m15_df=None, d1_df=None,
                      ai_regime_assessment=None,
                      ai_mode_router_enabled: bool = False,
                      ai_regime_trust_threshold: float = 0.6):
@@ -454,9 +459,15 @@ def determine_action(setups, ai_analysis, regime, *,
     effective_conf = ai_conf - session_penalty
 
     # Always detect range (for display even in trending mode)
+    # Round 9 P0-C: forward AI regime assessment so detect_range can
+    # invalidate Donchian/OB/swing ranges when AI sees a confident trend.
     range_bounds = None
     if range_trader is not None and h1_snapshot is not None:
-        range_bounds = range_trader.detect_range(h1_df, h1_snapshot)
+        range_bounds = range_trader.detect_range(
+            h1_df,
+            h1_snapshot,
+            ai_regime_assessment=ai_regime_assessment,
+        )
 
     # Round 4.6-E: bounds-level guards precheck so mode_router Priority 2
     # (range_bounds + guards_passed + session) can actually fire.
@@ -508,6 +519,7 @@ def determine_action(setups, ai_analysis, regime, *,
             price, mode.range_bounds, h1_snapshot, m15_snapshot, h1_atr,
             range_trader, breakout_detector, session=session, h1_df=h1_df,
             htf_bias=htf_bias, cfg=cfg, m15_df=m15_df,
+            d1_df=d1_df, ai_regime_assessment=ai_regime_assessment,
         )
         return action, reason, best, mode
 
@@ -891,6 +903,10 @@ def main():
         cfg=cfg,
         cooldown_state_path=DATA_ROOT / "range_cooldown_state.json",
         reversal_confirm_enabled=_path_cfg.range_reversal_confirm_enabled,
+        # Round 9 P0-A/B/C: AI-aware gates default OFF; flip via SMC_* env.
+        trend_filter_enabled=_path_cfg.range_trend_filter_enabled,
+        ai_regime_gate_enabled=_path_cfg.range_ai_regime_gate_enabled,
+        require_regime_valid=_path_cfg.range_require_regime_valid,
     )
     breakout_det = BreakoutDetector()
 
@@ -1262,6 +1278,7 @@ def main():
                 htf_bias=htf_bias,
                 cfg=cfg,
                 m15_df=m15_df,
+                d1_df=d1_df,
                 ai_regime_assessment=getattr(aggregator, "_last_ai_assessment", None),
                 ai_mode_router_enabled=_path_cfg.ai_mode_router_enabled,
                 ai_regime_trust_threshold=_path_cfg.ai_regime_trust_threshold,

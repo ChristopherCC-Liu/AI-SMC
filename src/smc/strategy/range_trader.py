@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import polars as pl
 
@@ -27,6 +27,9 @@ from smc.smc_core.types import OrderBlock, SMCSnapshot, SwingPoint
 from smc.strategy.entry_trigger import _compute_sl_buffer, _find_choch_in_zone
 from smc.strategy.range_types import RangeBounds, RangeSetup
 from smc.strategy.types import BiasDirection, TradeZone
+
+if TYPE_CHECKING:
+    from smc.ai.models import AIRegimeAssessment
 
 _log = logging.getLogger(__name__)
 
@@ -87,6 +90,40 @@ _WIDE_BAND_SESSIONS: frozenset[str] = frozenset(
     }
 )
 _SECONDS_PER_H1_BAR = 3600
+
+# ---------------------------------------------------------------------------
+# Round 9 P0 — AI regime / D1 trend filter constants
+# ---------------------------------------------------------------------------
+
+# Minimum AIRegimeAssessment.confidence required for an AI-driven gate to fire.
+# Below this, the assessment is treated as informational only (fall through).
+# Aligned with mode_router._TRANSITION_TREND_DIR_CONF and SMCConfig
+# `ai_regime_trust_threshold` so all AI-aware gates use a single floor.
+_AI_REGIME_GATE_CONF_FLOOR: float = 0.6
+
+# P0-A: D1 SMA50 trend-filter thresholds. Mirror of regime_classifier
+# `_SLOPE_TREND_MIN_ABS = 0.05` so detection logic stays consistent across
+# modules; the close-vs-SMA50 floor of 1% picked from the 2026-04-21 Tuesday
+# regression fixture (D1 close 2.1% below SMA50 should block).
+_TREND_FILTER_SLOPE_THRESHOLD: float = 0.05  # %/bar — must match _SLOPE_TREND_MIN_ABS
+_TREND_FILTER_CLOSE_THRESHOLD: float = 1.0   # % — close vs SMA50 distance
+_TREND_FILTER_MIN_BARS: int = 55             # need 50 SMA + 5 prior bars
+
+# P0-B: trend regimes that block opposite range direction; ATH_BREAKOUT
+# is treated as a strong-uptrend variant (blocks shorts).
+_BLOCK_LONG_REGIMES: frozenset[str] = frozenset({"TREND_DOWN"})
+_BLOCK_SHORT_REGIMES: frozenset[str] = frozenset({"TREND_UP", "ATH_BREAKOUT"})
+
+# P0-B: TRANSITION regime tightens RR floor from 1.2 → 2.0 to demand
+# a higher reward when regime conviction is mid (transition is genuinely
+# ambiguous; the only setups worth taking must have outsized payoff).
+_TRANSITION_MIN_RR_RATIO: float = 2.0
+
+# P0-C: regimes that invalidate any detected Donchian/OB/swing range.
+# Same roster as the union of _BLOCK_LONG_REGIMES + _BLOCK_SHORT_REGIMES.
+_RANGE_INVALIDATING_REGIMES: frozenset[str] = (
+    _BLOCK_LONG_REGIMES | _BLOCK_SHORT_REGIMES
+)
 
 
 def _min_range_width_resolved(cfg: InstrumentConfig, current_price: float) -> float:
@@ -422,6 +459,73 @@ def _last_bar_reversal_confirm(
     return last_close < last_open and last_close < prior_close
 
 
+def _d1_sma50_trend_metrics(d1_df: object) -> tuple[float, float] | None:
+    """Round 9 P0-A: compute D1 SMA50 slope %/bar and close-vs-SMA50 %.
+
+    Returns (slope_pct_per_bar, close_vs_sma_pct) when d1_df has at least
+    ``_TREND_FILTER_MIN_BARS`` (55) rows, else None. The slope is computed
+    against an SMA50 5 bars in the past so a 5-bar look-back captures the
+    persistent drift used by the trend-filter gate.
+
+    Mirror of ``regime_classifier._sma50_direction_and_slope`` arithmetic
+    but inlined here to avoid importing the AI module from the strategy
+    layer (would create a circular dependency once classify_regime_ai
+    starts threading more strategy state). Both formulas are pure
+    `(sma_now - sma_5ago) / sma_now * 100 / 5` and verified equivalent
+    in the regression fixture.
+    """
+    if d1_df is None:
+        return None
+    try:
+        n_rows = len(d1_df)
+    except TypeError:
+        return None
+    if n_rows < _TREND_FILTER_MIN_BARS:
+        return None
+    try:
+        closes = d1_df["close"].to_list()
+    except Exception:
+        return None
+    if len(closes) < _TREND_FILTER_MIN_BARS:
+        return None
+
+    sma50_now = sum(closes[-50:]) / 50
+    sma50_5ago = sum(closes[-55:-5]) / 50
+    if sma50_now <= 0:
+        return None
+
+    slope_pct = (sma50_now - sma50_5ago) / sma50_now * 100.0 / 5.0
+    close_vs_sma_pct = (closes[-1] - sma50_now) / sma50_now * 100.0
+    return slope_pct, close_vs_sma_pct
+
+
+def _trend_filter_should_block(
+    direction: str,
+    slope_pct: float,
+    close_vs_sma_pct: float,
+) -> bool:
+    """Round 9 P0-A: decide whether the D1 trend filter blocks the setup.
+
+    Long support_bounce blocked when D1 trend is materially down:
+        slope <= -0.05%/bar AND close <= -1.0% below SMA50
+    Short resistance_rejection blocked symmetrically when trend is up.
+
+    Both conditions must agree to avoid false positives from a single-bar
+    drift or a transient close-spike against an otherwise flat SMA50.
+    """
+    if direction == "long":
+        return (
+            slope_pct <= -_TREND_FILTER_SLOPE_THRESHOLD
+            and close_vs_sma_pct <= -_TREND_FILTER_CLOSE_THRESHOLD
+        )
+    if direction == "short":
+        return (
+            slope_pct >= _TREND_FILTER_SLOPE_THRESHOLD
+            and close_vs_sma_pct >= _TREND_FILTER_CLOSE_THRESHOLD
+        )
+    return False
+
+
 # ---------------------------------------------------------------------------
 # RangeTrader class
 # ---------------------------------------------------------------------------
@@ -449,6 +553,9 @@ class RangeTrader:
         boundary_pct: float | None = None,
         cooldown_state_path: Optional[Path] = None,
         reversal_confirm_enabled: bool = False,
+        trend_filter_enabled: bool = False,
+        ai_regime_gate_enabled: bool = False,
+        require_regime_valid: bool = False,
     ) -> None:
         from smc.instruments import get_instrument_config
         if cfg is None:
@@ -484,6 +591,11 @@ class RangeTrader:
         self._load_cooldown_state()
         # Round 4 v5 (Task #52): reversal-candle confirmation gate.
         self._reversal_confirm_enabled: bool = reversal_confirm_enabled
+        # Round 9 P0-A/B/C: AI-aware gates default OFF for production safety.
+        # All three are independent — caller can flip any subset.
+        self._trend_filter_enabled: bool = trend_filter_enabled
+        self._ai_regime_gate_enabled: bool = ai_regime_gate_enabled
+        self._require_regime_valid: bool = require_regime_valid
 
     # ------------------------------------------------------------------
     # Cooldown persistence helpers (Round 5 T0, P0-4)
@@ -536,6 +648,8 @@ class RangeTrader:
         self,
         h1_df: pl.DataFrame,
         h1_snapshot: SMCSnapshot,
+        *,
+        ai_regime_assessment: "AIRegimeAssessment | None" = None,
     ) -> RangeBounds | None:
         """Detect a horizontal range from H1 data.
 
@@ -545,6 +659,13 @@ class RangeTrader:
 
         Round 4.6-C2: populates self._last_diagnostic so live_demo can surface
         per-cycle reasoning in the journal (measure-first debugging).
+
+        Round 9 P0-C: when ``self._require_regime_valid`` is True AND a
+        non-None ``ai_regime_assessment`` clears the confidence floor
+        (>= 0.6) AND its regime is one of TREND_UP / TREND_DOWN /
+        ATH_BREAKOUT, return None — a Donchian on a trend is a false range.
+        Diagnostic key ``range_invalidated_by_regime`` records the regime
+        label that caused the invalidation.
         """
         now = datetime.now(tz=timezone.utc)
 
@@ -582,6 +703,26 @@ class RangeTrader:
                 donchian_width_pts = None
 
         bounds = method_a or method_b or method_d
+
+        # Round 9 P0-C: invalidate any detected range when AI says trend.
+        # Only fires when the gate is enabled AND assessment is confident.
+        # Assessment + confidence are recorded in diagnostic regardless of
+        # gate state so live_demo can show "would have invalidated" telemetry.
+        regime_invalidation: str | None = None
+        ai_regime_label: str | None = None
+        ai_regime_conf: float | None = None
+        if ai_regime_assessment is not None:
+            ai_regime_label = ai_regime_assessment.regime
+            ai_regime_conf = float(ai_regime_assessment.confidence)
+            if (
+                self._require_regime_valid
+                and bounds is not None
+                and ai_regime_conf >= _AI_REGIME_GATE_CONF_FLOOR
+                and ai_regime_label in _RANGE_INVALIDATING_REGIMES
+            ):
+                regime_invalidation = ai_regime_label
+                bounds = None
+
         self._last_diagnostic = {
             "h1_bars_count": h1_bars_count,
             "donchian_lookback_required": self._cfg.donchian_lookback,
@@ -596,6 +737,9 @@ class RangeTrader:
             "method_b_hit": method_b is not None,
             "method_d_hit": method_d is not None,
             "final_source": bounds.source if bounds is not None else None,
+            "ai_regime_label": ai_regime_label,
+            "ai_regime_confidence": ai_regime_conf,
+            "range_invalidated_by_regime": regime_invalidation,
         }
         return bounds
 
@@ -613,6 +757,8 @@ class RangeTrader:
         session: str = "",
         *,
         m15_df: object = None,
+        d1_df: object = None,
+        ai_regime_assessment: "AIRegimeAssessment | None" = None,
     ) -> tuple[RangeSetup, ...]:
         """Generate mean-reversion setups at range boundaries.
 
@@ -626,8 +772,28 @@ class RangeTrader:
         Round 4.6-F (USER DIRECTIVE): session-aware boundary_pct. Asian
         sessions use 30% (wider entry window) to meet user's 5-10 trades/day
         target. Non-Asian sessions keep constructor/default value.
+
+        Round 9 P0-A: ``d1_df`` enables D1 SMA50 trend filter inside
+        ``_build_setup``. Default None preserves prior behavior.
+
+        Round 9 P0-B: ``ai_regime_assessment`` enables per-direction regime
+        gates. When ``self._ai_regime_gate_enabled`` is True AND assessment
+        confidence >= 0.6:
+        - TREND_DOWN forces ``near_lower=False`` (no long support bounce in
+          a downtrend).
+        - TREND_UP / ATH_BREAKOUT force ``near_upper=False`` (no short
+          resistance rejection in an uptrend).
+        - CONSOLIDATION leaves both untouched (range is its native regime).
+        - TRANSITION leaves both untouched but ``_build_setup`` raises the
+          minimum RR floor from 1.2 to 2.0 to demand higher payoff for the
+          ambiguous regime.
         """
         setups: list[RangeSetup] = []
+        # Round 9 P0-A: clear stale trend-filter diagnostic keys from prior
+        # cycle so this call's _build_setup writes are guaranteed fresh.
+        # The final dict assignment at the bottom only sets the structural
+        # keys; we explicitly preserve `*_trend_filter_blocked` keys after.
+        self._last_setups_diagnostic = {}
         # Round 4.6-I: all active ranging sessions use wide band.
         # Unknown/empty session falls back to constructor value (default boundary_pct_default).
         effective_boundary_pct = (
@@ -640,6 +806,22 @@ class RangeTrader:
 
         near_lower = current_price <= bounds.lower + boundary_width_price
         near_upper = current_price >= bounds.upper - boundary_width_price
+
+        # Round 9 P0-B: per-direction gates from confident AI regime view.
+        ai_regime_gate_block: dict[str, str] = {}
+        if (
+            self._ai_regime_gate_enabled
+            and ai_regime_assessment is not None
+            and ai_regime_assessment.confidence >= _AI_REGIME_GATE_CONF_FLOOR
+        ):
+            regime = ai_regime_assessment.regime
+            if regime in _BLOCK_LONG_REGIMES and near_lower:
+                ai_regime_gate_block["long"] = regime
+                near_lower = False
+            if regime in _BLOCK_SHORT_REGIMES and near_upper:
+                ai_regime_gate_block["short"] = regime
+                near_upper = False
+
         long_setup: RangeSetup | None = None
         short_setup: RangeSetup | None = None
 
@@ -654,6 +836,8 @@ class RangeTrader:
                 h1_atr=h1_atr,
                 boundary_pct=effective_boundary_pct,
                 m15_df=m15_df,
+                d1_df=d1_df,
+                ai_regime_assessment=ai_regime_assessment,
             )
             if long_setup is not None:
                 setups.append(long_setup)
@@ -669,6 +853,8 @@ class RangeTrader:
                 h1_atr=h1_atr,
                 boundary_pct=effective_boundary_pct,
                 m15_df=m15_df,
+                d1_df=d1_df,
+                ai_regime_assessment=ai_regime_assessment,
             )
             if short_setup is not None:
                 setups.append(short_setup)
@@ -700,6 +886,14 @@ class RangeTrader:
             else:
                 reason_if_zero = "no_m15_choch_any_boundary"
 
+        # Preserve any P0-A trend-filter keys that _build_setup may have
+        # written during this call (it writes before returning None, then
+        # we'd otherwise overwrite below).
+        prior_trend_filter_keys = {
+            k: v
+            for k, v in self._last_setups_diagnostic.items()
+            if k.endswith("_trend_filter_blocked")
+        }
         self._last_setups_diagnostic = {
             "current_price": current_price,
             "lower_boundary": bounds.lower,
@@ -716,6 +910,19 @@ class RangeTrader:
             # R3 J2 — raw distances for post-hoc bucketing (None if range zero)
             "distance_to_upper_pct": distance_to_upper_pct,
             "distance_to_lower_pct": distance_to_lower_pct,
+            # Round 9 P0-B: which directions the AI regime gate blocked,
+            # if any. Empty dict means gate did not fire (off, no AI, low
+            # conf, or non-blocking regime).
+            "ai_regime_gate_block": dict(ai_regime_gate_block),
+            "ai_regime_label": (
+                ai_regime_assessment.regime
+                if ai_regime_assessment is not None else None
+            ),
+            "ai_regime_confidence": (
+                float(ai_regime_assessment.confidence)
+                if ai_regime_assessment is not None else None
+            ),
+            **prior_trend_filter_keys,
         }
 
         return tuple(setups[:2])
@@ -879,6 +1086,8 @@ class RangeTrader:
         h1_atr: float,
         boundary_pct: float | None = None,
         m15_df: object = None,
+        d1_df: object = None,
+        ai_regime_assessment: "AIRegimeAssessment | None" = None,
     ) -> RangeSetup | None:
         """Build a single mean-reversion setup with M15 CHoCH confirmation.
 
@@ -887,6 +1096,16 @@ class RangeTrader:
         (30%) used in generate_range_setups. Previously hard-coded
         self._boundary_pct (15%) silently truncated the CHoCH search
         window for prices in the 15-30% region — setup builds never fired.
+
+        Round 9 P0-A: ``d1_df`` lets us pre-compute D1 SMA50 slope and
+        close-vs-SMA50 distance. When ``self._trend_filter_enabled`` is True
+        AND the trend points materially against the setup direction, the
+        build is rejected and ``_last_setups_diagnostic`` records the
+        slope / close-vs-SMA percentages for post-hoc analysis.
+
+        Round 9 P0-B: ``ai_regime_assessment`` adjusts the minimum RR
+        threshold. TRANSITION + confidence >= 0.6 raises the floor from
+        1.2 to 2.0; all other regimes keep the legacy floor.
         """
         bp = boundary_pct if boundary_pct is not None else self._boundary_pct
 
@@ -898,6 +1117,23 @@ class RangeTrader:
             elapsed = (datetime.now(tz=timezone.utc) - last_ts).total_seconds()
             if elapsed < 1800:  # 30 minutes
                 return None
+
+        # Round 9 P0-A: D1 SMA50 trend filter — block obvious counter-trend
+        # range entries. Only fires when the gate is enabled AND we have
+        # >= 55 bars of D1 data. Early-out preserves prior behavior on
+        # short histories or when caller did not thread d1_df.
+        if self._trend_filter_enabled:
+            metrics = _d1_sma50_trend_metrics(d1_df)
+            if metrics is not None:
+                slope_pct, close_vs_sma_pct = metrics
+                if _trend_filter_should_block(direction, slope_pct, close_vs_sma_pct):
+                    self._last_setups_diagnostic[
+                        f"{direction}_trend_filter_blocked"
+                    ] = (
+                        f"slope={slope_pct:.3f} "
+                        f"close_vs_sma={close_vs_sma_pct:.2f}"
+                    )
+                    return None
 
         # Create a synthetic TradeZone at the boundary for CHoCH check
         if direction == "long":
@@ -971,7 +1207,16 @@ class RangeTrader:
         rr_ratio = reward_points / risk_points if risk_points > 0 else 0.0
 
         # Round 4.6-K: enforce Guard 2 (RR >= 1.2) at setup build time.
+        # Round 9 P0-B: TRANSITION regime + confidence >= 0.6 raises the
+        # floor to 2.0 — ambiguous regime demands outsized payoff.
         _MIN_RR_RATIO = 1.2
+        if (
+            self._ai_regime_gate_enabled
+            and ai_regime_assessment is not None
+            and ai_regime_assessment.regime == "TRANSITION"
+            and ai_regime_assessment.confidence >= _AI_REGIME_GATE_CONF_FLOOR
+        ):
+            _MIN_RR_RATIO = _TRANSITION_MIN_RR_RATIO
         if rr_ratio < _MIN_RR_RATIO:
             return None
 

@@ -82,6 +82,9 @@ class SMCConfig(BaseSettings):
         "sl_fitness_judge_enabled",
         "synthetic_zones_enabled",
         "ai_mode_router_enabled",
+        "range_trend_filter_enabled",
+        "range_ai_regime_gate_enabled",
+        "range_require_regime_valid",
         mode="before",
     )
     @classmethod
@@ -322,6 +325,41 @@ class SMCConfig(BaseSettings):
             "in addition to CHoCH/3-bar soft reversal. Addresses the "
             "2026-04-20 post-mortem where 5 stacked BUYs passed existing "
             "checks but had MFE < 0.10R (still-falling bars)."
+        ),
+    )
+    range_trend_filter_enabled: bool = Field(
+        default=False,
+        description=(
+            "Round 9 P0-A: when True, RangeTrader._build_setup blocks long "
+            "support_bounce in a confirmed D1 downtrend (SMA50 slope <= "
+            "-0.05%/bar AND close <= -1.0% below SMA50), and mirror for "
+            "short. Default False preserves Round 8 production behavior. "
+            "Toggle via SMC_RANGE_TREND_FILTER_ENABLED after backtest "
+            "validates the regression on Tuesday 2026-04-21 fixture."
+        ),
+    )
+    range_ai_regime_gate_enabled: bool = Field(
+        default=False,
+        description=(
+            "Round 9 P0-B: when True, RangeTrader.generate_range_setups "
+            "consults AIRegimeAssessment to per-direction gate setups. "
+            "TREND_DOWN blocks range BUY, TREND_UP/ATH_BREAKOUT block "
+            "range SELL, CONSOLIDATION allows both, TRANSITION tightens "
+            "RR floor to 2.0. Activated only when assessment confidence "
+            ">= 0.6. Default False. Toggle via "
+            "SMC_RANGE_AI_REGIME_GATE_ENABLED."
+        ),
+    )
+    range_require_regime_valid: bool = Field(
+        default=False,
+        description=(
+            "Round 9 P0-C: when True, RangeTrader.detect_range invalidates "
+            "any Donchian/OB/swing range when the AI regime classifier "
+            "returns TREND_UP/TREND_DOWN/ATH_BREAKOUT with confidence "
+            ">= 0.6 — a Donchian on a trend is a false range and "
+            "range_trader should not operate. Default False preserves "
+            "current production behavior. Toggle via "
+            "SMC_RANGE_REQUIRE_REGIME_VALID."
         ),
     )
     # ------------------------------------------------------------------
