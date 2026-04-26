@@ -44,8 +44,6 @@ def _all_off_flags() -> dict[str, bool | int]:
         "range_trend_filter_enabled": False,
         "range_ai_regime_gate_enabled": False,
         "spread_gate_enabled": False,
-        "persistent_dd_breaker_enabled": False,
-        "consec_loss_window_size": 3,
     }
 
 
@@ -54,8 +52,6 @@ def _all_on_flags() -> dict[str, bool | int]:
         "range_trend_filter_enabled": True,
         "range_ai_regime_gate_enabled": True,
         "spread_gate_enabled": True,
-        "persistent_dd_breaker_enabled": True,
-        "consec_loss_window_size": 6,
     }
 
 
@@ -192,7 +188,7 @@ class TestSubsetMatching:
         # Mixed flags: spread_gate=True, others vary
         flags = _all_off_flags()
         flags["spread_gate_enabled"] = True
-        flags["consec_loss_window_size"] = 4  # also varies
+        flags["range_ai_regime_gate_enabled"] = True  # also varies (subset allows)
         entry = _journal_entry(magic=_TREATMENT_MAGIC, flags=flags)
         result = classify_trades(
             [entry],
@@ -298,8 +294,6 @@ class TestBackwardCompatLegacyRecords:
             range_trend_filter_enabled=False,
             range_ai_regime_gate_enabled=False,
             spread_gate_enabled=False,
-            persistent_dd_breaker_enabled=False,
-            consec_loss_window_size=3,
         )
         legacy_entry = _journal_entry(magic=_CONTROL_MAGIC, flags=None)
         result = classify_trades(
@@ -411,8 +405,6 @@ class TestProtocolComposability:
                 range_trend_filter_enabled=False,
                 range_ai_regime_gate_enabled=False,
                 spread_gate_enabled=False,
-                persistent_dd_breaker_enabled=False,
-                consec_loss_window_size=3,
             ),
             pnl_usd=15.5,
             loss_count_in_window_at_open=0,

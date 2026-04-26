@@ -56,19 +56,27 @@ __all__ = [
 
 
 class FeatureFlagSnapshot(Protocol):
-    """Read-only view of which R10 feature flags were ON for a given trade.
+    """Read-only view of which R10 SMCConfig feature flags were ON for a given trade.
 
-    ``consec_loss_window_size`` is an ``int`` (not bool) because the field
-    has a numeric domain rather than a binary ON/OFF — control may be at
-    legacy-3, treatment at the R10 default 6. Strict matching compares
-    by equality.
+    Three boolean flags from ``SMCConfig`` that ``smc.monitor.gate_diagnostic_journal._FLAG_FIELDS``
+    actually serializes. Earlier drafts of this Protocol included
+    ``persistent_dd_breaker_enabled`` and ``consec_loss_window_size`` but
+    bidirectional grep showed those don't exist on SMCConfig:
+    - ``persistent_dd_breaker_enabled``: env-var-only, never a Pydantic field
+    - ``consec_loss_window_size``: per-instrument on ``InstrumentConfig``,
+      cal-0 ``_FLAG_FIELDS`` only captures ``SMCConfig`` fields
+
+    Drift consequence: pre-tweak, strict-match against real bake data
+    failed for every trade because cal-0's serialized ``flags`` dict
+    omitted both fields and ``_FlagSnapshot`` defaulted them to False/0,
+    putting all trades in diagnostic buckets and producing n=0 verdicts.
+    Post-tweak, only producer-real fields are required, so consumer
+    matching aligns with serialized data on real bake.
     """
 
     range_trend_filter_enabled: bool
     range_ai_regime_gate_enabled: bool
     spread_gate_enabled: bool
-    persistent_dd_breaker_enabled: bool
-    consec_loss_window_size: int
 
 
 class ArmMembership(Protocol):
@@ -99,8 +107,6 @@ class _FlagSnapshot:
     range_trend_filter_enabled: bool
     range_ai_regime_gate_enabled: bool
     spread_gate_enabled: bool
-    persistent_dd_breaker_enabled: bool
-    consec_loss_window_size: int
 
 
 @dataclass(frozen=True)
@@ -201,9 +207,8 @@ def _extract_flag_snapshot(entry: Mapping[str, object]) -> FeatureFlagSnapshot |
 
     Foundation's cal-0 commits the per-trade dict under the key
     ``flags`` (per their schema_version=2 spec). Each value is read with
-    a typed default; missing keys are treated as ``False`` for booleans
-    and ``0`` for the integer window size. A future cal-0 evolution
-    that nests differently would need this helper updated.
+    a typed default; missing keys are treated as ``False``. A future
+    cal-0 evolution that nests differently would need this helper updated.
     """
     raw_flags = entry.get("flags")
     if not isinstance(raw_flags, Mapping):
@@ -212,8 +217,6 @@ def _extract_flag_snapshot(entry: Mapping[str, object]) -> FeatureFlagSnapshot |
         range_trend_filter_enabled=bool(raw_flags.get("range_trend_filter_enabled", False)),
         range_ai_regime_gate_enabled=bool(raw_flags.get("range_ai_regime_gate_enabled", False)),
         spread_gate_enabled=bool(raw_flags.get("spread_gate_enabled", False)),
-        persistent_dd_breaker_enabled=bool(raw_flags.get("persistent_dd_breaker_enabled", False)),
-        consec_loss_window_size=int(raw_flags.get("consec_loss_window_size", 0)),
     )
 
 
@@ -244,8 +247,6 @@ def _flags_match(
             "range_trend_filter_enabled",
             "range_ai_regime_gate_enabled",
             "spread_gate_enabled",
-            "persistent_dd_breaker_enabled",
-            "consec_loss_window_size",
         }
         if set(required) != expected_fields:
             return False
@@ -338,24 +339,15 @@ def _any_flag_on(snapshot: FeatureFlagSnapshot) -> bool:
         snapshot.range_trend_filter_enabled
         or snapshot.range_ai_regime_gate_enabled
         or snapshot.spread_gate_enabled
-        or snapshot.persistent_dd_breaker_enabled
     )
 
 
 def _all_flags_on(snapshot: FeatureFlagSnapshot) -> bool:
-    """True if all 4 R10 boolean flags are ON in the snapshot.
-
-    consec_loss_window_size is not a boolean — its ``treatment`` value
-    being non-default (>3) IS the toggle, so a window_size > 3 contributes
-    "treatment-leaning". We treat any window > legacy 3 as the treatment
-    setting for the purposes of this diagnostic-bucket heuristic.
-    """
+    """True if all 3 R10 SMCConfig boolean flags are ON in the snapshot."""
     return (
         snapshot.range_trend_filter_enabled
         and snapshot.range_ai_regime_gate_enabled
         and snapshot.spread_gate_enabled
-        and snapshot.persistent_dd_breaker_enabled
-        and snapshot.consec_loss_window_size > 3
     )
 
 
@@ -370,8 +362,6 @@ def _empty_snapshot() -> _FlagSnapshot:
         range_trend_filter_enabled=False,
         range_ai_regime_gate_enabled=False,
         spread_gate_enabled=False,
-        persistent_dd_breaker_enabled=False,
-        consec_loss_window_size=0,
     )
 
 
