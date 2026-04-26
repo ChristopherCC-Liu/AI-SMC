@@ -1730,6 +1730,13 @@ def main():
                             "margin_reason": margin_check.reason,
                             "trading_mode": mode.mode,
                             "session": session,
+                            # R10 cal-0b: capture rolling consec-loss window at
+                            # the entry-decision moment. Calibration runner uses
+                            # this to derive the empirical histogram needed by
+                            # P3.1 loss-aware sizing decay.
+                            "loss_count_in_window_at_open": (
+                                consec_halt.snapshot().loss_count_in_window
+                            ),
                         }
                         with open(JOURNAL_PATH, "a") as f:
                             f.write(json.dumps(log_entry) + "\n")
@@ -1878,6 +1885,10 @@ def main():
                         "magic": _effective_magic,
                         "account_balance_usd": round(_live_balance_usd, 2) if _live_balance_usd is not None else None,
                         "virtual_balance_usd": round(_virtual_balance_usd, 2) if _virtual_balance_usd is not None else None,
+                        # R10 cal-0b: rolling consec-loss window at trade-open.
+                        "loss_count_in_window_at_open": (
+                            consec_halt.snapshot().loss_count_in_window
+                        ),
                     }
                     with open(JOURNAL_PATH, "a") as f:
                         f.write(json.dumps(log_entry) + "\n")
@@ -1929,6 +1940,10 @@ def main():
                         "magic": _effective_magic,
                         "account_balance_usd": round(_live_balance_usd, 2) if _live_balance_usd is not None else None,
                         "virtual_balance_usd": round(_virtual_balance_usd, 2) if _virtual_balance_usd is not None else None,
+                        # R10 cal-0b: rolling consec-loss window at trade-open.
+                        "loss_count_in_window_at_open": (
+                            consec_halt.snapshot().loss_count_in_window
+                        ),
                     }
                     with open(JOURNAL_PATH, "a") as f:
                         f.write(json.dumps(log_entry) + "\n")
