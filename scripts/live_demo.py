@@ -148,6 +148,9 @@ from smc.strategy.htf_bias import compute_htf_bias, htf_bias_tier
 from smc.monitor.timing import next_bar_close
 from smc.monitor.structured_log import crit as log_crit, warn as log_warn, info as log_info
 from smc.monitor.critical_alerter import alert_critical
+# R10 P1.2: persist aggregator gate diagnostic (one jsonl line per cycle) so
+# scripts/build_gate_funnel.py can answer "where do setups die?" offline.
+from smc.monitor.gate_diagnostic_journal import append_gate_diagnostic
 # Round 5 stability R1: MT5 handle auto-heal watchdog — detects IPC handle rot
 # (tick → None for N cycles) and reinitialises; gives up after 5 consecutive
 # failures so Task Scheduler can respawn a fresh process with a fresh handle.
@@ -165,6 +168,13 @@ from smc.execution.mt5_positions_adapter import (
 )
 from smc.risk.consec_loss_halt import ConsecLossHalt
 from smc.risk.drawdown_guard import DrawdownGuard
+from smc.risk.persistent_drawdown_guard import PersistentDrawdownGuard
+from smc.risk.spread_gate import (
+    DEFAULT_BASELINE_WINDOW as SPREAD_BASELINE_WINDOW,
+    DEFAULT_THRESHOLD_MULTIPLIER as SPREAD_THRESHOLD_MULT,
+    check_spread_gate,
+    compute_spread_baseline,
+)
 from smc.risk.margin_cap import check_margin_cap
 from smc.risk.live_position_sizer import compute_live_position_size
 # Round 4 Alt-B W2: macro overlay (COT / TIPS / DXY)
@@ -384,7 +394,8 @@ def _determine_v1_passthrough(setups, session):
 def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
                        range_trader, breakout_detector, session="", h1_df=None,
                        htf_bias=None, cfg=None, m15_df=None,
-                       d1_df=None, ai_regime_assessment=None):
+                       d1_df=None, ai_regime_assessment=None,
+                       ai_direction=None, ai_direction_confidence=0.0):
     """Ranging mode: breakout guard + mean-reversion setups at range boundaries.
 
     Returns (action, reason, best_setup). Round 4.6-F: session kwarg so
@@ -395,6 +406,8 @@ def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
     setups that oppose a confident HTF bias (confidence >= 0.5).
     Round 9 P0-A/B: d1_df enables the D1 SMA50 trend filter and
     ai_regime_assessment enables per-direction regime gates (both default OFF).
+    R10 P2.2: ai_direction + ai_direction_confidence pipe through to the
+    DirectionEngine entry veto in _build_setup (gate default OFF).
     """
     # Breakout invalidation — if price breaks the range, hold and wait
     breakout = breakout_detector.check_breakout(price, range_bounds, h1_atr)
@@ -407,6 +420,8 @@ def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
         m15_df=m15_df,
         d1_df=d1_df,
         ai_regime_assessment=ai_regime_assessment,
+        ai_direction=ai_direction,
+        ai_direction_confidence=ai_direction_confidence,
     )
 
     # Round 4.6-K: setup-level guards (RR>=1.2, touches>=2) enforcement.
@@ -440,7 +455,8 @@ def determine_action(setups, ai_analysis, regime, *,
                      htf_bias=None, cfg=None, m15_df=None, d1_df=None,
                      ai_regime_assessment=None,
                      ai_mode_router_enabled: bool = False,
-                     ai_regime_trust_threshold: float = 0.6):
+                     ai_regime_trust_threshold: float = 0.6,
+                     trending_dominance_enabled: bool = False):
     """Dual-mode action router: trending (v1 5-gate) or ranging (mean-reversion).
 
     Always detects range for display. Mode router decides which path runs.
@@ -478,6 +494,22 @@ def determine_action(setups, ai_analysis, regime, *,
 
     # Route trading mode — Round 7 P0-1: gate AI regime override at caller
     effective_assessment = ai_regime_assessment if ai_mode_router_enabled else None
+    # R10 P2.1: thread D1 SMA50 slope when the trending-dominance flag is on,
+    # so route_trading_mode can adapt the Priority-1 floor and run the
+    # ranging→trending demote. We only compute the slope when the gate asks
+    # for it (avoids paying the cost when feature is off).
+    d1_slope_pct: float | None = None
+    if trending_dominance_enabled and d1_df is not None:
+        # Narrow except: only swallow data-shape errors from the polars
+        # to_list() / SMA arithmetic path. ImportError on the regime
+        # classifier should propagate so a broken module is visible, not
+        # silently treated as "no D1 trend confirmed". (defense P2 obs (a).)
+        from smc.ai.regime_classifier import _sma50_direction_and_slope
+        try:
+            d1_closes = d1_df["close"].to_list()
+            _, d1_slope_pct = _sma50_direction_and_slope(d1_closes)
+        except (KeyError, ValueError, IndexError, TypeError):  # pragma: no cover
+            d1_slope_pct = None
     mode = route_trading_mode(
         ai_direction=ai_dir,
         ai_confidence=effective_conf,
@@ -489,6 +521,8 @@ def determine_action(setups, ai_analysis, regime, *,
         cfg=cfg,
         ai_regime_assessment=effective_assessment,
         ai_regime_trust_threshold=ai_regime_trust_threshold,
+        d1_sma50_slope_pct=d1_slope_pct,
+        trending_dominance_enabled=trending_dominance_enabled,
     )
 
     # Round 7 P0-1 telemetry: the router cannot distinguish "gate off" from
@@ -520,6 +554,7 @@ def determine_action(setups, ai_analysis, regime, *,
             range_trader, breakout_detector, session=session, h1_df=h1_df,
             htf_bias=htf_bias, cfg=cfg, m15_df=m15_df,
             d1_df=d1_df, ai_regime_assessment=ai_regime_assessment,
+            ai_direction=ai_dir, ai_direction_confidence=ai_conf,
         )
         return action, reason, best, mode
 
@@ -807,6 +842,13 @@ def main():
     # closed deals across restarts (silent bug surfaced by ops-sustain).
     RECONCILE_TS_PATH = DATA_ROOT / f"last_reconcile_ts{_journal_suffix}.json"
     PHASE1A_BREAKER_PATH = DATA_ROOT / f"phase1a_breaker_state{_journal_suffix}.json"
+    # Round 10 P1.1: persistent multi-day DD circuit breaker.  Replaces the
+    # daily-reset peak_balance scheme that turned the 10% drawdown_guard cap
+    # into a 24h-rolling cap.  Now the all-time peak is monotonic and a
+    # 5-day rolling weekly peak runs in parallel; halt rules are 0.90 (24h
+    # auto-resume) and 0.85 (manual reset via sentinel file).
+    PERSISTENT_PEAK_PATH = DATA_ROOT / f"persistent_peak{_journal_suffix}.json"
+    DD_MANUAL_RESET_PATH = DATA_ROOT / f"dd_manual_reset{_journal_suffix}.flag"
 
     print(f"[{datetime.now()}] AI-SMC Live Trading Loop Starting...")
     print("=" * 60)
@@ -907,6 +949,8 @@ def main():
         trend_filter_enabled=_path_cfg.range_trend_filter_enabled,
         ai_regime_gate_enabled=_path_cfg.range_ai_regime_gate_enabled,
         require_regime_valid=_path_cfg.range_require_regime_valid,
+        # R10 P2.2: ai_direction entry-veto gate (default OFF).
+        ai_direction_entry_gate_enabled=_path_cfg.range_ai_direction_entry_gate_enabled,
     )
     breakout_det = BreakoutDetector()
 
@@ -936,30 +980,33 @@ def main():
     phase1a_breaker = Phase1aCircuitBreaker(
         state_path=PHASE1A_BREAKER_PATH,
     )
-    # Round 5 T1 F3: consecutive-loss halt (3 losses in a row → halt rest of
-    # UTC day; WIN resets streak). DrawdownGuard is a %-based backstop.
+    # Round 5 T1 F3 / Round 10 P3.2: rolling 3-in-6 loss halt (no daily
+    # reset). 3 losses inside the most recent 6 trades trip the halt;
+    # operator must reset() OR wait for wins to evict losses out of the
+    # window. R10 P3.2 removed the pre-R10 daily-UTC reset because midnight
+    # was masking losing regimes (operators saw fresh streaks at 00:00
+    # UTC even when the underlying market hadn't recovered).
     # audit-r3 R4: consec_limit from cfg.consec_loss_limit (per-symbol).
-    # XAU=3, BTC=3 today but interface open for future per-instrument tuning.
+    # window_size=6 default per R10 P3.2 spec.
     consec_halt = ConsecLossHalt(
         state_path=CONSEC_LOSS_PATH,
         consec_limit=cfg.consec_loss_limit,
+        window_size=cfg.consec_loss_window_size,
     )
-    drawdown_guard = DrawdownGuard(max_daily_loss_pct=3.0, max_drawdown_pct=10.0)
-    # peak_balance and daily_pnl are tracked across cycles from reconciled
-    # closes. Initialized from the current MT5 balance at startup so the
-    # guard reasons about post-restart P&L rather than session-zero.
+    # Round 10 P1.1: persistent multi-day DD guard wraps the stateless
+    # DrawdownGuard with monotonic all-time peak + 5-day rolling weekly peak.
+    # It replaces the buggy "reset peak to today's balance every UTC midnight"
+    # logic that turned the 10% drawdown cap into a 24h-rolling cap (the
+    # incident on 2026-04-25 where account sat at -12.76% but no halt fired).
+    persistent_dd_guard = PersistentDrawdownGuard(
+        state_path=PERSISTENT_PEAK_PATH,
+        manual_reset_sentinel_path=DD_MANUAL_RESET_PATH,
+        inner_guard=DrawdownGuard(max_daily_loss_pct=3.0, max_drawdown_pct=10.0),
+    )
+    # Seed the all-time peak from current MT5 balance on first boot.
     _initial_balance = float(info.balance)
-    peak_balance = _initial_balance
+    persistent_dd_guard.update(_initial_balance)
     daily_pnl = 0.0
-    # audit-r3 R3: track the UTC date for which peak_balance was last reset.
-    # On UTC 00:00 rollover we reset peak_balance to current balance so the
-    # drawdown guard reasons about *today's* peak, not historical all-time
-    # high.  Without reset, a bad week would bake a "ghost peak" into the
-    # guard indefinitely, producing spurious drawdown_guard trips even after
-    # the account recovers intra-day.  Mirrors Phase1aCircuitBreaker /
-    # ConsecLossHalt daily-reset semantics (UTC 0:00 boundary).
-    from datetime import date as _date
-    peak_balance_reset_date: _date = datetime.now(timezone.utc).date()
     # audit-r2 ops #4: reload persisted reconcile cursor so closed deals
     # processed pre-restart are NOT re-played into consec_halt /
     # phase1a_breaker / daily_pnl on startup.  Missing or corrupt cursor
@@ -987,42 +1034,9 @@ def main():
         print(f"[{now.strftime('%H:%M:%S')} UTC] CYCLE {cycle}")
         print(f"{'='*60}")
 
-        # audit-r3 R3: daily peak_balance reset at UTC 0:00 boundary.
-        # Keeps drawdown_guard.total_drawdown_pct reasoning about *today's*
-        # peak, preventing historical highs from spuriously tripping the
-        # %-based drawdown backstop after recovery.  Reset to current live
-        # balance (fall back to peak_balance if account_info fails).
-        #
-        # NOTE (decision-reviewer micro-suggestion): `peak_balance_reset_date`
-        # advances EVEN IF the balance probe fails.  This prevents a retry
-        # storm: without date advance, every cycle during an MT5 outage would
-        # re-enter this branch, call account_info() repeatedly, and flood
-        # structured logs / Telegram alerts.  Analog: k8s liveness probes
-        # have backoff, not hot-loop retry.  If the reset was imperfect today,
-        # tomorrow's boundary will try again cleanly.
-        _today_utc = now.date()
-        if _today_utc != peak_balance_reset_date:
-            _balance_info_success = False
-            try:
-                _reset_info = mt5.account_info()
-                if _reset_info is not None and float(_reset_info.balance) > 0:
-                    _reset_balance = float(_reset_info.balance)
-                    _balance_info_success = True
-                else:
-                    _reset_balance = peak_balance
-            except Exception:
-                _reset_balance = peak_balance
-            log_info(
-                "peak_balance_daily_reset",
-                cycle=cycle,
-                prev_peak=round(peak_balance, 2),
-                new_peak=round(_reset_balance, 2),
-                from_date=peak_balance_reset_date.isoformat(),
-                to_date=_today_utc.isoformat(),
-                balance_info_success=_balance_info_success,
-            )
-            peak_balance = _reset_balance
-            peak_balance_reset_date = _today_utc
+        # Round 10 P1.1: daily peak_balance reset removed — it was the bug
+        # that masked the 2026-04-25 -12.76% bleed.  PersistentDrawdownGuard
+        # now owns the peak (monotonic all-time + 5-day rolling weekly).
 
         # audit-r2 ops #3: halt paths fall through to save_state so the
         # dashboard's "为什么不开仓" card surfaces the real reason (symmetry
@@ -1062,18 +1076,44 @@ def main():
             _halt_display_reason = f"连亏 {snap.consec_losses} 单触发每日保险"
 
         if _halt_blocked_reason is None:
-            budget = drawdown_guard.check_budget(
+            # Round 10 P1.1: ratchet the persistent peak BEFORE the check so
+            # the all-time / weekly rails always see today's balance.
+            persistent_dd_guard.update(float(info.balance))
+            budget = persistent_dd_guard.check_budget(
                 balance=float(info.balance),
-                peak_balance=peak_balance,
                 daily_pnl=daily_pnl,
             )
             if not budget.can_trade:
+                # Round 10 P1.1 invariant: every halt tier shipped today is
+                # block_opens=True / force_close=False. force_close is
+                # reserved for a future ratio<=0.80 emergency tier; we
+                # assert here so a regression in either guard surfaces loud.
+                assert budget.block_opens is True, (
+                    "Round 10 invariant: a halt MUST set block_opens=True"
+                )
+                assert budget.force_close is False, (
+                    "Round 10 invariant: no shipped tier sets force_close=True"
+                )
+                _peak_snap = persistent_dd_guard.snapshot()
+                _last_event = (
+                    _peak_snap.manual_halt_history[-1]
+                    if _peak_snap.manual_halt_history
+                    else None
+                )
                 log_warn(
                     "drawdown_guard_block",
                     cycle=cycle,
                     reason=budget.rejection_reason,
                     daily_loss_pct=budget.daily_loss_pct,
                     total_drawdown_pct=budget.total_drawdown_pct,
+                    block_opens=budget.block_opens,
+                    force_close=budget.force_close,
+                    all_time_peak=round(_peak_snap.all_time_peak, 2),
+                    weekly_peak=round(_peak_snap.weekly_peak, 2),
+                    manual_halt_active=_peak_snap.manual_halt_active,
+                    halt_tier=(_last_event.tier if _last_event else None),
+                    halt_rail=(_last_event.rail if _last_event else None),
+                    halt_ratio=(_last_event.ratio_at_trip if _last_event else None),
                 )
                 print(f"  [HALT] drawdown guard: {budget.rejection_reason}")
                 _halt_blocked_reason = f"drawdown_guard:{budget.rejection_reason}"
@@ -1145,6 +1185,78 @@ def main():
             data = fetch_mt5_data(cfg.mt5_path)
             bars_info = ", ".join(f"{k}: {len(v)}" for k, v in data.items())
             print(f"  Data: {{{bars_info}}}")
+
+            # Round 10 P3.2: spread gate (default OFF). Block new opens
+            # when live spread is >= 1.5x the rolling-window median of M15
+            # bar spreads. Bootstrap path (baseline=None when fewer than
+            # 20 samples) passes through. Catches news spikes / illiquid
+            # windows where the broker's quote balloons.
+            #
+            # Default OFF for staged rollout: control leg keeps the gate
+            # off while treatment leg (start_live_macro.bat) flips it ON
+            # after Phase 3 bake validates no false-blocks. Toggle via
+            # SMCConfig.spread_gate_enabled (env: SMC_SPREAD_GATE_ENABLED,
+            # lenient bool: "true"/"1"/"yes").
+            #
+            # Position in the cycle: cycle-distal entry gate AFTER tick +
+            # data fetch (we need the M15 spread history for the baseline)
+            # but BEFORE aggregator + sizer work. Other halts (drawdown,
+            # consec_loss, asian_quota) trump this — they ran upstream at
+            # line 1027-1095 and would have triggered `continue` already.
+            if _path_cfg.spread_gate_enabled:
+                _spread_baseline: float | None = None
+                try:
+                    _m15_df = data.get(Timeframe.M15)
+                    if _m15_df is not None and "spread" in _m15_df.columns:
+                        _spread_history = [
+                            float(s) for s in _m15_df["spread"].to_list()
+                        ]
+                        _spread_baseline = compute_spread_baseline(
+                            _spread_history, window=SPREAD_BASELINE_WINDOW
+                        )
+                except Exception:
+                    _spread_baseline = None
+                _spread_decision = check_spread_gate(
+                    current_spread=float(spread),
+                    baseline=_spread_baseline,
+                    multiplier=SPREAD_THRESHOLD_MULT,
+                )
+                if not _spread_decision.can_open:
+                    log_warn(
+                        "spread_gate_block",
+                        cycle=cycle,
+                        current_spread=round(_spread_decision.current_spread, 2),
+                        baseline=(
+                            round(_spread_decision.baseline_median, 2)
+                            if _spread_decision.baseline_median is not None
+                            else None
+                        ),
+                        multiplier=_spread_decision.threshold_multiplier,
+                        reason=_spread_decision.rejection_reason,
+                    )
+                    print(f"  [SKIP] spread gate: {_spread_decision.rejection_reason}")
+                    try:
+                        save_state(
+                            cycle=cycle,
+                            price=price,
+                            action="HOLD",
+                            reason=f"[SKIP] spread gate: {_spread_decision.rejection_reason}",
+                            ai_analysis={},
+                            regime="unknown",
+                            setups=(),
+                            best_setup=None,
+                            mode_decision=None,
+                            range_trader=None,
+                            aggregator=None,
+                            blocked_reason=f"spread_gate:{_spread_decision.rejection_reason}",
+                            cfg=cfg,
+                            balance_usd=None,
+                            risk_pct=1.0,
+                            position_size_lots=0.0,
+                        )
+                    except Exception as _spread_save_exc:
+                        log_warn("spread_gate_save_state_fail", exc=str(_spread_save_exc)[:120])
+                    continue
 
             # Round 5 stability R2: emit one health_probe per cycle for the
             # daily SLA digest + ops dashboard P&L card.  A single fresh
@@ -1262,6 +1374,28 @@ def main():
             setups = aggregator.generate_setups(data, price)
             print(f"  SMC Setups: {len(setups)}")
 
+            # R10 P1.2: persist the per-call gate diagnostic so
+            # scripts/build_gate_funnel.py can reconstruct where setups die
+            # (htf_bias / regime / direction / no_h1_zones / entry_none / ...).
+            # Fail-closed: helper logs warn + returns None on IO error so the
+            # trade loop is never blocked by telemetry IO.
+            _gate_diag = getattr(aggregator, "_last_setup_diagnostic", None)
+            if isinstance(_gate_diag, dict):
+                try:
+                    append_gate_diagnostic(
+                        _gate_diag,
+                        bar_ts=now,
+                        symbol=cfg.symbol,
+                        magic=_effective_magic,
+                        config=cfg,
+                    )
+                except Exception as _diag_exc:  # pragma: no cover — defensive
+                    log_warn(
+                        "gate_diag_persist_unexpected",
+                        cycle=cycle,
+                        err=str(_diag_exc)[:120],
+                    )
+
             # 6. Dual-mode action routing
             session, _ = get_session_info(cfg=cfg)
             action, reason, best, mode = determine_action(
@@ -1282,6 +1416,7 @@ def main():
                 ai_regime_assessment=getattr(aggregator, "_last_ai_assessment", None),
                 ai_mode_router_enabled=_path_cfg.ai_mode_router_enabled,
                 ai_regime_trust_threshold=_path_cfg.ai_regime_trust_threshold,
+                trending_dominance_enabled=_path_cfg.mode_router_trending_dominance_enabled,
             )
             # Round 5 T0 (P0-2b): quota record_open moved *after* successful
             # order_send below (inside LIVE_EXEC branch). MT5 failures no longer
@@ -1595,6 +1730,13 @@ def main():
                             "margin_reason": margin_check.reason,
                             "trading_mode": mode.mode,
                             "session": session,
+                            # R10 cal-0b: capture rolling consec-loss window at
+                            # the entry-decision moment. Calibration runner uses
+                            # this to derive the empirical histogram needed by
+                            # P3.1 loss-aware sizing decay.
+                            "loss_count_in_window_at_open": (
+                                consec_halt.snapshot().loss_count_in_window
+                            ),
                         }
                         with open(JOURNAL_PATH, "a") as f:
                             f.write(json.dumps(log_entry) + "\n")
@@ -1743,6 +1885,10 @@ def main():
                         "magic": _effective_magic,
                         "account_balance_usd": round(_live_balance_usd, 2) if _live_balance_usd is not None else None,
                         "virtual_balance_usd": round(_virtual_balance_usd, 2) if _virtual_balance_usd is not None else None,
+                        # R10 cal-0b: rolling consec-loss window at trade-open.
+                        "loss_count_in_window_at_open": (
+                            consec_halt.snapshot().loss_count_in_window
+                        ),
                     }
                     with open(JOURNAL_PATH, "a") as f:
                         f.write(json.dumps(log_entry) + "\n")
@@ -1794,6 +1940,10 @@ def main():
                         "magic": _effective_magic,
                         "account_balance_usd": round(_live_balance_usd, 2) if _live_balance_usd is not None else None,
                         "virtual_balance_usd": round(_virtual_balance_usd, 2) if _virtual_balance_usd is not None else None,
+                        # R10 cal-0b: rolling consec-loss window at trade-open.
+                        "loss_count_in_window_at_open": (
+                            consec_halt.snapshot().loss_count_in_window
+                        ),
                     }
                     with open(JOURNAL_PATH, "a") as f:
                         f.write(json.dumps(log_entry) + "\n")
@@ -1912,10 +2062,11 @@ def main():
                                         pass
                         except Exception:
                             pass  # best-effort — never break trading loop
-                # Update peak_balance from live account equity for next cycle.
+                # Round 10 P1.1: ratchet the persistent peak from live equity.
+                # PersistentDrawdownGuard.update() is idempotent and monotonic.
                 try:
                     info = mt5.account_info()
-                    peak_balance = max(peak_balance, float(info.balance))
+                    persistent_dd_guard.update(float(info.balance))
                 except Exception:
                     pass
                 last_reconcile_ts = now
@@ -1979,8 +2130,11 @@ def main():
             _balance_for_sizing = _locs.get("_virtual_balance_usd", None)
             if _balance_for_sizing is None:
                 _mt5_balance_fallback = _locs.get("_live_balance_usd", None)
-                if _mt5_balance_fallback is None and peak_balance:
-                    _mt5_balance_fallback = float(peak_balance)
+                # Round 10 P1.1: peak now lives in PersistentDrawdownGuard.
+                if _mt5_balance_fallback is None:
+                    _peak_fallback = persistent_dd_guard.snapshot().all_time_peak
+                    if _peak_fallback > 0:
+                        _mt5_balance_fallback = float(_peak_fallback)
                 if _mt5_balance_fallback is not None:
                     _balance_for_sizing = _path_cfg.virtual_balance_for(
                         _journal_suffix, _mt5_balance_fallback,

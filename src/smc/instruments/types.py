@@ -60,3 +60,9 @@ class InstrumentConfig:
     # Quota / halt
     use_asian_quota: bool
     consec_loss_limit: int
+    # R10 P3.2: rolling-window size for the consecutive-loss halt. The
+    # halt trips when ``consec_loss_limit`` losses occur inside the most
+    # recent ``consec_loss_window_size`` trades. window_size >= consec_loss_limit
+    # is enforced by ConsecLossHalt's constructor — values smaller than
+    # the limit produce a halt that can never trip.
+    consec_loss_window_size: int = 6

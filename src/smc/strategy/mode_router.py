@@ -49,6 +49,30 @@ _TREND_REGIMES: frozenset[str] = frozenset({"TREND_UP", "TREND_DOWN", "ATH_BREAK
 # — it matches current Priority 1's threshold so the two paths align").
 _TRANSITION_TREND_DIR_CONF: float = 0.45
 
+# R10 P2.1 — trending-dominance constants (default values; PENDING calibration).
+# These activate only when the caller passes ``trending_dominance_enabled=True``.
+# After the Phase 1 gate_funnel.json bake validates empirical thresholds, lift
+# the ``_PHASE2_CALIBRATION_PENDING`` tags and freeze the chosen values.
+_PHASE2_CALIBRATION_PENDING = (
+    "Lowered Priority-1 floor and dominance-demote AI conf require live-bake "
+    "validation (gate_funnel.json) before promotion to default-ON."
+)
+# Lowered Priority-1 directional threshold when D1 trend is confirmed.
+_TRENDING_PRIORITY1_THRESHOLD_LOWERED: float = 0.30  # _PHASE2_CALIBRATION_PENDING
+# D1 SMA50 |slope| floor (% per bar) that defines "D1 trend confirmed".
+# Aligned with smc.ai.regime_classifier._SLOPE_TREND_MIN_ABS (0.05%/bar).
+_D1_SLOPE_TREND_MIN_PCT: float = 0.05
+# Minimum AI regime confidence for the dominance demote to fire — held in
+# step with the Priority-0 trust threshold to avoid double-bookkeeping.
+#
+# Asymmetry note vs range_trader._AI_DIRECTION_ENTRY_GATE_CONF_FLOOR (0.55):
+# these two floors gate different actions on different signals. This 0.6 floor
+# is for the AI *regime* classifier (TREND_UP/TREND_DOWN/ATH_BREAKOUT) and
+# triggers a structural mode change (ranging → trending). The 0.55 floor in
+# range_trader is for the AI *direction* engine (bullish/bearish) and only
+# vetoes a single setup. Higher floor for the bigger action — intentional.
+_DOMINANCE_DEMOTE_MIN_AI_CONF: float = 0.6
+
 
 def route_trading_mode(
     ai_direction: str,
@@ -62,6 +86,8 @@ def route_trading_mode(
     cfg: InstrumentConfig | None = None,
     ai_regime_assessment: "AIRegimeAssessment | None" = None,
     ai_regime_trust_threshold: float = 0.6,
+    d1_sma50_slope_pct: float | None = None,
+    trending_dominance_enabled: bool = False,
 ) -> TradingMode:
     """Decide between trending, ranging, and v1-passthrough trading mode.
 
@@ -92,6 +118,20 @@ def route_trading_mode(
         Round 7 P0-1: minimum confidence required on the assessment for
         the AI-aware branch to fire.  Typically sourced from
         ``SMCConfig.ai_regime_trust_threshold`` by the caller.
+    d1_sma50_slope_pct:
+        R10 P2.1: D1 SMA50 slope in percent per bar (e.g. 0.06 = 0.06%/bar).
+        Source: ``smc.ai.regime_classifier.AIRegimeContext.d1_sma50_slope``.
+        When ``None`` the trending-dominance logic is short-circuited and the
+        function behaves identically to the pre-R10 logic.
+    trending_dominance_enabled:
+        R10 P2.1: master switch for two related adjustments —
+        (a) lower the Priority-1 directional floor from 0.45 to 0.30 when
+            ``|d1_sma50_slope_pct| >= 0.05`` (D1 trend confirmed); and
+        (b) demote any cycle that would route to ``ranging`` to ``trending``
+            when D1 slope is confirmed AND ``ai_regime_assessment`` reports
+            a trend regime (TREND_UP/TREND_DOWN/ATH_BREAKOUT) with
+            ``confidence >= 0.6``.
+        Defaults to False (byte-identical legacy behavior).
 
     Returns
     -------
@@ -244,10 +284,24 @@ def route_trading_mode(
     # today's XAU ai_confidence=0.47 (bearish) was stuck below 0.5 → never
     # entered trending path. 0.45 lets edge-case convictions through; v1
     # 5-gate aggregator still filters false trends downstream.
+    #
+    # R10 P2.1: when ``trending_dominance_enabled`` AND D1 SMA50 |slope|
+    # crosses ``_D1_SLOPE_TREND_MIN_PCT`` (0.05%/bar), the Priority-1 floor
+    # drops from 0.45 → 0.30 so the SMC trend path can fire under modest
+    # AI conviction once the D1 backdrop is unambiguous.
     # ------------------------------------------------------------------
+    d1_trend_confirmed = (
+        d1_sma50_slope_pct is not None
+        and abs(d1_sma50_slope_pct) >= _D1_SLOPE_TREND_MIN_PCT
+    )
+    p1_threshold = (
+        _TRENDING_PRIORITY1_THRESHOLD_LOWERED
+        if (trending_dominance_enabled and d1_trend_confirmed)
+        else 0.45
+    )
     if (
         ai_direction in ("bullish", "bearish")
-        and ai_confidence >= 0.45
+        and ai_confidence >= p1_threshold
         and (cfg.asian_core_session_name is None or session != cfg.asian_core_session_name)
     ):
         return TradingMode(
@@ -258,6 +312,44 @@ def route_trading_mode(
             regime=regime,
             range_bounds=range_bounds,
             ai_regime_decision=fell_through_tag,
+        )
+
+    # ------------------------------------------------------------------
+    # R10 P2.1 — trending-dominance demote
+    #
+    # When the cycle would otherwise satisfy Priority 2 (ranging) BUT the D1
+    # backdrop is unambiguously trending AND the AI regime classifier
+    # confidently agrees, demote ranging → trending. This catches the
+    # inversion documented in the live-bake stats: Donchian fallback always
+    # succeeds → every cycle routes to ranging → SMC trend path never fires
+    # even when the AI direction engine is screaming "trend".
+    #
+    # We skip the demote when the AI assessment is missing or below the
+    # _DOMINANCE_DEMOTE_MIN_AI_CONF floor — without an AI vote we trust
+    # the legacy P2/P3 path. ASIAN_CORE exception is preserved (Asian
+    # session never enters trending unless the existing P1 fired above).
+    # ------------------------------------------------------------------
+    if (
+        trending_dominance_enabled
+        and d1_trend_confirmed
+        and ai_regime_assessment is not None
+        and ai_regime_assessment.regime in _TREND_REGIMES
+        and ai_regime_assessment.confidence >= _DOMINANCE_DEMOTE_MIN_AI_CONF
+        and (cfg.asian_core_session_name is None or session != cfg.asian_core_session_name)
+    ):
+        return TradingMode(
+            mode="trending",
+            reason=(
+                f"R10 P2.1 trending-dominance: D1 slope "
+                f"{d1_sma50_slope_pct:+.3f}%/bar + AI regime "
+                f"{ai_regime_assessment.regime} (conf="
+                f"{ai_regime_assessment.confidence:.2f}) — demoting ranging"
+            ),
+            ai_direction=ai_direction,
+            ai_confidence=ai_confidence,
+            regime=regime,
+            range_bounds=range_bounds,
+            ai_regime_decision="trending_dominance_over_ranging",
         )
 
     # Priority 2: range detected + 5 guards pass + active session → ranging

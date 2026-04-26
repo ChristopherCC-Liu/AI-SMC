@@ -39,6 +39,13 @@ REM for live A/B comparison. Backtest 2020-2024 validated: 2023 Δ PF = 0.00
 REM (regression eliminated), 2022 -0.86 is 2-trade sample noise.
 set SMC_AI_MODE_ROUTER_ENABLED=true
 set SMC_AI_REGIME_TRUST_THRESHOLD=0.6
+REM Round 10 P0: flip R9 RangeTrader AI gates ON for the treatment leg only.
+REM Backtest 2020-2024 (commits 5f55dd9 / 7792173 / be89d7b / 6ed3890): A_only
+REM +$47.89, C_only +$73.21, A+B+C +$73.21; 0 false-block / 0 false-allow.
+REM Control leg (start_live.bat) keeps these OFF for live A/B comparison.
+set SMC_RANGE_TREND_FILTER_ENABLED=true
+set SMC_RANGE_AI_REGIME_GATE_ENABLED=true
+set SMC_RANGE_REQUIRE_REGIME_VALID=true
 REM Optional: override virtual balance split.  Default is 50/50.
 REM set SMC_VIRTUAL_BALANCE_SPLIT={"": 0.5, "_macro": 0.5}
 REM Optional: override treatment-leg magic (default 19760428).

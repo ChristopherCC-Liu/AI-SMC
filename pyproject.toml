@@ -50,6 +50,7 @@ markers = [
     "integration: may touch disk or network",
     "mt5: requires Windows MT5 terminal",
     "slow: backtest runs > 10 seconds",
+    "fixture_replay: incident-replay regression suite (R10 P4.1) — every R-round PR must keep these green",
 ]
 
 [tool.ruff]
