@@ -102,19 +102,20 @@ def build_default_arms(
     expected value. Phase 2 ablation studies will define additional arms
     with ``"subset"`` matching for cells that vary only one or two flags.
     """
+    # Three booleans only — these are the SMCConfig fields foundation's
+    # cal-0 _serialize_flags actually emits. cal-1-tweak (a717f75) shrunk
+    # FeatureFlagSnapshot Protocol to match. persistent_dd_breaker_enabled
+    # is env-var-only, consec_loss_window_size is per-instrument; both
+    # belong outside this Protocol.
     control_flags = {
         "range_trend_filter_enabled": False,
         "range_ai_regime_gate_enabled": False,
         "spread_gate_enabled": False,
-        "persistent_dd_breaker_enabled": False,
-        "consec_loss_window_size": 3,
     }
     treatment_flags = {
         "range_trend_filter_enabled": True,
         "range_ai_regime_gate_enabled": True,
         "spread_gate_enabled": True,
-        "persistent_dd_breaker_enabled": True,
-        "consec_loss_window_size": 6,
     }
     return [
         ArmDefinition(

@@ -45,15 +45,11 @@ _CONTROL_FLAGS = {
     "range_trend_filter_enabled": False,
     "range_ai_regime_gate_enabled": False,
     "spread_gate_enabled": False,
-    "persistent_dd_breaker_enabled": False,
-    "consec_loss_window_size": 3,
 }
 _TREATMENT_FLAGS = {
     "range_trend_filter_enabled": True,
     "range_ai_regime_gate_enabled": True,
     "spread_gate_enabled": True,
-    "persistent_dd_breaker_enabled": True,
-    "consec_loss_window_size": 6,
 }
 
 

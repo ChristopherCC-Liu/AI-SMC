@@ -30,15 +30,11 @@ CONTROL_FLAGS_OFF: dict[str, object] = {
     "range_trend_filter_enabled": False,
     "range_ai_regime_gate_enabled": False,
     "spread_gate_enabled": False,
-    "persistent_dd_breaker_enabled": False,
-    "consec_loss_window_size": 3,
 }
 TREATMENT_FLAGS_ON: dict[str, object] = {
     "range_trend_filter_enabled": True,
     "range_ai_regime_gate_enabled": True,
     "spread_gate_enabled": True,
-    "persistent_dd_breaker_enabled": True,
-    "consec_loss_window_size": 6,
 }
 
 
@@ -179,8 +175,6 @@ def test_per_arm_metrics_buckets_loss_counts_as_string_keys() -> None:
         range_trend_filter_enabled=False,
         range_ai_regime_gate_enabled=False,
         spread_gate_enabled=False,
-        persistent_dd_breaker_enabled=False,
-        consec_loss_window_size=3,
     )
     trades = [
         TradeView("a", "t", "control", snap, 1.0, 0),
@@ -206,8 +200,6 @@ def test_per_arm_metrics_handles_legacy_none_loss_count() -> None:
         range_trend_filter_enabled=False,
         range_ai_regime_gate_enabled=False,
         spread_gate_enabled=False,
-        persistent_dd_breaker_enabled=False,
-        consec_loss_window_size=3,
     )
     trades = [
         TradeView("a", "t", "control", snap, 1.0, None),
