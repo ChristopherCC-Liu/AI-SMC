@@ -316,3 +316,119 @@ def test_histogram_bucket_keys_match_input_loss_count_values(
         assert treatment_hist.get(bucket) == 5, (
             f"treatment bucket {bucket}: {treatment_hist}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Producer-real fixture: catches cal-1 ↔ SMCConfig schema drift at design time
+# ---------------------------------------------------------------------------
+
+
+def test_classify_trades_against_real_smcconfig_schema() -> None:
+    """Pin the cal-1 ↔ SMCConfig contract by instantiating the real producer.
+
+    Drift this catches: if a future cal-1 maintainer adds a field to
+    ``FeatureFlagSnapshot`` that doesn't exist on ``SMCConfig``, or if a
+    future SMCConfig evolution renames a field that cal-1's Protocol still
+    expects, this test fails loud at design time. No production breakage.
+
+    The test is the producer-real defense against the silent-zero failure
+    mode that motivated cal-1-tweak / cal-2-tweak: with synthesized fixture
+    flags the pipeline tested green but produced 0-trade arms on real bake.
+    Constructing ``SMCConfig()`` directly + running ``_serialize_flags(cfg)``
+    means the fixture mirrors what cal-0 actually emits in production.
+
+    See ``feedback_bidirectional_grep_at_design.md`` (memory file) for the
+    pattern + the R10 incident that motivated it.
+    """
+    from smc.config import SMCConfig
+    from smc.monitor.gate_diagnostic_journal import _serialize_flags
+
+    # Real producer instantiation — NOT a synthesized dict. If SMCConfig
+    # ever loses a field cal-1's Protocol references, _serialize_flags
+    # output omits it, _flags_match strict-mode rejects, and this test
+    # fails by surfacing 0 trades in arms["control"].
+    cfg = SMCConfig()
+    flags_dict = _serialize_flags(cfg)
+
+    arms = runner.build_default_arms(
+        control_magic=runner.DEFAULT_CONTROL_MAGIC,
+        treatment_magic=runner.DEFAULT_TREATMENT_MAGIC,
+    )
+
+    # Build 35 control entries (above min_n=30) using the real flags
+    # snapshot. SMCConfig() defaults are control-leg semantics (all R10
+    # flags False), so trades with control magic + real-default flags
+    # must populate the control arm cleanly.
+    entries = [
+        {
+            "trade_id": f"real_ctrl_{i}",
+            "time": "2026-04-26T12:00:00+00:00",
+            "magic": runner.DEFAULT_CONTROL_MAGIC,
+            "pnl_usd": 1.0 if i % 2 == 0 else -0.5,
+            "flags": flags_dict,
+            "loss_count_in_window_at_open": 0,
+        }
+        for i in range(35)
+    ]
+
+    classified = classify_trades(
+        entries,
+        arm_definitions=arms,
+        control_magic=runner.DEFAULT_CONTROL_MAGIC,
+        treatment_magic=runner.DEFAULT_TREATMENT_MAGIC,
+    )
+
+    # The 35 entries built from the real SMCConfig snapshot MUST land in
+    # the control arm. If they fall to _unmatched, the Protocol diverged
+    # from SMCConfig — the same failure mode this commit fixes.
+    assert len(classified.arms[runner.ARM_CONTROL]) == 35, (
+        f"control arm should have 35 trades from real SMCConfig snapshot, "
+        f"got {len(classified.arms[runner.ARM_CONTROL])}. "
+        f"Diagnostic counts: "
+        f"unmatched={len(classified.diagnostics.get('_unmatched', ()))}, "
+        f"control_unexpected="
+        f"{len(classified.diagnostics.get('_control_with_unexpected_flag_on', ()))}, "
+        f"treatment_missing="
+        f"{len(classified.diagnostics.get('_treatment_with_missing_flag', ()))}. "
+        f"flags emitted by SMCConfig: {sorted(flags_dict.keys())}"
+    )
+    # Diagnostic buckets must all be empty for a clean control-only journal.
+    assert len(classified.diagnostics.get("_unmatched", ())) == 0
+    assert (
+        len(classified.diagnostics.get("_control_with_unexpected_flag_on", ()))
+        == 0
+    )
+    assert (
+        len(classified.diagnostics.get("_treatment_with_missing_flag", ())) == 0
+    )
+
+
+def test_serialize_flags_output_matches_protocol_field_set() -> None:
+    """Verify ``_serialize_flags(SMCConfig())`` emits at minimum the fields
+    cal-1's ``FeatureFlagSnapshot`` Protocol declares.
+
+    Mechanically enforces the bidirectional-grep discipline: if a future
+    cal-1 evolution adds a field to the Protocol without a corresponding
+    SMCConfig field, this test fails loud. Catches the drift class at the
+    serializer-Protocol seam, before any classifier integration runs.
+    """
+    from smc.config import SMCConfig
+    from smc.eval.calibration_arms import FeatureFlagSnapshot
+    from smc.monitor.gate_diagnostic_journal import _serialize_flags
+
+    cfg = SMCConfig()
+    flags_dict = _serialize_flags(cfg)
+
+    # Every Protocol-required field must be emitted by the serializer.
+    # Use Protocol.__annotations__ so the test auto-discovers field set
+    # without manual maintenance — when cal-1 changes the Protocol, this
+    # test re-runs against the new field set automatically.
+    protocol_fields = set(FeatureFlagSnapshot.__annotations__.keys())
+    serializer_fields = set(flags_dict.keys())
+
+    missing = protocol_fields - serializer_fields
+    assert not missing, (
+        f"Protocol fields not emitted by _serialize_flags: {sorted(missing)}. "
+        f"Either add them to SMCConfig + _FLAG_FIELDS, or remove from "
+        f"FeatureFlagSnapshot Protocol."
+    )
