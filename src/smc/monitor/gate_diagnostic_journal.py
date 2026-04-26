@@ -1,6 +1,10 @@
 """Persist aggregator gate diagnostics to a per-day jsonl file.
 
 R10 P1.2 — observability for the SMC gate funnel.
+R10 P4 calibration commit 0 — schema_version=2 adds optional per-trade ``flags``
+snapshot so the calibration runner can split arms by R10 feature-flag state
+without reconstructing flags from process boot-time alone (catches operator
+mid-run env mutation).
 
 The aggregator (``MultiTimeframeAggregator.generate_setups``) builds a rich
 ``_last_setup_diagnostic`` dict on every call.  Without persistence the
@@ -29,6 +33,13 @@ Design notes
 - ``zone_details`` is excluded from the persisted payload — it can grow to
   dozens of entries per call (one per scanned zone) and is redundant with
   the ``zone_rejects`` aggregate counters.
+- ``schema_version`` is written into every record.  v1 records (pre-calibration)
+  have no ``flags`` key; v2 records may carry a ``flags`` dict snapshotted from
+  SMCConfig.  Calibration consumers read ``flags=None`` for legacy v1 records
+  and fall back to boot-time snapshot, no migration script needed.
+- ``flags`` is captured at call-time, NOT process-start, so an operator mutating
+  an env var mid-run is still classifiable correctly.  Boot-time snapshot is a
+  separate layer in the calibration pipeline.
 """
 from __future__ import annotations
 
@@ -43,6 +54,32 @@ from typing import Any
 DEFAULT_JOURNAL_DIR = Path("data") / "diagnostics"
 FILENAME_TEMPLATE = "aggregator_gates_{date}.jsonl"
 _VERBOSE_FIELDS = ("zone_details",)
+
+# Schema version for the persisted record.  v1 = R10 P1.2 baseline (no ``flags``).
+# v2 = R10 P4 calibration commit 0 (optional ``flags`` dict snapshotted from
+# SMCConfig).  Bump when you add or remove top-level record fields; readers
+# keyed on this version can migrate gracefully.
+SCHEMA_VERSION = 2
+
+# R10 feature-flag fields snapshotted from SMCConfig into each record's
+# ``flags`` dict when a config is supplied.  Order is preserved for stability
+# but readers should index by name, not position.  These match the field names
+# on ``SMCConfig`` (see src/smc/config.py field_validator at line 77).
+_FLAG_FIELDS: tuple[str, ...] = (
+    "macro_enabled",
+    "ai_regime_enabled",
+    "ai_mode_router_enabled",
+    "ai_regime_trust_threshold",
+    "range_trend_filter_enabled",
+    "range_ai_regime_gate_enabled",
+    "range_require_regime_valid",
+    "range_reversal_confirm_enabled",
+    "range_ai_direction_entry_gate_enabled",
+    "mode_router_trending_dominance_enabled",
+    "spread_gate_enabled",
+    "max_concurrent_per_symbol",
+    "anti_stack_cooldown_minutes",
+)
 
 # Number of consecutive failures on a UTC day before we escalate the next
 # warning to ERROR.  Three is enough to flag persistent disk problems
@@ -79,6 +116,24 @@ def _strip_verbose(diagnostic: dict[str, Any]) -> dict[str, Any]:
     aggregate ``zone_rejects`` counters intact.
     """
     return {k: v for k, v in diagnostic.items() if k not in _VERBOSE_FIELDS}
+
+
+def _serialize_flags(config: Any) -> dict[str, Any]:
+    """Snapshot the R10 feature-flag fields from ``config`` into a flat dict.
+
+    Pure function — reads attributes via ``getattr`` so it works against any
+    object exposing the named fields (typically an ``SMCConfig`` instance).
+    Missing fields are silently omitted rather than logged, since calibration
+    consumers tolerate partial snapshots (matching ``flags=None`` for legacy
+    v1 records).  Returns an empty dict if ``config`` is ``None``.
+    """
+    if config is None:
+        return {}
+    snapshot: dict[str, Any] = {}
+    for field in _FLAG_FIELDS:
+        if hasattr(config, field):
+            snapshot[field] = getattr(config, field)
+    return snapshot
 
 
 def journal_path_for(
@@ -134,6 +189,7 @@ def append_gate_diagnostic(
     magic: int,
     journal_dir: Path | str = DEFAULT_JOURNAL_DIR,
     enabled: bool = True,
+    config: Any = None,
 ) -> Path | None:
     """Append a single gate diagnostic record to the per-day jsonl.
 
@@ -160,6 +216,12 @@ def append_gate_diagnostic(
         When ``False`` the call is a no-op — backtest harnesses pass
         ``enabled=False`` to share the same call site without polluting the
         production diagnostics directory.  Default ``True``.
+    config:
+        Optional ``SMCConfig`` (or any object exposing the R10 flag fields).
+        When provided, a snapshot of ``_FLAG_FIELDS`` is written into the
+        record's ``flags`` key.  When ``None`` (default — preserves backward
+        compat with R10 P1.2 callers) no ``flags`` key is written; calibration
+        consumers tolerate the absence.
 
     Returns
     -------
@@ -191,12 +253,15 @@ def append_gate_diagnostic(
     else:
         bar_ts_iso = bar_ts.astimezone(timezone.utc).isoformat()
 
-    record = {
+    record: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
         "bar_ts": bar_ts_iso,
         "symbol": symbol,
         "magic": int(magic),
         "diagnostic": _strip_verbose(diagnostic),
     }
+    if config is not None:
+        record["flags"] = _serialize_flags(config)
     try:
         with target.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, default=str) + "\n")
@@ -215,6 +280,7 @@ def append_gate_diagnostic(
 __all__ = [
     "DEFAULT_JOURNAL_DIR",
     "FILENAME_TEMPLATE",
+    "SCHEMA_VERSION",
     "append_gate_diagnostic",
     "journal_path_for",
     "reset_failure_counter",

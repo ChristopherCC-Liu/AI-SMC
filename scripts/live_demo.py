@@ -1387,6 +1387,7 @@ def main():
                         bar_ts=now,
                         symbol=cfg.symbol,
                         magic=_effective_magic,
+                        config=cfg,
                     )
                 except Exception as _diag_exc:  # pragma: no cover — defensive
                     log_warn(

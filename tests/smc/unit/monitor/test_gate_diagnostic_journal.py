@@ -16,6 +16,7 @@ import pytest
 
 from smc.monitor.gate_diagnostic_journal import (
     DEFAULT_JOURNAL_DIR,
+    SCHEMA_VERSION,
     append_gate_diagnostic,
     journal_path_for,
     reset_failure_counter,
@@ -84,6 +85,7 @@ def test_append_writes_one_jsonl_line(tmp_path: Path) -> None:
     assert len(lines) == 1, f"expected 1 line, got {len(lines)}"
 
     record = json.loads(lines[0])
+    assert record["schema_version"] == SCHEMA_VERSION
     assert record["bar_ts"] == "2026-04-25T12:34:00+00:00"
     assert record["symbol"] == "XAUUSD"
     assert record["magic"] == 19760418
@@ -91,6 +93,8 @@ def test_append_writes_one_jsonl_line(tmp_path: Path) -> None:
     assert record["diagnostic"]["final_count"] == 0
     # zone_rejects must survive
     assert record["diagnostic"]["zone_rejects"]["entry_none"] == 3
+    # commit 0 backward-compat: when no config is supplied, no flags key.
+    assert "flags" not in record
 
 
 def test_append_strips_zone_details_to_keep_size_bounded(tmp_path: Path) -> None:
@@ -333,3 +337,189 @@ def test_success_after_failure_resets_counter(
         magic=19760418, journal_dir=tmp_path,
     ) is not None
     assert mod._failure_counter.get(bar_ts.date()) is None
+
+
+# ── R10 P4 calibration commit 0: schema_version=2 + flags ────────────────────
+
+
+class _FakeConfig:
+    """Stand-in for ``SMCConfig`` exposing the R10 flag fields.
+
+    We deliberately use a duck-typed stub instead of importing SMCConfig:
+    keeping the helper config-agnostic means it works against any object
+    exposing the named fields, which is the same Protocol-style flexibility
+    the calibration runner relies on.
+    """
+
+    def __init__(
+        self,
+        *,
+        macro_enabled: bool = False,
+        ai_regime_enabled: bool = False,
+        ai_mode_router_enabled: bool = False,
+        ai_regime_trust_threshold: float = 0.6,
+        range_trend_filter_enabled: bool = False,
+        range_ai_regime_gate_enabled: bool = False,
+        range_require_regime_valid: bool = False,
+        range_reversal_confirm_enabled: bool = False,
+        range_ai_direction_entry_gate_enabled: bool = False,
+        mode_router_trending_dominance_enabled: bool = False,
+        spread_gate_enabled: bool = False,
+        max_concurrent_per_symbol: int = 1,
+        anti_stack_cooldown_minutes: int = 60,
+    ) -> None:
+        self.macro_enabled = macro_enabled
+        self.ai_regime_enabled = ai_regime_enabled
+        self.ai_mode_router_enabled = ai_mode_router_enabled
+        self.ai_regime_trust_threshold = ai_regime_trust_threshold
+        self.range_trend_filter_enabled = range_trend_filter_enabled
+        self.range_ai_regime_gate_enabled = range_ai_regime_gate_enabled
+        self.range_require_regime_valid = range_require_regime_valid
+        self.range_reversal_confirm_enabled = range_reversal_confirm_enabled
+        self.range_ai_direction_entry_gate_enabled = (
+            range_ai_direction_entry_gate_enabled
+        )
+        self.mode_router_trending_dominance_enabled = (
+            mode_router_trending_dominance_enabled
+        )
+        self.spread_gate_enabled = spread_gate_enabled
+        self.max_concurrent_per_symbol = max_concurrent_per_symbol
+        self.anti_stack_cooldown_minutes = anti_stack_cooldown_minutes
+
+
+def test_schema_version_field_present_on_every_record(tmp_path: Path) -> None:
+    """Every persisted record must carry ``schema_version`` for forward-compat.
+
+    Calibration consumers key off this version to migrate gracefully — a
+    record without it would have to be inferred as v1 by absence-of-field,
+    which is brittle.  Make the version explicit in every record.
+    """
+    bar_ts = datetime(2026, 4, 25, tzinfo=timezone.utc)
+    out_path = append_gate_diagnostic(
+        _sample_diagnostic(), bar_ts=bar_ts, symbol="XAUUSD",
+        magic=19760418, journal_dir=tmp_path,
+    )
+    assert out_path is not None
+    record = json.loads(out_path.read_text(encoding="utf-8").splitlines()[0])
+    assert record["schema_version"] == 2
+
+
+def test_flags_omitted_when_no_config_supplied(tmp_path: Path) -> None:
+    """Backward-compat: callers that don't supply ``config`` produce records
+    without a ``flags`` key.  Calibration's ``_extract_flags_from_record``
+    helper treats absence as "use boot-time snapshot fallback."
+    """
+    bar_ts = datetime(2026, 4, 25, tzinfo=timezone.utc)
+    out_path = append_gate_diagnostic(
+        _sample_diagnostic(), bar_ts=bar_ts, symbol="XAUUSD",
+        magic=19760418, journal_dir=tmp_path,
+    )
+    assert out_path is not None
+    record = json.loads(out_path.read_text(encoding="utf-8").splitlines()[0])
+    assert "flags" not in record
+
+
+def test_flags_present_when_config_supplied_treatment(tmp_path: Path) -> None:
+    """When ``config`` is supplied, ``flags`` snapshots all R10 fields."""
+    bar_ts = datetime(2026, 4, 25, tzinfo=timezone.utc)
+    treatment_cfg = _FakeConfig(
+        macro_enabled=True,
+        ai_regime_enabled=True,
+        ai_mode_router_enabled=True,
+        range_trend_filter_enabled=True,
+        range_ai_regime_gate_enabled=True,
+        range_require_regime_valid=True,
+        spread_gate_enabled=True,
+    )
+    out_path = append_gate_diagnostic(
+        _sample_diagnostic(), bar_ts=bar_ts, symbol="XAUUSD",
+        magic=19760428, journal_dir=tmp_path, config=treatment_cfg,
+    )
+    assert out_path is not None
+    record = json.loads(out_path.read_text(encoding="utf-8").splitlines()[0])
+    assert "flags" in record
+    flags = record["flags"]
+    assert flags["macro_enabled"] is True
+    assert flags["ai_regime_enabled"] is True
+    assert flags["ai_mode_router_enabled"] is True
+    assert flags["range_trend_filter_enabled"] is True
+    assert flags["range_ai_regime_gate_enabled"] is True
+    assert flags["spread_gate_enabled"] is True
+    # The non-default-True fields must serialize their actual values, not
+    # be silently coerced.
+    assert flags["max_concurrent_per_symbol"] == 1
+    assert flags["anti_stack_cooldown_minutes"] == 60
+
+
+def test_flags_present_when_config_supplied_control(tmp_path: Path) -> None:
+    """Control-leg config (all flags False) produces a flags dict with False
+    values — the absence of a field would be ambiguous (is it "False" or
+    "missing"?), so we explicitly emit every known field's actual value.
+    """
+    bar_ts = datetime(2026, 4, 25, tzinfo=timezone.utc)
+    control_cfg = _FakeConfig()  # all defaults — all flags False
+    out_path = append_gate_diagnostic(
+        _sample_diagnostic(), bar_ts=bar_ts, symbol="XAUUSD",
+        magic=19760418, journal_dir=tmp_path, config=control_cfg,
+    )
+    assert out_path is not None
+    record = json.loads(out_path.read_text(encoding="utf-8").splitlines()[0])
+    flags = record["flags"]
+    # Every R10 boolean flag is explicitly False (NOT missing).
+    assert flags["macro_enabled"] is False
+    assert flags["ai_regime_enabled"] is False
+    assert flags["range_trend_filter_enabled"] is False
+    assert flags["range_ai_regime_gate_enabled"] is False
+    assert flags["spread_gate_enabled"] is False
+
+
+def test_flags_handle_partial_config_gracefully(tmp_path: Path) -> None:
+    """A config object missing some R10 fields still produces a partial
+    snapshot — missing fields are silently omitted (calibration consumers
+    tolerate partial records since they fall back on the boot-time snapshot
+    for the same arm membership).
+    """
+    bar_ts = datetime(2026, 4, 25, tzinfo=timezone.utc)
+
+    class PartialConfig:
+        # Only exposes 2 of the 13 known fields; rest are missing.
+        macro_enabled = True
+        spread_gate_enabled = True
+
+    out_path = append_gate_diagnostic(
+        _sample_diagnostic(), bar_ts=bar_ts, symbol="XAUUSD",
+        magic=19760428, journal_dir=tmp_path, config=PartialConfig(),
+    )
+    assert out_path is not None
+    record = json.loads(out_path.read_text(encoding="utf-8").splitlines()[0])
+    flags = record["flags"]
+    assert flags == {"macro_enabled": True, "spread_gate_enabled": True}
+    # Fields not on the partial config are not invented out of thin air.
+    assert "ai_regime_enabled" not in flags
+    assert "range_trend_filter_enabled" not in flags
+
+
+def test_serialize_flags_returns_empty_dict_for_none() -> None:
+    """``_serialize_flags(None)`` is a defensive no-op returning an empty dict.
+
+    This is the boundary between "caller wants flags but forgot the config"
+    (would land here) and "caller deliberately omits flags" (skips the
+    helper entirely).  We treat both as benign — the writer never crashes
+    just because the call site forgot to wire SMCConfig in.
+    """
+    from smc.monitor.gate_diagnostic_journal import _serialize_flags
+
+    assert _serialize_flags(None) == {}
+
+
+def test_serialize_flags_pure_does_not_mutate_config() -> None:
+    """``_serialize_flags`` must not mutate the supplied config — the snapshot
+    is read-only.  This is a property test for the pure-function contract.
+    """
+    from smc.monitor.gate_diagnostic_journal import _serialize_flags
+
+    cfg = _FakeConfig(macro_enabled=True, range_trend_filter_enabled=True)
+    snap_before = vars(cfg).copy()
+    _serialize_flags(cfg)
+    snap_after = vars(cfg).copy()
+    assert snap_before == snap_after
