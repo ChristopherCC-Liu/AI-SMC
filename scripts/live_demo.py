@@ -500,11 +500,15 @@ def determine_action(setups, ai_analysis, regime, *,
     # for it (avoids paying the cost when feature is off).
     d1_slope_pct: float | None = None
     if trending_dominance_enabled and d1_df is not None:
+        # Narrow except: only swallow data-shape errors from the polars
+        # to_list() / SMA arithmetic path. ImportError on the regime
+        # classifier should propagate so a broken module is visible, not
+        # silently treated as "no D1 trend confirmed". (defense P2 obs (a).)
+        from smc.ai.regime_classifier import _sma50_direction_and_slope
         try:
-            from smc.ai.regime_classifier import _sma50_direction_and_slope
             d1_closes = d1_df["close"].to_list()
             _, d1_slope_pct = _sma50_direction_and_slope(d1_closes)
-        except Exception:  # pragma: no cover — defensive against bad d1_df
+        except (KeyError, ValueError, IndexError, TypeError):  # pragma: no cover
             d1_slope_pct = None
     mode = route_trading_mode(
         ai_direction=ai_dir,
