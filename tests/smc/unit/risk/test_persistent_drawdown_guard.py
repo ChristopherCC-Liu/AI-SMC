@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -599,3 +600,101 @@ class TestStaleSentinelHardening:
         assert sentinel_path.exists() is True
         guard.check_budget(balance=995.0, daily_pnl=0.0)
         assert sentinel_path.exists() is False
+
+
+# ---------------------------------------------------------------------------
+# V3-B (R10 Adopt #1): IO failure-counter mirror on _save_state
+# ---------------------------------------------------------------------------
+
+
+class TestSaveFailureEscalation:
+    """Mirror of the foundation P1.2 IO failure-counter pattern.
+
+    See ``smc.monitor.gate_diagnostic_journal`` for the source pattern. The
+    discipline: silent fail-closed at the trading-loop boundary, but log
+    WARN on the first 1-2 failures of a UTC day and ERROR on the 3rd to
+    surface persistent disk problems for operator triage.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_save_failure_counter(self):
+        from smc.risk.persistent_drawdown_guard import reset_save_failure_counter
+        reset_save_failure_counter()
+        yield
+        reset_save_failure_counter()
+
+    def test_save_failure_first_warns_below_escalation(
+        self, guard, clock, monkeypatch, caplog
+    ):
+        """1st failure of a UTC day logs WARNING (not ERROR) with traceback."""
+        import logging as _logging
+        import smc.risk.persistent_drawdown_guard as mod
+
+        def boom(self, *args, **kwargs):
+            raise OSError("simulated disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with caplog.at_level(_logging.WARNING, logger="smc.risk.persistent_drawdown_guard"):
+            # update() calls _save_state() — the IO failure must NOT raise.
+            guard.update(1000.0)
+        records = [
+            r for r in caplog.records
+            if "persistent_dd_save_failed" in r.getMessage()
+        ]
+        assert len(records) == 1, f"expected 1 record, got {len(records)}"
+        assert records[0].levelno == _logging.WARNING
+        assert records[0].exc_info is not None
+        assert records[0].exc_info[0] is OSError
+        assert mod._save_failure_counter[clock().date()] == 1
+
+    def test_save_failure_third_escalates_to_error(
+        self, guard, clock, monkeypatch, caplog
+    ):
+        """Three consecutive failures on the same UTC day → 3rd one logs ERROR."""
+        import logging as _logging
+
+        def boom(self, *args, **kwargs):
+            raise OSError("simulated disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with caplog.at_level(_logging.WARNING, logger="smc.risk.persistent_drawdown_guard"):
+            for balance in (1000.0, 1010.0, 1020.0):
+                guard.update(balance)
+        levels = [
+            r.levelno for r in caplog.records
+            if "persistent_dd_save_failed" in r.getMessage()
+        ]
+        assert levels == [_logging.WARNING, _logging.WARNING, _logging.ERROR], (
+            f"unexpected escalation pattern: {levels}"
+        )
+
+    def test_save_success_after_failure_resets_counter(
+        self, guard, clock, monkeypatch
+    ):
+        """Successful write clears the per-day counter so a future hiccup
+        is again a fresh WARNING (not still escalated).
+
+        Uses ``monkeypatch.setattr`` so the patch is rolled back on test
+        completion / interruption — manual try/finally would leak the patch
+        across the rest of the session under SIGINT / OOM (this exact lesson
+        is captured in foundation's P1.2 test_success_after_failure_resets_counter).
+        """
+        import smc.risk.persistent_drawdown_guard as mod
+
+        real_write_text = Path.write_text
+        fail_count = {"n": 0}
+
+        def flaky(self, *args, **kwargs):
+            if fail_count["n"] < 2:
+                fail_count["n"] += 1
+                raise OSError("simulated disk hiccup")
+            return real_write_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", flaky)
+        guard.update(1000.0)
+        guard.update(1010.0)
+        assert mod._save_failure_counter[clock().date()] == 2
+        # Restore real write_text via monkeypatch so the next save succeeds.
+        monkeypatch.setattr(Path, "write_text", real_write_text)
+        guard.update(1020.0)
+        assert clock().date() not in mod._save_failure_counter

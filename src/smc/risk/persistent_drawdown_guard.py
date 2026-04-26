@@ -53,14 +53,59 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, dataclass, field, replace
+from datetime import date as _date
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from smc.risk.drawdown_guard import DrawdownGuard
 from smc.risk.types import RiskBudget
 
 _logger = logging.getLogger(__name__)
+
+# V3-B (R10 Adopt #1): mirror foundation's IO failure counter pattern from
+# `smc.monitor.gate_diagnostic_journal._failure_counter`. The original
+# ``_save_state`` was silent-fail on disk-full / readonly filesystem; this
+# layer escalates persistent IO trouble from WARNING (transient) to ERROR
+# (operator-actionable) at the third failure on the same UTC day. Same shape
+# as the foundation pattern so a future reader recognises both.
+#
+# No threading.Lock() — PersistentDrawdownGuard runs single-threaded per leg
+# (one process per arm). Foundation's gate_diagnostic_journal pattern uses
+# a Lock because its write path could race in a multi-thread context; here
+# that constraint doesn't apply. Mirror in shape, simplify by scope.
+_SAVE_FAIL_ESCALATE_AFTER = 3
+_save_failure_counter: dict[_date, int] = {}
+
+
+def reset_save_failure_counter() -> None:
+    """Clear the per-UTC-day save failure counter — exposed for tests."""
+    _save_failure_counter.clear()
+
+
+def _record_save_failure(day: _date, exc: BaseException, **fields: Any) -> None:
+    """Increment failure count for ``day`` and log warn / error accordingly."""
+    _save_failure_counter[day] = _save_failure_counter.get(day, 0) + 1
+    count = _save_failure_counter[day]
+    log_fn = _logger.error if count >= _SAVE_FAIL_ESCALATE_AFTER else _logger.warning
+    log_fn(
+        "persistent_dd_save_failed (%d/%d) — disk full or readonly?",
+        count,
+        _SAVE_FAIL_ESCALATE_AFTER,
+        extra={
+            "event": "persistent_dd_save_failed",
+            "failure_count": count,
+            "utc_date": str(day),
+            **fields,
+        },
+        exc_info=exc,
+    )
+
+
+def _record_save_success(day: _date) -> None:
+    """Reset the failure counter for ``day`` after a successful write."""
+    _save_failure_counter.pop(day, None)
+
 
 __all__ = [
     "PersistentDrawdownGuard",
@@ -70,6 +115,7 @@ __all__ = [
     "ALARM_RATIO",
     "CLIFF_RATIO",
     "AUTO_RESUME_HOURS",
+    "reset_save_failure_counter",
 ]
 
 
@@ -233,20 +279,30 @@ class PersistentDrawdownGuard:
         )
 
     def _save_state(self) -> None:
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "all_time_peak": self._state.all_time_peak,
-            "weekly_balances": [
-                list(entry) for entry in self._state.weekly_balances
-            ],
-            "manual_halt_active": self._state.manual_halt_active,
-            "last_halt_at": self._state.last_halt_at,
-            "last_updated": self._state.last_updated,
-            "manual_halt_history": [
-                asdict(ev) for ev in self._state.manual_halt_history
-            ],
-        }
-        self._state_path.write_text(json.dumps(payload, indent=2))
+        # V3-B: wrap the IO write in a fail-closed escalation counter
+        # (mirrors smc.monitor.gate_diagnostic_journal pattern). The
+        # trading loop never crashes on disk-full / readonly fs; the
+        # third consecutive failure on a UTC day promotes to ERROR.
+        day = self._clock().date()
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "all_time_peak": self._state.all_time_peak,
+                "weekly_balances": [
+                    list(entry) for entry in self._state.weekly_balances
+                ],
+                "manual_halt_active": self._state.manual_halt_active,
+                "last_halt_at": self._state.last_halt_at,
+                "last_updated": self._state.last_updated,
+                "manual_halt_history": [
+                    asdict(ev) for ev in self._state.manual_halt_history
+                ],
+            }
+            self._state_path.write_text(json.dumps(payload, indent=2))
+        except Exception as exc:
+            _record_save_failure(day, exc, path=str(self._state_path))
+            return
+        _record_save_success(day)
 
     # ------------------------------------------------------------------
     # Public API
