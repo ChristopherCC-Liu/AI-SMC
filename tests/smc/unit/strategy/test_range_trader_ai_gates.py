@@ -538,3 +538,142 @@ class TestP0CRegimeInvalidatesRange:
         assert diag["range_invalidated_by_regime"] is None
         assert diag["ai_regime_label"] == "TREND_UP"
         assert diag["ai_regime_confidence"] == pytest.approx(0.9)
+
+
+# ---------------------------------------------------------------------------
+# R10 P2.2: ai_direction entry veto
+#
+# RangeTrader._build_setup gains a per-setup veto that rejects entries when
+# the DirectionEngine's ai_direction confidently opposes the setup direction.
+# Gated behind ``ai_direction_entry_gate_enabled=True`` (default OFF).
+# Confidence floor 0.55 — tagged ``_PHASE2_CALIBRATION_PENDING`` until the
+# live-bake gate_funnel.json validates the threshold.
+# ---------------------------------------------------------------------------
+
+
+class TestR10P22AIDirectionEntryGate:
+    """Veto range setups that confidently oppose the AI direction signal."""
+
+    def _trader(self, tmp_path: Path, *, enabled: bool) -> RangeTrader:
+        return RangeTrader(
+            min_range_width=300,
+            max_range_width=3000,
+            cooldown_state_path=tmp_path / "cd.json",
+            ai_direction_entry_gate_enabled=enabled,
+        )
+
+    def _bounds(self, trader: RangeTrader) -> object:
+        return trader.detect_range(_empty_h1_df(), _h1_obs_snapshot())
+
+    def test_gate_disabled_no_veto(self, tmp_path: Path) -> None:
+        """Backward compat: flag OFF → opposing ai_direction never blocks."""
+        trader = self._trader(tmp_path, enabled=False)
+        bounds = self._bounds(trader)
+        assert bounds is not None
+        # bullish AI vs short setup — should NOT block when flag OFF.
+        setups = trader.generate_range_setups(
+            _h1_obs_snapshot(),
+            _m15_choch("short", 2369.0),
+            current_price=2369.5,
+            bounds=bounds,
+            h1_atr=2.0,
+            ai_direction="bullish",
+            ai_direction_confidence=0.80,
+        )
+        # Flag-off → at least the short_setup should build (matches prior P0-A
+        # baseline; we're only asserting the veto did not fire).
+        diag = trader._last_setups_diagnostic
+        assert "short_ai_direction_blocked" not in diag
+
+    def test_no_ai_direction_no_veto(self, tmp_path: Path) -> None:
+        """ai_direction=None → veto cannot fire (back-compat)."""
+        trader = self._trader(tmp_path, enabled=True)
+        bounds = self._bounds(trader)
+        assert bounds is not None
+        trader.generate_range_setups(
+            _h1_obs_snapshot(),
+            _m15_choch("short", 2369.0),
+            current_price=2369.5,
+            bounds=bounds,
+            h1_atr=2.0,
+            ai_direction=None,
+            ai_direction_confidence=0.0,
+        )
+        diag = trader._last_setups_diagnostic
+        assert "short_ai_direction_blocked" not in diag
+        assert "long_ai_direction_blocked" not in diag
+
+    def test_bullish_ai_blocks_short_setup(self, tmp_path: Path) -> None:
+        """bullish 0.6 + short setup → blocked, diagnostic key written."""
+        trader = self._trader(tmp_path, enabled=True)
+        bounds = self._bounds(trader)
+        assert bounds is not None
+        setups = trader.generate_range_setups(
+            _h1_obs_snapshot(),
+            _m15_choch("short", 2369.0),
+            current_price=2369.5,
+            bounds=bounds,
+            h1_atr=2.0,
+            ai_direction="bullish",
+            ai_direction_confidence=0.60,
+        )
+        # Short setup must be vetoed.
+        assert all(s.direction != "short" for s in setups)
+        diag = trader._last_setups_diagnostic
+        assert "short_ai_direction_blocked" in diag
+        assert "bullish" in diag["short_ai_direction_blocked"]
+        assert "0.60" in diag["short_ai_direction_blocked"]
+
+    def test_bearish_ai_blocks_long_setup(self, tmp_path: Path) -> None:
+        """bearish 0.65 + long setup → blocked, diagnostic key written."""
+        trader = self._trader(tmp_path, enabled=True)
+        bounds = self._bounds(trader)
+        assert bounds is not None
+        setups = trader.generate_range_setups(
+            _h1_obs_snapshot(),
+            _m15_choch("long", 2349.0),
+            current_price=2349.5,
+            bounds=bounds,
+            h1_atr=2.0,
+            ai_direction="bearish",
+            ai_direction_confidence=0.65,
+        )
+        assert all(s.direction != "long" for s in setups)
+        diag = trader._last_setups_diagnostic
+        assert "long_ai_direction_blocked" in diag
+        assert "bearish" in diag["long_ai_direction_blocked"]
+
+    def test_below_floor_no_veto(self, tmp_path: Path) -> None:
+        """bullish 0.50 (below 0.55 floor) vs short → veto does NOT fire."""
+        trader = self._trader(tmp_path, enabled=True)
+        bounds = self._bounds(trader)
+        assert bounds is not None
+        trader.generate_range_setups(
+            _h1_obs_snapshot(),
+            _m15_choch("short", 2369.0),
+            current_price=2369.5,
+            bounds=bounds,
+            h1_atr=2.0,
+            ai_direction="bullish",
+            ai_direction_confidence=0.50,
+        )
+        diag = trader._last_setups_diagnostic
+        assert "short_ai_direction_blocked" not in diag
+
+    def test_neutral_ai_no_veto(self, tmp_path: Path) -> None:
+        """neutral direction never opposes — no veto regardless of confidence."""
+        trader = self._trader(tmp_path, enabled=True)
+        bounds = self._bounds(trader)
+        assert bounds is not None
+        trader.generate_range_setups(
+            _h1_obs_snapshot(),
+            _m15_choch("short", 2369.0),
+            current_price=2369.5,
+            bounds=bounds,
+            h1_atr=2.0,
+            ai_direction="neutral",
+            ai_direction_confidence=0.95,
+        )
+        diag = trader._last_setups_diagnostic
+        assert "short_ai_direction_blocked" not in diag
+        assert "long_ai_direction_blocked" not in diag
