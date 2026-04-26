@@ -85,6 +85,9 @@ class SMCConfig(BaseSettings):
         "range_trend_filter_enabled",
         "range_ai_regime_gate_enabled",
         "range_require_regime_valid",
+        "mode_router_trending_dominance_enabled",
+        "range_ai_direction_entry_gate_enabled",
+        "spread_gate_enabled",
         mode="before",
     )
     @classmethod
@@ -360,6 +363,40 @@ class SMCConfig(BaseSettings):
             "range_trader should not operate. Default False preserves "
             "current production behavior. Toggle via "
             "SMC_RANGE_REQUIRE_REGIME_VALID."
+        ),
+    )
+    mode_router_trending_dominance_enabled: bool = Field(
+        default=False,
+        description=(
+            "R10 P2.1: when True, mode_router (a) lowers Priority-1 "
+            "directional floor 0.45→0.30 when D1 SMA50 |slope| >= 0.05%/bar, "
+            "and (b) demotes ranging→trending when D1 slope is confirmed AND "
+            "ai_regime_assessment in (TREND_UP/TREND_DOWN/ATH_BREAKOUT) with "
+            "confidence >= 0.6. Default False preserves R9 behavior. Toggle "
+            "via SMC_MODE_ROUTER_TRENDING_DOMINANCE_ENABLED post-bake once "
+            "gate_funnel.json validates the Phase-2 calibration."
+        ),
+    )
+    range_ai_direction_entry_gate_enabled: bool = Field(
+        default=False,
+        description=(
+            "R10 P2.2: when True, RangeTrader._build_setup vetoes a setup "
+            "when the DirectionEngine's ai_direction confidently opposes it "
+            "(confidence >= 0.55 AND opposite-direction). Default False "
+            "preserves R9 behavior. Toggle via "
+            "SMC_RANGE_AI_DIRECTION_ENTRY_GATE_ENABLED post-bake."
+        ),
+    )
+    spread_gate_enabled: bool = Field(
+        default=False,
+        description=(
+            "R10 P3.2: when True, live_demo blocks new opens whenever the "
+            "live tick spread is >= 1.5x the rolling 20-bar median of the "
+            "M15 bar spreads. Catches news spikes / illiquid windows. "
+            "Default False — staged rollout: control leg keeps OFF while "
+            "treatment leg flips ON via start_live_macro.bat once Phase 3 "
+            "bake validates no false-blocks. Toggle via "
+            "SMC_SPREAD_GATE_ENABLED."
         ),
     )
     # ------------------------------------------------------------------

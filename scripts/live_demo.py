@@ -169,6 +169,12 @@ from smc.execution.mt5_positions_adapter import (
 from smc.risk.consec_loss_halt import ConsecLossHalt
 from smc.risk.drawdown_guard import DrawdownGuard
 from smc.risk.persistent_drawdown_guard import PersistentDrawdownGuard
+from smc.risk.spread_gate import (
+    DEFAULT_BASELINE_WINDOW as SPREAD_BASELINE_WINDOW,
+    DEFAULT_THRESHOLD_MULTIPLIER as SPREAD_THRESHOLD_MULT,
+    check_spread_gate,
+    compute_spread_baseline,
+)
 from smc.risk.margin_cap import check_margin_cap
 from smc.risk.live_position_sizer import compute_live_position_size
 # Round 4 Alt-B W2: macro overlay (COT / TIPS / DXY)
@@ -388,7 +394,8 @@ def _determine_v1_passthrough(setups, session):
 def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
                        range_trader, breakout_detector, session="", h1_df=None,
                        htf_bias=None, cfg=None, m15_df=None,
-                       d1_df=None, ai_regime_assessment=None):
+                       d1_df=None, ai_regime_assessment=None,
+                       ai_direction=None, ai_direction_confidence=0.0):
     """Ranging mode: breakout guard + mean-reversion setups at range boundaries.
 
     Returns (action, reason, best_setup). Round 4.6-F: session kwarg so
@@ -399,6 +406,8 @@ def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
     setups that oppose a confident HTF bias (confidence >= 0.5).
     Round 9 P0-A/B: d1_df enables the D1 SMA50 trend filter and
     ai_regime_assessment enables per-direction regime gates (both default OFF).
+    R10 P2.2: ai_direction + ai_direction_confidence pipe through to the
+    DirectionEngine entry veto in _build_setup (gate default OFF).
     """
     # Breakout invalidation — if price breaks the range, hold and wait
     breakout = breakout_detector.check_breakout(price, range_bounds, h1_atr)
@@ -411,6 +420,8 @@ def _determine_ranging(price, range_bounds, h1_snapshot, m15_snapshot, h1_atr,
         m15_df=m15_df,
         d1_df=d1_df,
         ai_regime_assessment=ai_regime_assessment,
+        ai_direction=ai_direction,
+        ai_direction_confidence=ai_direction_confidence,
     )
 
     # Round 4.6-K: setup-level guards (RR>=1.2, touches>=2) enforcement.
@@ -444,7 +455,8 @@ def determine_action(setups, ai_analysis, regime, *,
                      htf_bias=None, cfg=None, m15_df=None, d1_df=None,
                      ai_regime_assessment=None,
                      ai_mode_router_enabled: bool = False,
-                     ai_regime_trust_threshold: float = 0.6):
+                     ai_regime_trust_threshold: float = 0.6,
+                     trending_dominance_enabled: bool = False):
     """Dual-mode action router: trending (v1 5-gate) or ranging (mean-reversion).
 
     Always detects range for display. Mode router decides which path runs.
@@ -482,6 +494,18 @@ def determine_action(setups, ai_analysis, regime, *,
 
     # Route trading mode — Round 7 P0-1: gate AI regime override at caller
     effective_assessment = ai_regime_assessment if ai_mode_router_enabled else None
+    # R10 P2.1: thread D1 SMA50 slope when the trending-dominance flag is on,
+    # so route_trading_mode can adapt the Priority-1 floor and run the
+    # ranging→trending demote. We only compute the slope when the gate asks
+    # for it (avoids paying the cost when feature is off).
+    d1_slope_pct: float | None = None
+    if trending_dominance_enabled and d1_df is not None:
+        try:
+            from smc.ai.regime_classifier import _sma50_direction_and_slope
+            d1_closes = d1_df["close"].to_list()
+            _, d1_slope_pct = _sma50_direction_and_slope(d1_closes)
+        except Exception:  # pragma: no cover — defensive against bad d1_df
+            d1_slope_pct = None
     mode = route_trading_mode(
         ai_direction=ai_dir,
         ai_confidence=effective_conf,
@@ -493,6 +517,8 @@ def determine_action(setups, ai_analysis, regime, *,
         cfg=cfg,
         ai_regime_assessment=effective_assessment,
         ai_regime_trust_threshold=ai_regime_trust_threshold,
+        d1_sma50_slope_pct=d1_slope_pct,
+        trending_dominance_enabled=trending_dominance_enabled,
     )
 
     # Round 7 P0-1 telemetry: the router cannot distinguish "gate off" from
@@ -524,6 +550,7 @@ def determine_action(setups, ai_analysis, regime, *,
             range_trader, breakout_detector, session=session, h1_df=h1_df,
             htf_bias=htf_bias, cfg=cfg, m15_df=m15_df,
             d1_df=d1_df, ai_regime_assessment=ai_regime_assessment,
+            ai_direction=ai_dir, ai_direction_confidence=ai_conf,
         )
         return action, reason, best, mode
 
@@ -918,6 +945,8 @@ def main():
         trend_filter_enabled=_path_cfg.range_trend_filter_enabled,
         ai_regime_gate_enabled=_path_cfg.range_ai_regime_gate_enabled,
         require_regime_valid=_path_cfg.range_require_regime_valid,
+        # R10 P2.2: ai_direction entry-veto gate (default OFF).
+        ai_direction_entry_gate_enabled=_path_cfg.range_ai_direction_entry_gate_enabled,
     )
     breakout_det = BreakoutDetector()
 
@@ -947,13 +976,18 @@ def main():
     phase1a_breaker = Phase1aCircuitBreaker(
         state_path=PHASE1A_BREAKER_PATH,
     )
-    # Round 5 T1 F3: consecutive-loss halt (3 losses in a row → halt rest of
-    # UTC day; WIN resets streak). DrawdownGuard is a %-based backstop.
+    # Round 5 T1 F3 / Round 10 P3.2: rolling 3-in-6 loss halt (no daily
+    # reset). 3 losses inside the most recent 6 trades trip the halt;
+    # operator must reset() OR wait for wins to evict losses out of the
+    # window. R10 P3.2 removed the pre-R10 daily-UTC reset because midnight
+    # was masking losing regimes (operators saw fresh streaks at 00:00
+    # UTC even when the underlying market hadn't recovered).
     # audit-r3 R4: consec_limit from cfg.consec_loss_limit (per-symbol).
-    # XAU=3, BTC=3 today but interface open for future per-instrument tuning.
+    # window_size=6 default per R10 P3.2 spec.
     consec_halt = ConsecLossHalt(
         state_path=CONSEC_LOSS_PATH,
         consec_limit=cfg.consec_loss_limit,
+        window_size=cfg.consec_loss_window_size,
     )
     # Round 10 P1.1: persistent multi-day DD guard wraps the stateless
     # DrawdownGuard with monotonic all-time peak + 5-day rolling weekly peak.
@@ -1148,6 +1182,78 @@ def main():
             bars_info = ", ".join(f"{k}: {len(v)}" for k, v in data.items())
             print(f"  Data: {{{bars_info}}}")
 
+            # Round 10 P3.2: spread gate (default OFF). Block new opens
+            # when live spread is >= 1.5x the rolling-window median of M15
+            # bar spreads. Bootstrap path (baseline=None when fewer than
+            # 20 samples) passes through. Catches news spikes / illiquid
+            # windows where the broker's quote balloons.
+            #
+            # Default OFF for staged rollout: control leg keeps the gate
+            # off while treatment leg (start_live_macro.bat) flips it ON
+            # after Phase 3 bake validates no false-blocks. Toggle via
+            # SMCConfig.spread_gate_enabled (env: SMC_SPREAD_GATE_ENABLED,
+            # lenient bool: "true"/"1"/"yes").
+            #
+            # Position in the cycle: cycle-distal entry gate AFTER tick +
+            # data fetch (we need the M15 spread history for the baseline)
+            # but BEFORE aggregator + sizer work. Other halts (drawdown,
+            # consec_loss, asian_quota) trump this — they ran upstream at
+            # line 1027-1095 and would have triggered `continue` already.
+            if _path_cfg.spread_gate_enabled:
+                _spread_baseline: float | None = None
+                try:
+                    _m15_df = data.get(Timeframe.M15)
+                    if _m15_df is not None and "spread" in _m15_df.columns:
+                        _spread_history = [
+                            float(s) for s in _m15_df["spread"].to_list()
+                        ]
+                        _spread_baseline = compute_spread_baseline(
+                            _spread_history, window=SPREAD_BASELINE_WINDOW
+                        )
+                except Exception:
+                    _spread_baseline = None
+                _spread_decision = check_spread_gate(
+                    current_spread=float(spread),
+                    baseline=_spread_baseline,
+                    multiplier=SPREAD_THRESHOLD_MULT,
+                )
+                if not _spread_decision.can_open:
+                    log_warn(
+                        "spread_gate_block",
+                        cycle=cycle,
+                        current_spread=round(_spread_decision.current_spread, 2),
+                        baseline=(
+                            round(_spread_decision.baseline_median, 2)
+                            if _spread_decision.baseline_median is not None
+                            else None
+                        ),
+                        multiplier=_spread_decision.threshold_multiplier,
+                        reason=_spread_decision.rejection_reason,
+                    )
+                    print(f"  [SKIP] spread gate: {_spread_decision.rejection_reason}")
+                    try:
+                        save_state(
+                            cycle=cycle,
+                            price=price,
+                            action="HOLD",
+                            reason=f"[SKIP] spread gate: {_spread_decision.rejection_reason}",
+                            ai_analysis={},
+                            regime="unknown",
+                            setups=(),
+                            best_setup=None,
+                            mode_decision=None,
+                            range_trader=None,
+                            aggregator=None,
+                            blocked_reason=f"spread_gate:{_spread_decision.rejection_reason}",
+                            cfg=cfg,
+                            balance_usd=None,
+                            risk_pct=1.0,
+                            position_size_lots=0.0,
+                        )
+                    except Exception as _spread_save_exc:
+                        log_warn("spread_gate_save_state_fail", exc=str(_spread_save_exc)[:120])
+                    continue
+
             # Round 5 stability R2: emit one health_probe per cycle for the
             # daily SLA digest + ops dashboard P&L card.  A single fresh
             # mt5.account_info() call gives balance/equity/floating — we
@@ -1305,6 +1411,7 @@ def main():
                 ai_regime_assessment=getattr(aggregator, "_last_ai_assessment", None),
                 ai_mode_router_enabled=_path_cfg.ai_mode_router_enabled,
                 ai_regime_trust_threshold=_path_cfg.ai_regime_trust_threshold,
+                trending_dominance_enabled=_path_cfg.mode_router_trending_dominance_enabled,
             )
             # Round 5 T0 (P0-2b): quota record_open moved *after* successful
             # order_send below (inside LIVE_EXEC branch). MT5 failures no longer
