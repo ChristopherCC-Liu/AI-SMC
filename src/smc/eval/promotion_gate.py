@@ -19,7 +19,7 @@ machines and across pytest runs.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -88,6 +88,23 @@ def _profit_factor(pnl: Sequence[float]) -> float:
     return wins / losses
 
 
+def _profit_factor_arr(arr: np.ndarray) -> float:
+    """Vectorised PF for a numpy array — used inside the bootstrap hot loop.
+
+    Equivalent to :func:`_profit_factor` but skips the per-iteration
+    Python loop + ``list()`` conversion. ~5-10x speedup at n_iter=10_000
+    for n=300 trades, materially better on larger arms (R10 P4.2 N1
+    review by defense-impl-lead).
+    """
+    if arr.size == 0:
+        return 0.0
+    wins = float(arr[arr > 0].sum())
+    losses = float(abs(arr[arr < 0].sum()))
+    if losses == 0.0:
+        return float("inf") if wins > 0 else 0.0
+    return wins / losses
+
+
 def _win_rate(pnl: Sequence[float]) -> float:
     if not pnl:
         return 0.0
@@ -137,8 +154,8 @@ def bootstrap_pf_diff_ci(
     for i in range(n_iter):
         b_resample = base_arr[rng.integers(0, n_b, size=n_b)]
         t_resample = treat_arr[rng.integers(0, n_t, size=n_t)]
-        pf_b = _profit_factor(list(b_resample))
-        pf_t = _profit_factor(list(t_resample))
+        pf_b = _profit_factor_arr(b_resample)
+        pf_t = _profit_factor_arr(t_resample)
         if not np.isfinite(pf_b) or not np.isfinite(pf_t):
             diffs[i] = np.nan
         else:
@@ -188,8 +205,8 @@ def chi_square_winrate(
 
 
 def evaluate_promotion(
-    baseline_trades: Iterable[TradeLike],
-    treatment_trades: Iterable[TradeLike],
+    baseline_trades: Sequence[TradeLike],
+    treatment_trades: Sequence[TradeLike],
     *,
     min_n: int = 30,
     confidence: float = 0.95,
@@ -205,6 +222,11 @@ def evaluate_promotion(
 
     Verdict's ``rationale`` is plain ASCII so VPS Windows console
     encodes it without surprises.
+
+    The trade arguments are typed as ``Sequence[TradeLike]`` rather than
+    ``Iterable`` (R10 P4.2 N2 review by defense-impl-lead): forces the
+    caller to materialize, preventing silent generator-exhaustion bugs
+    if a user calls ``evaluate_promotion`` twice with the same generator.
     """
     baseline_pnl = [float(t.pnl_usd) for t in baseline_trades]
     treatment_pnl = [float(t.pnl_usd) for t in treatment_trades]
