@@ -426,7 +426,11 @@ def test_generator_does_not_create_approved_or_pointer(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_generator_does_not_import_live_runtime_modules() -> None:
+def test_generator_does_not_import_rule_engine() -> None:
+    """rule_engine stays red-line. decision_server is Tier-1
+    unsealed for the generator's baseline lookup; phase_d_walk_forward
+    constants remain referenceable as documentation strings only —
+    actual imports are tested by test_regression_guard's whitelist."""
     src = (
         _REPO / "src" / "smc" / "hedgerock" / "evolution"
         / "candidate_generator.py"
@@ -434,16 +438,32 @@ def test_generator_does_not_import_live_runtime_modules() -> None:
 
     forbidden_imports = (
         "from smc.hedgerock.rule_engine",
-        "from smc.hedgerock.decision_server",
-        "from smc.hedgerock.phase_d_walk_forward",
         "import smc.hedgerock.rule_engine",
-        "import smc.hedgerock.decision_server",
-        "import smc.hedgerock.phase_d_walk_forward",
     )
     for fragment in forbidden_imports:
         assert fragment not in src, (
-            f"candidate_generator imports a live runtime module: "
-            f"{fragment!r}"
+            f"candidate_generator imports rule_engine "
+            f"(red-line): {fragment!r}"
+        )
+
+
+@pytest.mark.unit
+def test_generator_uses_only_read_only_decision_server_surface() -> None:
+    """The Tier-1 unseal lets the generator import decision_server
+    but only call its read-only getter."""
+    src = (
+        _REPO / "src" / "smc" / "hedgerock" / "evolution"
+        / "candidate_generator.py"
+    ).read_text(encoding="utf-8")
+    import re as _re
+    allowed = {"decision_server.get_live_parameters"}
+    for m in _re.finditer(
+        r"\bdecision_server\.[A-Za-z_][A-Za-z0-9_]*", src,
+    ):
+        token = m.group(0)
+        assert token in allowed, (
+            f"candidate_generator accessed non-public "
+            f"decision_server symbol: {token}"
         )
 
 

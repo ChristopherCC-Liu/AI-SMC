@@ -122,10 +122,17 @@ Before you forward the report to a human approver:
 - The CLI does not run the EA, the strategy server, or the decision
   server. It only reads Phase D markdown artefacts and writes its own
   report + candidate manifests.
-- The CLI does not invoke any code under `src/smc/hedgerock/rule_engine.py`,
-  `decision_server.py`, or `phase_d_walk_forward.py`. T4-F3 tests assert
-  this isolation via `_real_registry_json_count()` invariants and the
-  module-level boundary tests in
+- The CLI does not invoke any code under `src/smc/hedgerock/rule_engine.py`.
+  As of Tier-1 unseal v0.7.0, `decision_server.py` and
+  `phase_d_walk_forward.py` are imported **read-only** from
+  `replay_validator.py` and `candidate_generator.py` only — the
+  whitelist is pinned by
+  `tests/hedgerock/evolution/test_regression_guard.py`. The
+  CLI itself routes live-parameter access through
+  `candidate_generator.get_live_parameter_snapshot()` rather than
+  importing `decision_server` directly. T4-F3 tests assert the
+  registry-write isolation via `_real_registry_json_count()`
+  invariants and the module-level boundary tests in
   `tests/hedgerock/evolution/test_artefact_registry_append_only.py`.
 
 ## Test enforcement

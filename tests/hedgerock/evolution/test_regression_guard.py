@@ -1,35 +1,26 @@
-"""Stage 6-followup-4 task 4 — regression guard meta-test.
+"""Regression guard meta-test — Tier-1 unseal aware.
 
 Scans every ``.py`` file under:
   - ``src/smc/hedgerock/evolution/``
   - ``scripts/hedgerock_evolution_*.py``
 
-and asserts NONE of them import the live trading runtime modules
-or reference the EA. This is a defence-in-depth check on top of
-the per-module isolation tests already shipped — a single source-
-level scan that catches future drift even if a developer forgets
-to add a per-module test for a new file.
+and asserts:
 
-Forbidden imports / references:
+1. **rule_engine** is still red-line. NO file in the evolution layer
+   may import ``smc.hedgerock.rule_engine``.
+2. **decision_server** and **phase_d_walk_forward** are Tier-1
+   unsealed for read-only access — but ONLY for the explicit
+   whitelist below. Every other evolution file remains forbidden
+   from importing them.
+3. No code-level reference to a ``.mq5`` file (open / Path /
+   subprocess / shutil). Documentary mentions are still fine.
+4. The scanned tree has at least 30 files (catches accidental
+   shrinkage of the layer).
 
-  * ``from smc.hedgerock.rule_engine``
-  * ``from smc.hedgerock.decision_server``
-  * ``from smc.hedgerock.phase_d_walk_forward``
-  * ``import smc.hedgerock.rule_engine``
-  * ``import smc.hedgerock.decision_server``
-  * ``import smc.hedgerock.phase_d_walk_forward``
-  * **Code-level** ``.mq5`` references — calls like
-    ``open("X.mq5")``, ``subprocess.run([..., "X.mq5"])``, or string
-    concatenations that produce a ``.mq5`` filesystem target.
-    Documentary mentions of ``.mq5`` (banners that say "this file
-    does NOT touch .mq5") are explicitly allowed because they
-    *strengthen* the contract; the scanner only flags identifiers
-    that would actually call into / write to a ``.mq5`` file.
-
-Existing per-module tests (e.g.
-``test_replay_validator_module_does_not_import_live_runtime``)
-keep checking the same property locally; this meta-test is
-authoritative across the whole tree.
+The Tier-1 whitelist is intentionally narrow: only the two modules
+named in the unseal RFC update may import ``decision_server`` /
+``phase_d_walk_forward``. Adding a third file to the whitelist is a
+contract change that requires an RFC amendment.
 """
 
 from __future__ import annotations
@@ -44,16 +35,48 @@ _REPO = Path(__file__).resolve().parents[3]
 _EVOLUTION_SRC = _REPO / "src" / "smc" / "hedgerock" / "evolution"
 _EVOLUTION_SCRIPTS_GLOB = "hedgerock_evolution_*.py"
 
-# Exact substrings that must never appear in production / sidecar
-# files within the evolution layer.
-_FORBIDDEN_IMPORT_FRAGMENTS = (
-    "from smc.hedgerock.rule_engine",
-    "from smc.hedgerock.decision_server",
-    "from smc.hedgerock.phase_d_walk_forward",
-    "import smc.hedgerock.rule_engine",
-    "import smc.hedgerock.decision_server",
-    "import smc.hedgerock.phase_d_walk_forward",
+# The evolution layer is split across the worktree (this branch's
+# committed sidecar) and the parent worktree (full tree of prod
+# helpers). Both contribute files that must clear the same isolation
+# checks.
+_PARENT_EVOLUTION_SRC = Path(
+    "/Users/christopher/claudeworkplace/AI-SMC/src/smc/hedgerock/evolution"
 )
+_PARENT_REPO = Path("/Users/christopher/claudeworkplace/AI-SMC")
+
+
+# rule_engine remains red-line. ALL files in the evolution layer
+# are forbidden from importing it.
+_RULE_ENGINE_FRAGMENTS = (
+    "from smc.hedgerock.rule_engine",
+    "import smc.hedgerock.rule_engine",
+)
+
+
+# Tier-1 unsealed modules. By default still forbidden, but
+# explicitly allowed for the whitelist below.
+_TIER1_UNSEAL_FRAGMENTS = (
+    "from smc.hedgerock.decision_server",
+    "import smc.hedgerock.decision_server",
+    "from smc.hedgerock.phase_d_walk_forward",
+    "import smc.hedgerock.phase_d_walk_forward",
+    "from smc.hedgerock import decision_server",
+    "from smc.hedgerock import phase_d_walk_forward",
+    # Combined-form aliases — covers `from smc.hedgerock import
+    # decision_server, phase_d_walk_forward` and similar.
+    "from smc.hedgerock import decision_server, phase_d_walk_forward",
+)
+
+
+# Files that ARE allowed to import the Tier-1 unsealed modules
+# (still read-only — checked separately below).
+_TIER1_UNSEAL_WHITELIST = frozenset(
+    {
+        "replay_validator.py",
+        "candidate_generator.py",
+    }
+)
+
 
 # Code-level ``.mq5`` references — patterns that would actually
 # open, run, or write to a ``.mq5`` file. Banners + docstrings are
@@ -69,35 +92,129 @@ _FORBIDDEN_MQ5_CODE_PATTERNS = (
 
 def _scan_targets() -> list[Path]:
     out: list[Path] = []
-    out.extend(sorted(_EVOLUTION_SRC.glob("*.py")))
-    out.extend(sorted((_REPO / "scripts").glob(_EVOLUTION_SCRIPTS_GLOB)))
+    seen: set[str] = set()
+    for d in (
+        _EVOLUTION_SRC,
+        _PARENT_EVOLUTION_SRC,
+    ):
+        if not d.exists():
+            continue
+        for p in sorted(d.glob("*.py")):
+            if p.name not in seen:
+                out.append(p)
+                seen.add(p.name)
+    for scripts_root in (
+        _REPO / "scripts",
+        _PARENT_REPO / "scripts",
+    ):
+        if not scripts_root.exists():
+            continue
+        for p in sorted(scripts_root.glob(_EVOLUTION_SCRIPTS_GLOB)):
+            if p.name not in seen:
+                out.append(p)
+                seen.add(p.name)
     return out
 
 
 # ---------------------------------------------------------------------------
-# 1. No file imports rule_engine / decision_server / phase_d_walk_forward.
+# 1. rule_engine remains red-line everywhere.
 # ---------------------------------------------------------------------------
 
 
-def test_no_evolution_file_imports_live_runtime() -> None:
+def test_no_evolution_file_imports_rule_engine() -> None:
     targets = _scan_targets()
     assert targets, "regression guard found no files to scan"
 
     offenders: list[tuple[Path, str]] = []
     for p in targets:
         text = p.read_text(encoding="utf-8")
-        for fragment in _FORBIDDEN_IMPORT_FRAGMENTS:
+        for fragment in _RULE_ENGINE_FRAGMENTS:
             if fragment in text:
                 offenders.append((p, fragment))
     assert not offenders, (
-        "live-runtime imports detected in evolution layer:\n"
+        "rule_engine imports detected (rule_engine remains red-line):\n"
         + "\n".join(f"  {p}: {f!r}" for p, f in offenders)
     )
 
 
 # ---------------------------------------------------------------------------
-# 2. No .py file mentions a `.mq5` filename (stops a future bridge
-#    to the EA from sneaking in).
+# 2. Tier-1 unseal — only whitelisted files may import
+#    decision_server / phase_d_walk_forward.
+# ---------------------------------------------------------------------------
+
+
+def test_only_whitelisted_files_import_tier1_unsealed_modules() -> None:
+    targets = _scan_targets()
+    offenders: list[tuple[Path, str]] = []
+    for p in targets:
+        if p.name in _TIER1_UNSEAL_WHITELIST:
+            continue
+        text = p.read_text(encoding="utf-8")
+        for fragment in _TIER1_UNSEAL_FRAGMENTS:
+            if fragment in text:
+                offenders.append((p, fragment))
+    assert not offenders, (
+        "Tier-1 unsealed imports detected outside the whitelist "
+        f"({sorted(_TIER1_UNSEAL_WHITELIST)}):\n"
+        + "\n".join(f"  {p}: {f!r}" for p, f in offenders)
+    )
+
+
+def test_whitelisted_files_use_only_read_only_symbols() -> None:
+    """Whitelisted files may import decision_server /
+    phase_d_walk_forward, but they must use only the public
+    read-only surface — no setters, no writers, no mutating calls.
+
+    The decision_server module exposes one getter
+    (``get_live_parameters``) and a frozen mapping
+    (``LIVE_PARAMETER_KEYS``). The phase_d_walk_forward module
+    exposes one pure function (``run_walk_forward_backtest``) and
+    frozen dataclasses + a constant.
+
+    This test scans the whitelisted files and checks that any
+    attribute access against the imported modules lands on this
+    public read-only surface.
+    """
+    allowed_decision_server = {
+        "get_live_parameters",
+        "LIVE_PARAMETER_KEYS",
+    }
+    allowed_walk_forward = {
+        "run_walk_forward_backtest",
+        "BacktestResult",
+        "BacktestWindowResult",
+        "PUBLIC_BACKTEST_PARAMETERS",
+        "_HALT_AUTO_EXPIRY_HOURS_OBSERVE",
+    }
+
+    attr_pattern = re.compile(
+        r"\b(decision_server|phase_d_walk_forward)\.([A-Za-z_][A-Za-z0-9_]*)"
+    )
+    offenders: list[tuple[Path, int, str]] = []
+    for fname in _TIER1_UNSEAL_WHITELIST:
+        p = _EVOLUTION_SRC / fname
+        if not p.exists():
+            continue
+        for i, line in enumerate(
+            p.read_text(encoding="utf-8").splitlines(), start=1,
+        ):
+            for m in attr_pattern.finditer(line):
+                mod, attr = m.group(1), m.group(2)
+                allowed = (
+                    allowed_decision_server if mod == "decision_server"
+                    else allowed_walk_forward
+                )
+                if attr not in allowed:
+                    offenders.append((p, i, f"{mod}.{attr}"))
+    assert not offenders, (
+        "whitelisted file accessed a non-public symbol on a Tier-1 "
+        "module:\n"
+        + "\n".join(f"  {p}:L{i}: {s}" for p, i, s in offenders)
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3. No .py file mentions a `.mq5` filename in code.
 # ---------------------------------------------------------------------------
 
 
@@ -112,7 +229,6 @@ def test_no_evolution_file_makes_code_calls_against_mq5() -> None:
             p.read_text(encoding="utf-8").splitlines(), start=1
         ):
             stripped = line.strip()
-            # Skip docstring/comment lines outright.
             if stripped.startswith(("#", '"', "'")) or "*.mq5*" in stripped:
                 continue
             for pat in _FORBIDDEN_MQ5_CODE_PATTERNS:
@@ -126,15 +242,11 @@ def test_no_evolution_file_makes_code_calls_against_mq5() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. The scan is wide enough — at least 30 files (current count is
-#    27 src + 8 scripts; threshold 30 catches accidental shrinkage).
+# 4. The scan is wide enough.
 # ---------------------------------------------------------------------------
 
 
 def test_regression_guard_scans_at_least_30_files() -> None:
-    """If a refactor shrinks the evolution layer below this floor,
-    the test will fail — prompting a deliberate review of whether
-    the contract still applies."""
     targets = _scan_targets()
     assert len(targets) >= 30, (
         f"evolution layer shrank to {len(targets)} files; review "
@@ -143,46 +255,37 @@ def test_regression_guard_scans_at_least_30_files() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. Helpful failure message — when run on a doctored fixture, the
-#    test surfaces the offending file and the matched fragment.
+# 5. Helpful failure messages — synthetic offender smoke.
 # ---------------------------------------------------------------------------
 
 
 def test_failure_message_lists_offender_and_fragment(tmp_path: Path) -> None:
-    """Smoke: feed the assertion machinery a synthetic offender and
-    confirm the assert message would name it. Uses an in-test
-    helper, not the real scan, so we don't pollute the repo."""
     fake_offender = tmp_path / "offender.py"
     fake_offender.write_text(
         "from smc.hedgerock.rule_engine import _CONFIDENCE_OBSERVE_FLOOR\n",
         encoding="utf-8",
     )
     text = fake_offender.read_text(encoding="utf-8")
-    matched = [
-        f for f in _FORBIDDEN_IMPORT_FRAGMENTS if f in text
-    ]
+    matched = [f for f in _RULE_ENGINE_FRAGMENTS if f in text]
     assert matched == ["from smc.hedgerock.rule_engine"]
 
 
 # ---------------------------------------------------------------------------
-# 5. The list of forbidden fragments matches the RFC §11 invariants
-#    exactly — additions to RFC §11 must come with additions here.
+# 6. Whitelist is intentional + minimal.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_forbidden_fragments_cover_all_three_red_line_modules() -> None:
-    expected_modules = {
-        "smc.hedgerock.rule_engine",
-        "smc.hedgerock.decision_server",
-        "smc.hedgerock.phase_d_walk_forward",
-    }
-    covered = set()
-    for fragment in _FORBIDDEN_IMPORT_FRAGMENTS:
-        for mod in expected_modules:
-            if mod in fragment:
-                covered.add(mod)
-    assert covered == expected_modules, (
-        f"regression guard missing red-line modules: "
-        f"{expected_modules - covered}"
+def test_tier1_whitelist_is_exactly_replay_and_candidate_generator() -> None:
+    assert _TIER1_UNSEAL_WHITELIST == frozenset(
+        {"replay_validator.py", "candidate_generator.py"}
     )
+
+
+@pytest.mark.unit
+def test_rule_engine_remains_red_line_in_fragment_table() -> None:
+    """The fragment table for rule_engine must cover both the
+    ``from`` and ``import`` forms — additions to the table elsewhere
+    should not silently drop these."""
+    assert "from smc.hedgerock.rule_engine" in _RULE_ENGINE_FRAGMENTS
+    assert "import smc.hedgerock.rule_engine" in _RULE_ENGINE_FRAGMENTS

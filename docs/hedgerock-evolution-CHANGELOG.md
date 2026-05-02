@@ -4,6 +4,44 @@
 > loop. Versions follow semver: MAJOR for breaking schema changes,
 > MINOR for new public surface, PATCH for fixes / hardening.
 
+---
+
+## v0.7.0 — 2026-05-02 (Tier-1 unseal of `decision_server` /
+`phase_d_walk_forward`)
+
+**Breaking** — partial repeal of the "no evolution file imports the
+live runtime" invariant. Read-only imports are now permitted from
+`replay_validator.py` and `candidate_generator.py` only, and only
+against the public surface of `decision_server` and
+`phase_d_walk_forward`. `rule_engine` remains red-line.
+
+**Added**
+
+- `src/smc/hedgerock/phase_d_walk_forward.py` — public read-only
+  backtest interface (`run_walk_forward_backtest`,
+  `BacktestResult`, `BacktestWindowResult`,
+  `_HALT_AUTO_EXPIRY_HOURS_OBSERVE`, `PUBLIC_BACKTEST_PARAMETERS`).
+- `src/smc/hedgerock/decision_server.py` — public read-only
+  parameter snapshot (`get_live_parameters`,
+  `LIVE_PARAMETER_KEYS`).
+- `replay_validator.summarise_replay_with_backtest` — wired path
+  that calls `run_walk_forward_backtest` against the live baseline.
+- `candidate_generator.resolve_baseline_value` and
+  `candidate_generator.get_live_parameter_snapshot` — anchor
+  proposals against the live snapshot; sole approved sidecar door
+  for downstream callers.
+
+**Changed**
+
+- `tests/hedgerock/evolution/test_regression_guard.py` — Tier-1
+  whitelist enforcement; `rule_engine` still red-line; whitelisted
+  files restricted to documented read-only symbols.
+- Per-module isolation tests for `replay_validator` and
+  `candidate_generator` updated to allow the unsealed imports while
+  still asserting the read-only attribute set.
+- RFC §1 + §4.1, README, runbook, 30-day plan, final-acceptance
+  carry the new isolation language.
+
 The starting point of this changelog is the T4-F2 baseline that
 was already on disk at session start (458 evolution tests passing,
 T4-F2 registry-audit wiring already shipped). Every entry below
@@ -209,4 +247,5 @@ These have been verified at every round end:
 | `config/safety_bounds.yaml` non-existent | ✅ |
 | `policy_registry/shadow_artefacts/*.json` count unchanged (12) | ✅ |
 | Production registry total JSON count unchanged (21) | ✅ |
-| No file under `evolution/` imports `rule_engine` / `decision_server` / `phase_d_walk_forward` | ✅ (regression guard) |
+| No file under `evolution/` imports `rule_engine` (red-line) | ✅ (regression guard) |
+| `decision_server` / `phase_d_walk_forward` imports limited to Tier-1 whitelist (`replay_validator.py`, `candidate_generator.py`) and read-only symbols only | ✅ (regression guard, Tier-1 unseal v0.7.0) |

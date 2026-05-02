@@ -105,7 +105,8 @@ The candidate **passes** PAPER_TEST iff ALL of the following hold:
 | Days with at least one trade | ≥ 12 (avoid degenerate "1 lucky trade" outcomes) |
 | Sign-agreement with replay projection | the replay validator's `delta_pnl_pp_mean` and the paper-test pnl trajectory both positive |
 | `registry_append_only_violation` | False on all 30 daily reports |
-| Production code mtimes (rule_engine, decision_server, phase_d_walk_forward, AISMCReceiver.mq5) | unchanged across all 30 days |
+| Production code mtimes (rule_engine, AISMCReceiver.mq5) | unchanged across all 30 days |
+| Production code mtimes (decision_server, phase_d_walk_forward) | unchanged across all 30 days; **read-only imports from `replay_validator` / `candidate_generator` are permitted (Tier-1 unseal v0.7.0)** |
 | `policy_registry/approved/` | does not exist at Day 30 |
 | `policy_registry/pointer.json` | does not exist at Day 30 |
 
@@ -161,7 +162,10 @@ produce a promotion packet.
 
 - Routes any order to live trading or to a non-demo broker.
 - Modifies `rule_engine.py`, `decision_server.py`,
-  `phase_d_walk_forward.py`, or any `*.mq5` file.
+  `phase_d_walk_forward.py`, or any `*.mq5` file. (Read-only
+  imports of `decision_server` / `phase_d_walk_forward` from
+  `replay_validator` / `candidate_generator` are explicitly
+  allowed under the Tier-1 unseal — no writes.)
 - Writes under `policy_registry/approved/` or
   `policy_registry/pointer.json`.
 - Mutates `config/safety_bounds.yaml`.

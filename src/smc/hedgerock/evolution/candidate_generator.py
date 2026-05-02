@@ -1,10 +1,13 @@
 """Stage 3 — Candidate Generator v0 (report-only, XAUUSD-only).
 
-**Sidecar.** This module never imports the live trading runtime
-(``smc.hedgerock.rule_engine`` / ``decision_server`` /
-``phase_d_walk_forward``). It reads evidence-bundle metadata + gate
-results + blocking reasons + per-candidate registry-audit state, and
-emits a list of :class:`CandidateProposal` objects.
+**Sidecar with Tier-1 read-only unseal.** This module is allowed to
+read-only import ``decision_server`` (live parameter snapshot) and
+``phase_d_walk_forward`` (public constants). It still does NOT
+import ``rule_engine`` — that remains red-line forbidden.
+
+It reads evidence-bundle metadata + gate results + blocking reasons
++ per-candidate registry-audit state, and emits a list of
+:class:`CandidateProposal` objects.
 
 The generator does *not* promote anything. It does *not* write under
 ``policy_registry/approved/`` or modify ``policy_registry/pointer.json``.
@@ -18,6 +21,9 @@ Public surface:
   * :data:`DECISION_RECOMMEND`, :data:`DECISION_NO_RECOMMENDATION`
   * Stable reason ids — ``REASON_*`` constants in this module.
   * :func:`generate_candidate_proposals`
+  * :func:`resolve_baseline_value` — reads the live snapshot from
+    ``decision_server`` when the parameter class is recognised,
+    falling back to the manifest's recorded baseline.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from smc.hedgerock import decision_server
 from smc.hedgerock.evolution.policy_manifest import (
     CandidateManifest,
     EvidenceBundle,
@@ -48,6 +55,8 @@ __all__ = [
     "SAFETY_CLAMPS",
     "SafetyClamp",
     "generate_candidate_proposals",
+    "get_live_parameter_snapshot",
+    "resolve_baseline_value",
 ]
 
 
@@ -160,6 +169,32 @@ def _resolve_parameter_class(target: str) -> str | None:
     return _PARAMETER_CLASS_BY_TARGET.get(target)
 
 
+def get_live_parameter_snapshot() -> dict[str, float]:
+    """Re-export the live parameter snapshot for downstream sidecar
+    callers that should not import ``decision_server`` directly."""
+    return decision_server.get_live_parameters()
+
+
+def resolve_baseline_value(
+    *,
+    parameter_class: str | None,
+    manifest_baseline: float,
+) -> float:
+    """Return the baseline value to feed into the proposal.
+
+    When ``parameter_class`` is one of the keys exposed by
+    :func:`decision_server.get_live_parameters`, prefer that value
+    so the proposal is anchored against the actual live state.
+    Otherwise fall back to ``manifest_baseline``.
+    """
+    if parameter_class is None:
+        return float(manifest_baseline)
+    live = decision_server.get_live_parameters()
+    if parameter_class in live:
+        return float(live[parameter_class])
+    return float(manifest_baseline)
+
+
 def _is_g6_safety_undefined_for_target(
     *, target: str, gate_results: Mapping[str, PromotionGateResult],
 ) -> bool:
@@ -197,7 +232,13 @@ def _no_recommendation(
     reason: str,
     parameter_class: str = "",
 ) -> CandidateProposal:
-    baseline = float(candidate.diff.baseline_value or 0.0)
+    resolved_class = parameter_class or _resolve_parameter_class(
+        candidate.diff.target,
+    )
+    baseline = resolve_baseline_value(
+        parameter_class=resolved_class,
+        manifest_baseline=float(candidate.diff.baseline_value or 0.0),
+    )
     return CandidateProposal(
         candidate_id=candidate.candidate_id,
         parameter_target=candidate.diff.target,
@@ -278,8 +319,13 @@ def _evaluate_one(
             parameter_class=parameter_class,
         )
 
-    # 6. Compute + clamp.
-    baseline = float(candidate.diff.baseline_value or 0.0)
+    # 6. Compute + clamp. Anchor the baseline against the live
+    # decision_server snapshot when the parameter class is supported,
+    # else fall back to the manifest's recorded baseline.
+    baseline = resolve_baseline_value(
+        parameter_class=parameter_class,
+        manifest_baseline=float(candidate.diff.baseline_value or 0.0),
+    )
     proposed = _propose_value_for_class(
         parameter_class=parameter_class, baseline=baseline,
     )

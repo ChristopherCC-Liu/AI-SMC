@@ -34,8 +34,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# We deliberately import ONLY from the report-only sidecar layer.
-# No imports from rule_engine, decision_server, or phase_d_walk_forward.
+# Imports from the report-only sidecar layer. The candidate_generator
+# module additionally reads live parameter values from
+# decision_server (Tier-1 read-only unseal — RFC §1).
 from smc.hedgerock.evolution.ascii_visualisations import (
     render_gate_matrix,
     render_heat_ranking,
@@ -49,6 +50,7 @@ from smc.hedgerock.evolution.candidate_generator import (
     REASON_INSUFFICIENT_XAUUSD_COVERAGE,
     SAFETY_CLAMPS,
     generate_candidate_proposals,
+    get_live_parameter_snapshot,
 )
 from smc.hedgerock.evolution.candidate_menu import CANDIDATE_MENU_V0
 from smc.hedgerock.evolution.policy_manifest import (
@@ -160,6 +162,18 @@ def _render_recommendation(
     out.append(f"- XAUUSD years_passing: {yr.get('years_passing', 0)}")
     out.append(f"- halt_event_count: {bundle.halt_event_count}")
     out.append(f"- no_strategy_change: {bundle.no_strategy_change}")
+    out.append("")
+
+    out.append("### Live parameter snapshot")
+    out.append("")
+    out.append("(Read-only re-export from the candidate generator's "
+               "`get_live_parameter_snapshot`, which is the only "
+               "approved sidecar door onto the live `decision_server` "
+               "values.)")
+    out.append("")
+    live = get_live_parameter_snapshot()
+    for cls in sorted(live.keys()):
+        out.append(f"- `{cls}`: **{live[cls]}**")
     out.append("")
 
     out.append("## Headline")

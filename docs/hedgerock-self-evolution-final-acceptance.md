@@ -185,10 +185,22 @@ $ python -m pytest tests/hedgerock/evolution/test_regression_guard.py -v
 5 passed
 ```
 
-The meta-scan over **35 files** (27 src modules + 8 CLI scripts)
-confirms NO file imports `rule_engine`, `decision_server`, or
-`phase_d_walk_forward`, and NO file makes code-level `.mq5`
-references.
+The meta-scan over the evolution layer confirms:
+
+- NO file imports `rule_engine` (still red-line).
+- `decision_server` and `phase_d_walk_forward` imports are limited
+  to the Tier-1 whitelist (`replay_validator.py`,
+  `candidate_generator.py`) and to read-only public symbols only —
+  enforced by
+  `test_only_whitelisted_files_import_tier1_unsealed_modules` and
+  `test_whitelisted_files_use_only_read_only_symbols`.
+- NO file makes code-level `.mq5` references.
+
+> **Tier-1 unseal — v0.7.0 (2026-05-02).** The unconditional ban on
+> importing `decision_server` / `phase_d_walk_forward` has been
+> repealed for two named files (`replay_validator.py`,
+> `candidate_generator.py`). All other isolation invariants in this
+> document remain in force.
 
 ## 6. System capability matrix
 
@@ -215,7 +227,10 @@ references.
 ### What the system CANNOT do
 
 - Modify `rule_engine.py`, `decision_server.py`,
-  `phase_d_walk_forward.py`, or any `.mq5`.
+  `phase_d_walk_forward.py`, or any `.mq5`. (Read-only imports of
+  `decision_server` / `phase_d_walk_forward` are explicitly
+  permitted from `replay_validator.py` and `candidate_generator.py`
+  per Tier-1 unseal v0.7.0.)
 - Promote a candidate to `policy_registry/approved/`.
 - Update `policy_registry/pointer.json`.
 - Delete, rename, or rewrite a file under

@@ -12,13 +12,33 @@ to `policy_registry/approved/`, and never updates
 `policy_registry/pointer.json`. Promotion is reserved for a human
 operator with the full evidence chain in front of them.
 
-## 1. Non-goals
+## 1. Non-goals (post Tier-1 unseal)
+
+> **Update — Tier-1 unseal.** The originally-stated invariant
+> "no evolution file imports `decision_server` or
+> `phase_d_walk_forward`" has been **partially repealed**. As of
+> the Tier-1 unseal:
+>
+> - **`replay_validator`** and **`candidate_generator`** MAY
+>   `import` `decision_server` and `phase_d_walk_forward` for
+>   their public, documented read-only surface
+>   (`decision_server.get_live_parameters` and
+>   `phase_d_walk_forward.run_walk_forward_backtest` plus the
+>   frozen public dataclasses / constants).
+> - **All other** evolution files remain forbidden from importing
+>   either module — enforced by the regression guard whitelist in
+>   `tests/hedgerock/evolution/test_regression_guard.py`.
+> - **`rule_engine`** remains red-line. No file in the evolution
+>   layer may import it.
+> - The runbook, 30-day paper-trading plan, and acceptance docs
+>   have been updated in lockstep.
 
 The loop **does not**:
 
 - write or modify `src/smc/hedgerock/rule_engine.py`,
   `src/smc/hedgerock/decision_server.py`, or
-  `src/smc/hedgerock/phase_d_walk_forward.py`;
+  `src/smc/hedgerock/phase_d_walk_forward.py` (read-only imports
+  permitted for the two whitelisted modules above);
 - write or modify any `*.mq5` file under `mql5/`;
 - create files under `policy_registry/approved/`;
 - update or rewrite `policy_registry/pointer.json`;
@@ -90,10 +110,15 @@ These are **invariants**, not preferences. Any code change that
 breaks one of these is a release blocker.
 
 1. **No write path to live code.** No module under
-   `src/smc/hedgerock/evolution/` may import or modify the
-   production `rule_engine.py`, `decision_server.py`, or
-   `phase_d_walk_forward.py` symbols beyond reading their constants
-   for documentation purposes.
+   `src/smc/hedgerock/evolution/` may modify the production
+   `rule_engine.py`, `decision_server.py`, or
+   `phase_d_walk_forward.py`. Read-only imports of the two latter
+   modules are permitted **only** from `replay_validator` and
+   `candidate_generator`, and only against their public surface
+   (`decision_server.get_live_parameters`,
+   `phase_d_walk_forward.run_walk_forward_backtest`, and the
+   frozen dataclasses / constants documented in those files).
+   `rule_engine` remains fully red-line.
 2. **No write path to `approved/`.** Every code path writing under
    `policy_registry/` is restricted to `candidates/`, `audit/`,
    `shadow_artefacts/<candidate_id>/` (append-only), or a

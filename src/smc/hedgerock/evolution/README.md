@@ -13,9 +13,12 @@ public CLI is a sidecar that writes to operator-supplied paths.
 
 If a change you're about to make would touch any of:
 
-- `src/smc/hedgerock/rule_engine.py`
-- `src/smc/hedgerock/decision_server.py`
-- `src/smc/hedgerock/phase_d_walk_forward.py`
+- `src/smc/hedgerock/rule_engine.py` (still red-line — no imports)
+- `src/smc/hedgerock/decision_server.py` *(write)* — read-only imports
+  are permitted from `replay_validator.py` and
+  `candidate_generator.py` only, against the public surface
+- `src/smc/hedgerock/phase_d_walk_forward.py` *(write)* — same
+  Tier-1 read-only rule as `decision_server`
 - `mql5/*.mq5`
 - `policy_registry/approved/`, `policy_registry/pointer.json`
 - `policy_registry/shadow_artefacts/<id>/*.json` (delete / rewrite)
@@ -182,8 +185,13 @@ Three test files act as anchors when reviewing changes:
    - Reject `--<output>` paths under `policy_registry/approved/`
      or `policy_registry/pointer.json` (use the
      `_FORBIDDEN_PATH_FRAGMENTS` pattern).
-   - No imports of `rule_engine`, `decision_server`, or
-     `phase_d_walk_forward`.
+   - No imports of `rule_engine` (still red-line).
+   - No imports of `decision_server` or `phase_d_walk_forward`
+     unless the file is explicitly added to the Tier-1 unseal
+     whitelist in `test_regression_guard.py` (currently:
+     `replay_validator.py`, `candidate_generator.py`). New CLI
+     scripts must instead pull live values via
+     `candidate_generator.get_live_parameter_snapshot()`.
    - When the CLI logs operator actions, use
      `operation_audit.append_operation`.
 3. Add a test file `tests/hedgerock/evolution/test_<name>.py`

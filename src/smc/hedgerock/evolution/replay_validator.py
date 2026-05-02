@@ -1,19 +1,22 @@
-"""Stage 6-followup-2 task 1 — replay-based candidate validator
-(report-only, read-only over shadow artefacts).
+"""Stage 6-followup-2 task 1 — replay-based candidate validator.
 
-What this module does:
-    Aggregates the per-window deltas already recorded in
-    ``policy_registry/shadow_artefacts/<candidate_id>/*.json`` to
-    produce a heuristic projection of the candidate's expected
-    effect across the historical windows the shadow runner has
-    visited.
+Two complementary entry points:
 
-What this module does NOT do:
-    - Execute the live trading runtime.
-    - Modify any artefact.
+  * :func:`summarise_replay` — legacy path. Aggregates per-window
+    deltas already recorded under
+    ``policy_registry/shadow_artefacts/<candidate_id>/``.
+  * :func:`summarise_replay_with_backtest` — wired path. Calls the
+    public :func:`phase_d_walk_forward.run_walk_forward_backtest`
+    interface against a supplied historical corpus, computing
+    per-window deltas vs the live baseline read from
+    :func:`decision_server.get_live_parameters`.
+
+What this module still does NOT do:
+    - Modify any artefact, registry entry, or live config.
     - Touch ``policy_registry/approved/`` or ``pointer.json``.
-    - Import live runtime modules
-      (``rule_engine``, ``decision_server``, ``phase_d_walk_forward``).
+    - Import ``rule_engine`` (still red-line). The Tier-1 unseal
+      whitelist is exactly ``phase_d_walk_forward`` +
+      ``decision_server`` and is exercised here read-only.
 
 Output is a frozen :class:`ReplayValidationReport`. The text
 renderer carries explicit
@@ -28,12 +31,18 @@ import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Mapping
+
+# Tier-1 read-only imports authorised by RFC §1 (post-unseal):
+# walk_forward provides the public backtest function;
+# decision_server provides the live-parameter snapshot.
+from smc.hedgerock import decision_server, phase_d_walk_forward
 
 
 __all__ = [
     "ReplayValidationReport",
     "summarise_replay",
+    "summarise_replay_with_backtest",
     "render_replay_report",
 ]
 
@@ -182,6 +191,96 @@ def summarise_replay(
         windows_passing=passing,
         windows_regressing=regressing,
         skipped_artefact_ids=tuple(skipped),
+        observed_buckets=tuple(sorted(bucket_set)),
+        blocking_conditions=tuple(blockers),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Backtest-wired path — uses phase_d_walk_forward + decision_server
+# ---------------------------------------------------------------------------
+
+
+def summarise_replay_with_backtest(
+    *,
+    candidate_id: str,
+    parameter_class: str,
+    proposed_value: float,
+    history: Iterable[Mapping[str, Any]],
+) -> ReplayValidationReport:
+    """Run the public walk-forward backtest against ``history`` under
+    the proposed parameter, then again under the live baseline read
+    from :func:`decision_server.get_live_parameters`. Aggregate the
+    per-window deltas into a :class:`ReplayValidationReport`.
+
+    This call is read-only end-to-end: ``phase_d_walk_forward``'s
+    public backtest is a pure function, and ``decision_server`` only
+    exposes a getter. No artefacts, no live config, no EA file is
+    touched.
+    """
+    history_list = list(history)
+    live = decision_server.get_live_parameters()
+
+    if parameter_class not in live:
+        return ReplayValidationReport(
+            candidate_id=candidate_id,
+            n_artefacts_read=0, n_windows_replayed=0,
+            delta_pnl_pp_mean=0.0, delta_pnl_pp_p25=0.0,
+            delta_pnl_pp_p75=0.0, delta_dd_pp_worst=0.0,
+            windows_passing=0, windows_regressing=0,
+            skipped_artefact_ids=(),
+            observed_buckets=(),
+            blocking_conditions=(
+                f"unsupported_parameter_class:{parameter_class}",
+            ),
+        )
+
+    proposed_params = dict(live)
+    proposed_params[parameter_class] = float(proposed_value)
+
+    proposed_run = phase_d_walk_forward.run_walk_forward_backtest(
+        parameters=proposed_params, history=history_list,
+    )
+    baseline_run = phase_d_walk_forward.run_walk_forward_backtest(
+        parameters=live, history=history_list,
+    )
+
+    deltas_pnl: list[float] = []
+    deltas_dd: list[float] = []
+    bucket_set: set[str] = set()
+    baseline_by_id = {w.window_id: w for w in baseline_run.windows}
+    for w in proposed_run.windows:
+        b = baseline_by_id.get(w.window_id)
+        if b is None:
+            continue
+        deltas_pnl.append(round(w.pnl_pp - b.pnl_pp, 6))
+        deltas_dd.append(round(w.dd_pp - b.dd_pp, 6))
+        if w.regime_bucket:
+            bucket_set.add(w.regime_bucket)
+
+    n_windows = len(deltas_pnl)
+    blockers: list[str] = []
+    if n_windows < 8:
+        blockers.append(f"insufficient_window_coverage:n={n_windows}<8")
+
+    mean_pnl = statistics.fmean(deltas_pnl) if deltas_pnl else 0.0
+    p25 = _percentile(deltas_pnl, 0.25) if deltas_pnl else 0.0
+    p75 = _percentile(deltas_pnl, 0.75) if deltas_pnl else 0.0
+    worst_dd = max(deltas_dd) if deltas_dd else 0.0
+    passing = sum(1 for v in deltas_pnl if v > 0)
+    regressing = sum(1 for v in deltas_pnl if v < 0)
+
+    return ReplayValidationReport(
+        candidate_id=candidate_id,
+        n_artefacts_read=0,
+        n_windows_replayed=n_windows,
+        delta_pnl_pp_mean=mean_pnl,
+        delta_pnl_pp_p25=p25,
+        delta_pnl_pp_p75=p75,
+        delta_dd_pp_worst=worst_dd,
+        windows_passing=passing,
+        windows_regressing=regressing,
+        skipped_artefact_ids=(),
         observed_buckets=tuple(sorted(bucket_set)),
         blocking_conditions=tuple(blockers),
     )

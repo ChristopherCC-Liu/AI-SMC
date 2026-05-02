@@ -263,18 +263,52 @@ def test_render_replay_report_carries_banners(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_replay_validator_module_does_not_import_live_runtime() -> None:
+def test_replay_validator_module_does_not_import_rule_engine() -> None:
+    """rule_engine remains red-line. decision_server and
+    phase_d_walk_forward are now Tier-1 unsealed for read-only use
+    by this module — see test_regression_guard for the layer-wide
+    whitelist enforcement."""
     src = (
         _REPO / "src" / "smc" / "hedgerock" / "evolution"
         / "replay_validator.py"
     ).read_text(encoding="utf-8")
     forbidden = (
         "from smc.hedgerock.rule_engine",
-        "from smc.hedgerock.decision_server",
-        "from smc.hedgerock.phase_d_walk_forward",
+        "import smc.hedgerock.rule_engine",
     )
     for f in forbidden:
         assert f not in src
+
+
+@pytest.mark.unit
+def test_replay_validator_uses_only_read_only_symbols_from_unsealed_modules(
+) -> None:
+    """The Tier-1 unseal allows imports but not arbitrary symbol
+    access. Scan the source and verify the only attribute calls
+    against the unsealed modules land on documented read-only names."""
+    src = (
+        _REPO / "src" / "smc" / "hedgerock" / "evolution"
+        / "replay_validator.py"
+    ).read_text(encoding="utf-8")
+    import re as _re
+    allowed = {
+        "decision_server.get_live_parameters",
+        "phase_d_walk_forward.run_walk_forward_backtest",
+    }
+    for m in _re.finditer(
+        r"\b(decision_server|phase_d_walk_forward)\.[A-Za-z_][A-Za-z0-9_]*",
+        src,
+    ):
+        token = m.group(0)
+        # Permit module-itself references (no dot beyond the module).
+        if token in allowed:
+            continue
+        # Bare module references like `import phase_d_walk_forward`
+        # show up without a trailing `.`; the regex demands the dot
+        # so any match is an attribute access.
+        assert token in allowed, (
+            f"replay_validator accessed non-public symbol: {token}"
+        )
 
 
 # ---------------------------------------------------------------------------
