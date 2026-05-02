@@ -141,7 +141,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--produce-packet", action="store_true")
     parser.add_argument("--candidate-id",
                         default="c1-lower-observe-floor-0.50")
+    parser.add_argument(
+        "--audit-trail", type=Path, default=None,
+        help="When set, append one operation-audit entry per "
+             "successful demo stage to this path.",
+    )
+    parser.add_argument(
+        "--operator", default=None,
+        help="Operator name recorded in the audit trail. Defaults "
+             "to $USER, then 'anonymous'.",
+    )
     args = parser.parse_args(argv)
+
+    # Lazy import so the demo still loads without an audit trail.
+    from smc.hedgerock.evolution.operation_audit import append_operation
+
+    def _audit(op: str, result: str, **details) -> None:
+        if args.audit_trail is None:
+            return
+        try:
+            append_operation(
+                trail_path=Path(args.audit_trail),
+                operation=op, result=result,
+                operator=args.operator, details=details,
+            )
+        except ValueError as e:
+            print(f"AUDIT WARN: {e}", file=sys.stderr)
 
     workspace = Path(args.workspace).resolve()
     try:
@@ -159,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     print("== Stage: OBSERVE — load Phase D evidence + audit state ==")
     atlas, avail, wf, bounds, audit_log = _seed_evidence(workspace)
     print(f"  fixture under: {workspace / 'fixture'}")
+    _audit("observe", "ok", workspace=str(workspace))
 
     print("== Stage: DETECT + RECOMMEND — run report-only recommendation CLI ==")
     report_path = workspace / "report" / "phase-d-evolution-report.md"
@@ -177,8 +203,10 @@ def main(argv: list[str] | None = None) -> int:
         ])
     print(rec_stdout.getvalue())
     if recommend_rc != 0:
+        _audit("recommend", "fail", rc=recommend_rc)
         print(f"FAILED (recommend stage): rc={recommend_rc}", file=sys.stderr)
         return 3
+    _audit("recommend", "ok", report=str(report_path), recommendation=str(rec_path))
 
     # Manually parse the recommendation snapshot the candidate
     # generator wrote; pick the first RECOMMEND we find for the
@@ -221,6 +249,7 @@ def main(argv: list[str] | None = None) -> int:
         ])
         enqueued += 1
     print(f"  enqueued: {enqueued}")
+    _audit("queue", "ok", enqueued=enqueued, queue_path=str(queue_path))
 
     print("== Stage: INSPECT — read-only queue snapshot ==")
     insp_path = workspace / "queue" / "queue_inspection.md"
@@ -232,8 +261,10 @@ def main(argv: list[str] | None = None) -> int:
         ])
     print(insp_stdout.getvalue())
     if insp_rc != 0:
+        _audit("inspect", "fail", rc=insp_rc)
         print(f"FAILED (inspect stage): rc={insp_rc}", file=sys.stderr)
         return 5
+    _audit("inspect", "ok", inspection=str(insp_path))
 
     if args.seed_paper_trades:
         print("== Stage: PAPER-TEST SEED — write demo paper-test ledger ==")
@@ -243,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
             candidate_id=args.candidate_id,
         )
         print(f"  wrote {n} demo paper-test entries to {ledger_path}")
+        _audit("paper_test_seed", "ok", ledger=str(ledger_path), n_trades=n)
 
     if args.produce_packet:
         print("== Stage: DRY-RUN PROMOTION — produce manual-approval packet ==")
@@ -267,17 +299,21 @@ def main(argv: list[str] | None = None) -> int:
             ])
         print(promote_stdout.getvalue())
         if promote_rc != 0:
+            _audit("promotion_packet", "fail", rc=promote_rc)
             print(
                 f"FAILED (promotion-packet stage): rc={promote_rc}",
                 file=sys.stderr,
             )
             return 7
+        _audit("promotion_packet", "ok", packet=str(packet_path))
 
     real_post = (
         sum(1 for _ in _REAL_REGISTRY_ROOT.rglob("*.json"))
         if _REAL_REGISTRY_ROOT.exists() else 0
     )
     if real_pre != real_post:
+        _audit("demo_complete", "fail",
+               reason=f"real_registry_json_count_drift:{real_pre}->{real_post}")
         print(
             f"FAILED (red-line breach): real registry json count "
             f"{real_pre} → {real_post}",
@@ -285,6 +321,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 8
 
+    _audit("demo_complete", "ok",
+           real_registry_json_count=real_pre,
+           workspace=str(workspace))
     print("== Demo complete. ==")
     print(f"  workspace: {workspace}")
     print(f"  real-registry json count unchanged: {real_pre}")
