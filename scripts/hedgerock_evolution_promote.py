@@ -166,7 +166,46 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--paper-drawdown-floor", type=float,
                         default=_DEFAULT_DRAWDOWN_FLOOR)
     parser.add_argument("--apply", action="store_true")
+    # Checklist-mode flags. None on their own enable behaviour; they
+    # only do something when --checklist-mode is also passed.
+    parser.add_argument("--checklist-mode", action="store_true",
+                        help="Require explicit per-line operator "
+                             "acknowledgements before producing the packet.")
+    parser.add_argument("--ack-paper-test-pass", action="store_true")
+    parser.add_argument("--ack-drawdown-within-floor", action="store_true")
+    parser.add_argument("--ack-no-violation", action="store_true")
+    parser.add_argument("--ack-coverage-sufficient", action="store_true")
+    parser.add_argument("--ack-replay-projection-positive",
+                        action="store_true")
+    parser.add_argument("--ack-no-multi-symbol", action="store_true")
+    parser.add_argument("--ack-production-mtimes-unchanged",
+                        action="store_true")
+    parser.add_argument(
+        "--audit-trail", type=Path, default=None,
+        help="Optional. When set, every checklist ack is appended "
+             "to this trail along with completion / block events.",
+    )
+    parser.add_argument(
+        "--operator", default=None,
+        help="Operator name recorded in the audit trail.",
+    )
     args = parser.parse_args(argv)
+
+    # Lazy import so the existing test contracts that don't touch
+    # the trail keep their import surface unchanged.
+    from smc.hedgerock.evolution.operation_audit import append_operation
+
+    def _audit(op: str, result: str, **details) -> None:
+        if args.audit_trail is None:
+            return
+        try:
+            append_operation(
+                trail_path=Path(args.audit_trail),
+                operation=op, result=result,
+                operator=args.operator, details=details,
+            )
+        except ValueError as e:
+            print(f"AUDIT WARN: {e}", file=sys.stderr)
 
     if args.apply:
         print(
@@ -186,6 +225,42 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # Checklist-mode enforcement. Each ack flag corresponds to one
+    # required operator acknowledgement. When --checklist-mode is
+    # passed, every ack must be present; otherwise the run is
+    # blocked and the audit trail records the missing items.
+    checklist_required = (
+        ("paper-test-pass", "ack_paper_test_pass"),
+        ("drawdown-within-floor", "ack_drawdown_within_floor"),
+        ("no-violation", "ack_no_violation"),
+        ("coverage-sufficient", "ack_coverage_sufficient"),
+        ("replay-projection-positive", "ack_replay_projection_positive"),
+        ("no-multi-symbol", "ack_no_multi_symbol"),
+        ("production-mtimes-unchanged", "ack_production_mtimes_unchanged"),
+    )
+    if args.checklist_mode:
+        missing = [
+            line for line, attr in checklist_required
+            if not getattr(args, attr)
+        ]
+        if missing:
+            _audit(
+                "promotion_checklist_block", "fail",
+                missing=missing,
+                candidate_id=args.candidate_id,
+            )
+            print(
+                "FAILED: --checklist-mode requires every ack flag. "
+                "Missing: " + ", ".join(missing),
+                file=sys.stderr,
+            )
+            return 1
+        # Record one audit entry per acknowledged line so the trail
+        # carries operator-by-operator attribution for every gate.
+        for line, _attr in checklist_required:
+            _audit(f"promotion_checklist_ack:{line}", "ok",
+                   candidate_id=args.candidate_id)
 
     try:
         _assert_packet_path_safe(Path(args.packet_path))
@@ -256,8 +331,18 @@ def main(argv: list[str] | None = None) -> int:
         min_paper_trades=args.min_paper_trades,
         drawdown_floor=args.paper_drawdown_floor,
     )
+    if args.checklist_mode:
+        ack_section = ["", "## Operator checklist (every line acknowledged)", ""]
+        for line, _attr in checklist_required:
+            ack_section.append(f"- [x] `{line}`")
+        ack_section.append("")
+        body = body + "\n".join(ack_section)
     Path(args.packet_path).parent.mkdir(parents=True, exist_ok=True)
     Path(args.packet_path).write_text(body, encoding="utf-8")
+    if args.checklist_mode:
+        _audit("promotion_checklist_complete", "ok",
+               candidate_id=args.candidate_id,
+               packet=str(args.packet_path))
     print(f"wrote promotion packet → {args.packet_path}")
     print("Remember: this packet is DRY-RUN. The CLI did not write to "
           "policy_registry/approved/ or pointer.json.")
