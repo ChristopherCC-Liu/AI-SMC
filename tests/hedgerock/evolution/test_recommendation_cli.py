@@ -205,8 +205,12 @@ def test_recommendation_with_clean_audit_emits_at_least_one_recommend(
     assert body.count("decision: `RECOMMEND`") >= 1
     # Exposure-raising c3 must remain NO_RECOMMENDATION.
     assert "c3-aggressive-floor-0.78" in body
-    # Find the c3 block and assert its decision line.
-    c3_idx = body.find("c3-aggressive-floor-0.78")
+    # Find the c3 detail section (header `### <id>` is unique to the
+    # per-candidate detail block; the visualisation tables use a
+    # different format) and assert its decision line.
+    c3_header = "### c3-aggressive-floor-0.78"
+    assert c3_header in body
+    c3_idx = body.find(c3_header)
     c3_block = body[c3_idx: c3_idx + 1200]
     assert "decision: `NO_RECOMMENDATION`" in c3_block
 

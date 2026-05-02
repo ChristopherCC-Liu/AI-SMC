@@ -36,6 +36,11 @@ from typing import Any
 
 # We deliberately import ONLY from the report-only sidecar layer.
 # No imports from rule_engine, decision_server, or phase_d_walk_forward.
+from smc.hedgerock.evolution.ascii_visualisations import (
+    render_gate_matrix,
+    render_heat_ranking,
+    render_parameter_comparison_table,
+)
 from smc.hedgerock.evolution.candidate_generator import (
     CandidateProposal,
     DECISION_NO_RECOMMENDATION,
@@ -120,6 +125,7 @@ def _render_recommendation(
     proposals: list[CandidateProposal],
     bundle: EvidenceBundle,
     audit_log_path: Path,
+    gate_results_per_candidate: dict[str, dict[str, "PromotionGateResult"]] | None = None,
 ) -> str:
     audit = getattr(bundle, "registry_audit", None)
     audit_present = bool(getattr(audit, "audit_log_present", False))
@@ -176,6 +182,36 @@ def _render_recommendation(
             "All candidates abstain from RECOMMEND until the operator "
             "re-points `--registry-audit-log`. Absent ≠ clean."
         )
+    out.append("")
+
+    out.append("## Parameter comparison")
+    out.append("")
+    out.append(render_parameter_comparison_table(proposals))
+    out.append("")
+    out.append("Legend: `b` = baseline; `p` = proposed; `B` = both at "
+               "the same band position. Band visual width = 10 cells.")
+    out.append("")
+
+    if gate_results_per_candidate:
+        out.append("## Gate matrix")
+        out.append("")
+        # Map PromotionGateResult → GateStatus for the visualiser.
+        from smc.hedgerock.evolution.policy_manifest import GateStatus as _GS
+        gate_status_map: dict[str, dict[str, _GS]] = {}
+        for cid, gates in gate_results_per_candidate.items():
+            gate_status_map[cid] = {gid: r.status for gid, r in gates.items()}
+        out.append(render_gate_matrix(gate_status_map))
+        out.append("")
+        out.append("Glyphs: ✓ = PASS, ✗ = FAIL, · = ABSTAIN / NOT_RUN / "
+                   "missing.")
+        out.append("")
+
+    out.append("## Heat ranking")
+    out.append("")
+    out.append(render_heat_ranking(proposals))
+    out.append("")
+    out.append("Order: RECOMMEND first, then by trigger count "
+               "(descending), then by candidate_id (deterministic).")
     out.append("")
 
     out.append("## Per-candidate proposals")
@@ -319,6 +355,7 @@ def run(
         if audit is not None else Path("<unknown>")
     body = _render_recommendation(
         proposals=proposals, bundle=bundle, audit_log_path=audit_path,
+        gate_results_per_candidate=gate_results_per_candidate,
     )
     Path(recommendation_path).parent.mkdir(parents=True, exist_ok=True)
     Path(recommendation_path).write_text(body, encoding="utf-8")
