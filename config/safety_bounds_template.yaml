@@ -1,0 +1,44 @@
+# HedgeRock — safety_bounds TEMPLATE (XAUUSD-only, conservative defaults)
+#
+# This file is a TEMPLATE. The live red-line path is
+# `config/safety_bounds.yaml`; this template MUST be copied there
+# manually by a human operator after a security review. The sidecar
+# loop never writes to either file.
+#
+# Bands match the RFC §5 / Stage-3 SAFETY_CLAMPS table so the
+# candidate generator's clamp and G6's safety check agree. Any
+# parameter proposed outside its band is rejected by G6 (gate FAIL)
+# AND by the candidate generator (NO_RECOMMENDATION /
+# proposal_outside_safety_clamp).
+#
+# Pinned by:
+#   tests/hedgerock/evolution/test_safety_bounds_template.py
+#
+# Format: dotted target → [min, max]. The loader treats any target
+# absent from this map as `safety_bound_undefined` (G6 FAIL).
+#
+# Coverage scope: XAUUSD only. Multi-symbol expansion is RFC-out-of-
+# scope (§10) and would require a new template covering the
+# additional symbols.
+
+# Confidence floor for the observe-only release (low-priority signal
+# entry). Lower values broaden the observe corpus; values below 0.40
+# leak into noise. Conservative cap at 0.65 keeps it strictly below
+# the aggressive floor.
+smc.hedgerock.rule_engine._CONFIDENCE_OBSERVE_FLOOR: [0.40, 0.65]
+
+# Confidence floor for the aggressive release (higher-priority entry).
+# Lowering raises gross exposure — RFC §10.1 forbids auto-promote, so
+# G6 here is the second line of defence behind the candidate
+# generator's exposure veto.
+smc.hedgerock.rule_engine._CONFIDENCE_AGGRESSIVE_FLOOR: [0.70, 0.85]
+
+# Confidence baseline for the second range regime. Wider band than
+# observe-only because range-2 trades have explicit Donchian
+# validation; lower bound 0.55 keeps small-n setups from sneaking in.
+smc.hedgerock.rule_engine._RANGE_2_CONFIDENCE_BASELINE: [0.55, 0.80]
+
+# Halt-mode auto-expiry (observe-only). Hours. Conservative ceiling
+# 48h prevents an indefinite halt-window. Floor 4h matches the
+# baseline so any tweak is non-destructive.
+smc.hedgerock.phase_d_walk_forward._HALT_AUTO_EXPIRY_HOURS_OBSERVE: [4.0, 48.0]
