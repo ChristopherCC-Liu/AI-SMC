@@ -1,0 +1,170 @@
+name: HedgeRock evolution CI
+
+# Template workflow for the report-only self-evolution loop.
+#
+# Runs on every push / pull-request that touches the evolution
+# layer or its tests. Three jobs:
+#
+#   * tests       — full evolution sub-suite + the broader hedgerock
+#                   sweep, both must stay green
+#   * regression  — meta-scan that no file under
+#                   src/smc/hedgerock/evolution/ or
+#                   scripts/hedgerock_evolution_*.py imports
+#                   rule_engine / decision_server / phase_d_walk_forward
+#   * config      — pre-deploy validation of
+#                   config/safety_bounds_template.yaml
+#
+# Operators: copy this file into a project that has the evolution
+# package installed; the jobs run as-is. The workflow MUST NOT be
+# extended to push, deploy, or modify production paths — it is a
+# read-only verification harness.
+
+on:
+  push:
+    paths:
+      - "src/smc/hedgerock/evolution/**"
+      - "scripts/hedgerock_evolution_*.py"
+      - "tests/hedgerock/evolution/**"
+      - "config/safety_bounds_template.yaml"
+      - "docs/hedgerock-*.md"
+      - ".github/workflows/hedgerock-evolution-ci.yml"
+  pull_request:
+    paths:
+      - "src/smc/hedgerock/evolution/**"
+      - "scripts/hedgerock_evolution_*.py"
+      - "tests/hedgerock/evolution/**"
+      - "config/safety_bounds_template.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: pytest (evolution + broader hedgerock)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" || pip install -e .
+
+      - name: Run evolution sub-suite
+        run: |
+          python -m pytest tests/hedgerock/evolution/ -q --maxfail=10
+
+      - name: Run broader hedgerock sweep
+        run: |
+          python -m pytest tests/hedgerock/ -q --maxfail=20
+
+  regression-guard:
+    name: regression guard (meta-scan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" || pip install -e .
+
+      - name: Run regression guard only
+        run: |
+          python -m pytest tests/hedgerock/evolution/test_regression_guard.py -v
+
+  config-validation:
+    name: config validator (safety_bounds_template.yaml)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" || pip install -e .
+
+      - name: Validate template (default mode → WARN-only)
+        run: |
+          python scripts/hedgerock_evolution_validate_config.py \
+            --config config/safety_bounds_template.yaml
+
+      - name: Validate template (strict mode → SAFETY_CLAMPS must agree)
+        run: |
+          python scripts/hedgerock_evolution_validate_config.py \
+            --config config/safety_bounds_template.yaml \
+            --strict
+
+  red-line-sentinel:
+    name: red-line file mtime sentinel (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Checkout (with full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Confirm red-line files were not modified by this PR
+        run: |
+          # The evolution layer must never modify these files. We
+          # check the diff range that GitHub Actions provides on PRs;
+          # on push events, base is the previous commit.
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          HEAD="${{ github.event.pull_request.head.sha || github.sha }}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "no diff base available (initial commit?); skipping"
+            exit 0
+          fi
+          CHANGED=$(git diff --name-only "$BASE" "$HEAD")
+          echo "changed files:"
+          echo "$CHANGED"
+          for forbidden in \
+            "src/smc/hedgerock/rule_engine.py" \
+            "src/smc/hedgerock/decision_server.py" \
+            "src/smc/hedgerock/phase_d_walk_forward.py" \
+            "config/safety_bounds.yaml"; do
+            if echo "$CHANGED" | grep -qE "^${forbidden}$"; then
+              echo "::error file=${forbidden}::red-line file modified — evolution layer must never touch this path"
+              exit 1
+            fi
+          done
+          if echo "$CHANGED" | grep -qE "^mql5/.*\.mq5$"; then
+            echo "::error::EA .mq5 file modified — out of scope for evolution layer"
+            exit 1
+          fi
+          if echo "$CHANGED" | grep -qE "^policy_registry/approved/" \
+             || echo "$CHANGED" | grep -qE "^policy_registry/pointer\.json$"; then
+            echo "::error::policy_registry/approved/ or pointer.json modified — manual human-only step"
+            exit 1
+          fi
+          echo "red-line sentinel: PASS"
