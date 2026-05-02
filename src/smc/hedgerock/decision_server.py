@@ -47,8 +47,9 @@ from smc.hedgerock.schemas import (
     regime_v1_to_v2,
 )
 from smc.hedgerock.tf_router import TimeframeRoute, route_timeframe
-from smc.hedgerock.transition_lock import compute_lock_until
+from smc.hedgerock.transition_lock import compute_lock_until, compute_lock_until_v2
 from types import MappingProxyType
+from datetime import timedelta
 
 
 __all__ = [
@@ -158,23 +159,26 @@ class FilterInputsProvider(Protocol):
 class PrevRegimeStore:
     """Thread-safe per-symbol legacy ``MarketRegimeAI`` store.
 
-    Holds the *previous* regime read by the EA on the last poll. The
-    rule engine uses ``(prev, current)`` to compute the transition
-    lock; the store persists across HTTP calls so transitions are
-    detected across polls.
+    Symbols are canonicalised to UPPERCASE on read + write so mixed
+    case anywhere in the call chain cannot produce a phantom shadow
+    record.
     """
 
     def __init__(self) -> None:
         self._lock = Lock()
         self._regimes: dict[str, MarketRegimeAI] = {}
 
+    @staticmethod
+    def _canon(symbol: str) -> str:
+        return str(symbol).upper()
+
     def get(self, symbol: str) -> MarketRegimeAI | None:
         with self._lock:
-            return self._regimes.get(symbol)
+            return self._regimes.get(self._canon(symbol))
 
     def set(self, symbol: str, regime: MarketRegimeAI) -> None:
         with self._lock:
-            self._regimes[symbol] = regime
+            self._regimes[self._canon(symbol)] = regime
 
     def keys(self) -> tuple[str, ...]:
         with self._lock:
@@ -182,21 +186,24 @@ class PrevRegimeStore:
 
 
 class PrevRegimeV2Store:
-    """Same shape as :class:`PrevRegimeStore` but keyed on the v2
-    lowercase ``RegimeV2`` enum. Used by Phase D consumers that have
-    already migrated to the v2 contract."""
+    """v2 counterpart of :class:`PrevRegimeStore` keyed on
+    ``RegimeV2``. Same UPPERCASE canonicalisation."""
 
     def __init__(self) -> None:
         self._lock = Lock()
         self._regimes: dict[str, RegimeV2] = {}
 
+    @staticmethod
+    def _canon(symbol: str) -> str:
+        return str(symbol).upper()
+
     def get(self, symbol: str) -> RegimeV2 | None:
         with self._lock:
-            return self._regimes.get(symbol)
+            return self._regimes.get(self._canon(symbol))
 
     def set(self, symbol: str, regime: RegimeV2) -> None:
         with self._lock:
-            self._regimes[symbol] = regime
+            self._regimes[self._canon(symbol)] = regime
 
     def keys(self) -> tuple[str, ...]:
         with self._lock:
@@ -218,6 +225,74 @@ def build_strategy_id(
 _DEFAULT_GENERATED_AT = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
+_FILTER_HALT_LOCK_SECONDS: int = 5 * 60
+
+
+def _run_rule_engine(
+    *,
+    symbol: str,
+    features: MarketFeatures,
+    news: NewsClassification | None,
+    ea_store: EAStateStore,
+    prev_envelope: SignalEnvelope | None,
+    now: datetime,
+):
+    """Run the production rule_engine path against the current
+    features + EA state.
+
+    Returns ``(dynamic_kwargs, regime_v2, confidence_v2, regime_v2)``
+    or ``None`` when rule_engine couldn't be invoked (e.g. classifier
+    raised). Imports are deferred so test environments that mock the
+    classifier don't pay the import cost up front.
+    """
+    try:
+        from smc.hedgerock.regime_classifier_v2 import classify_regime_v2
+        from smc.hedgerock.market_state import aggregate_from_stores
+        from smc.hedgerock.rule_engine import derive_envelope_params
+    except ImportError:  # pragma: no cover - production deps always present
+        return None
+
+    spread_pts = None
+    rec = ea_store.get_record(symbol.upper())
+    if rec is not None and rec.state.spread_pts is not None:
+        spread_pts = rec.state.spread_pts
+
+    news_intensity_for_classifier = news.event.intensity if news else None
+
+    try:
+        assessment = classify_regime_v2(
+            volatility_rank=features.volatility_rank,
+            h4_trend_bars=features.h4_trend_bars,
+            hh_count=features.hh_count,
+            ll_count=features.ll_count,
+            news_intensity=news_intensity_for_classifier,
+            spread_pts=spread_pts,
+        )
+    except Exception:
+        _LOG.exception("classify_regime_v2 crashed for %s", symbol)
+        return None
+
+    try:
+        market_state = aggregate_from_stores(
+            symbol=symbol,
+            now=now,
+            market_features=features,
+            regime_assessment=assessment,
+            ea_state_store=ea_store,
+        )
+    except Exception:
+        _LOG.exception("aggregate_from_stores crashed for %s", symbol)
+        return None
+
+    try:
+        params = derive_envelope_params(market_state, prev_envelope=prev_envelope)
+    except Exception:
+        _LOG.exception("derive_envelope_params crashed for %s", symbol)
+        return None
+
+    return params.to_kwargs(), assessment.regime, assessment.confidence, assessment.regime
+
+
 def build_envelope(
     symbol: str,
     features: MarketFeatures,
@@ -226,11 +301,22 @@ def build_envelope(
     now: datetime | None = None,
     news_classification: NewsClassification | None = None,
     current_exposure_lots: float = 0.0,
-    liquidity_sweep: tuple[bool, str | None, float | None, float | None] | None = None,
+    liquidity_sweep: Any | None = None,
     filter_result: FilterResult | None = None,
     enable_debate: bool = False,
     exit_decider_chat_fn: ChatFn | None = None,
     cost_tracker: CostTracker | None = None,
+    # Regime / confidence overrides — when rule_engine fires the
+    # envelope reports the v2 assessment values rather than the legacy
+    # mapping / tf_router heuristics.
+    regime_override: RegimeV2 | None = None,
+    confidence_override: float | None = None,
+    prev_regime_v2: RegimeV2 | None = None,
+    # Tri-state transition_lock override:
+    #   override_provided=False → fall back to legacy compute_lock_until
+    #   override_provided=True  → use override verbatim (None == "no lock")
+    transition_lock_until_override: datetime | None = None,
+    transition_lock_override_provided: bool = False,
     # Dynamic-params overrides (rule_engine.DynamicParams.to_kwargs()).
     mode: Mode | None = None,
     hedgerock_enabled: bool | None = None,
@@ -257,8 +343,16 @@ def build_envelope(
         ts = ts.replace(tzinfo=timezone.utc)
 
     sym = symbol.upper()
-    regime_v2: RegimeV2 = regime_v1_to_v2(features.regime) or "unknown"
-    prev_v2: RegimeV2 | None = regime_v1_to_v2(prev_regime)
+    regime_v2: RegimeV2 = (
+        regime_override
+        if regime_override is not None
+        else (regime_v1_to_v2(features.regime) or "unknown")
+    )
+    prev_v2: RegimeV2 | None = (
+        prev_regime_v2
+        if prev_regime_v2 is not None
+        else regime_v1_to_v2(prev_regime)
+    )
 
     route: TimeframeRoute = route_timeframe(
         volatility_rank=features.volatility_rank,
@@ -267,7 +361,16 @@ def build_envelope(
         h4_trend_bars=features.h4_trend_bars,
     )
 
-    lock_until = compute_lock_until(prev_regime, features.regime, ts)
+    if transition_lock_override_provided:
+        lock_until = transition_lock_until_override
+    else:
+        lock_until = compute_lock_until(prev_regime, features.regime, ts)
+
+    # Filter halt → push transition lock 5 minutes forward.
+    if filter_result is not None and getattr(filter_result, "halt", False):
+        filter_lock = ts + timedelta(seconds=_FILTER_HALT_LOCK_SECONDS)
+        if lock_until is None or filter_lock > lock_until:
+            lock_until = filter_lock
 
     # News context with safe defaults.
     news_intensity: NewsIntensity = "none"
@@ -289,18 +392,35 @@ def build_envelope(
         cost_tracker=cost_tracker,
     )
 
-    # Liquidity-sweep + filter-result are advisory; surface verbatim.
+    # Liquidity-sweep is advisory. Accept either a 4-tuple
+    # ``(active, direction, distance_pts, confidence)`` or an object
+    # with the same fields exposed (the production
+    # ``liquidity_provider`` returns a payload object).
     sweep_active: bool | None = None
     sweep_direction: Literal["bullish_reversal", "bearish_reversal"] | None = None
     sweep_distance: float | None = None
     sweep_confidence: float | None = None
     if liquidity_sweep is not None:
-        sweep_active, sweep_dir_raw, sweep_distance, sweep_confidence = liquidity_sweep
-        if sweep_dir_raw in ("bullish_reversal", "bearish_reversal"):
-            sweep_direction = sweep_dir_raw  # type: ignore[assignment]
+        if isinstance(liquidity_sweep, tuple):
+            sa, sd_raw, dist, conf = liquidity_sweep
+        else:
+            sa = getattr(liquidity_sweep, "active", None)
+            sd_raw = getattr(liquidity_sweep, "direction", None)
+            dist = getattr(liquidity_sweep, "distance_pts", None)
+            conf = getattr(liquidity_sweep, "confidence", None)
+        if sa:
+            sweep_active = True
+            if sd_raw in ("bullish_reversal", "bearish_reversal"):
+                sweep_direction = sd_raw  # type: ignore[assignment]
+            sweep_distance = dist
+            sweep_confidence = conf
 
-    # Confidence — tf_router gives a stable [0,1] readout; clamp.
-    confidence = max(0.0, min(1.0, float(route.confidence)))
+    # Confidence — caller may override (rule_engine path uses the v2
+    # assessment confidence); else fall back to the tf_router readout.
+    if confidence_override is not None:
+        confidence = max(0.0, min(1.0, float(confidence_override)))
+    else:
+        confidence = max(0.0, min(1.0, float(route.confidence)))
 
     return SignalEnvelope(
         symbol=sym,
@@ -414,6 +534,8 @@ def create_app(
     market_features_provider: MarketFeaturesProvider,
     prev_regime_store: PrevRegimeStore | None = None,
     *,
+    store: PrevRegimeStore | None = None,
+    prev_regime_v2_store: PrevRegimeV2Store | None = None,
     news_provider: NewsFeaturesProvider | None = None,
     exposure_provider: ExposureProvider | None = None,
     liquidity_sweep_provider: LiquiditySweepProvider | None = None,
@@ -422,6 +544,7 @@ def create_app(
     enable_debate: bool = True,
     enable_rule_engine: bool = False,
     ea_state_store: EAStateStore | None = None,
+    envelope_store: Any | None = None,
     exit_decider_chat_fn: ChatFn | None = None,
     cost_tracker: CostTracker | None = None,
     symbol_whitelist: frozenset[str] | None = None,
@@ -434,8 +557,17 @@ def create_app(
     liquidity / chat).
     """
     app = FastAPI(title="HedgeRock Decision Server", version=SCHEMA_VERSION)
-    store = prev_regime_store or PrevRegimeStore()
+    legacy_store = prev_regime_store or store or PrevRegimeStore()
+    v2_store = prev_regime_v2_store or PrevRegimeV2Store()
     ea_store = ea_state_store or EAStateStore()
+    if envelope_store is not None:
+        env_store: Any = envelope_store
+    else:
+        try:
+            from smc.hedgerock.envelope_store import EnvelopeStore
+            env_store = EnvelopeStore()
+        except ImportError:  # pragma: no cover
+            env_store = None
     whitelist = symbol_whitelist or frozenset({"XAUUSD"})
 
     @app.get("/healthz")
@@ -450,7 +582,12 @@ def create_app(
     @app.get("/status")
     def _status() -> JSONResponse:
         symbols = sorted(whitelist)
-        tracked = {sym: store.get(sym) for sym in symbols}
+        tracked = {sym: legacy_store.get(sym) for sym in symbols}
+        tracked_v2 = {
+            sym: v2_store.get(sym)
+            for sym in symbols
+            if v2_store.get(sym) is not None
+        }
         latest_ea: dict[str, dict] = {}
         records = ea_store.snapshot_records()
         now_ts = datetime.now(timezone.utc)
@@ -485,6 +622,7 @@ def create_app(
                 "market_provider_label": market_provider_label,
                 "ea_state_store_attached": True,
                 "latest_ea_states": latest_ea,
+                "tracked_v2_regimes": tracked_v2,
             }
         )
 
@@ -525,25 +663,90 @@ def create_app(
             if ea_state is not None:
                 ea_store.set(sym, ea_state)
 
-        prev = store.get(sym)
+        prev = legacy_store.get(sym)
         news = _safe_get_news_classification(news_provider, sym)
         exposure_lots = _safe_get_exposure(exposure_provider, sym)
-        sweep = _safe_get_liquidity_sweep(liquidity_sweep_provider, sym)
+        sweep_payload: Any | None = None
+        if liquidity_provider is not None:
+            try:
+                sweep_payload = liquidity_provider.get_active_sweep(sym)
+            except Exception:
+                _LOG.exception("liquidity_provider crashed for %s", sym)
+                sweep_payload = None
+        if sweep_payload is None:
+            sweep_payload = _safe_get_liquidity_sweep(
+                liquidity_sweep_provider, sym,
+            )
+
+        # Filter inputs → halt-style transition lock push.
+        filter_result: FilterResult | None = None
+        fi = _safe_get_filter_inputs(filter_inputs_provider, sym)
+        if fi is not None:
+            try:
+                filter_result = compute_filters(fi)
+            except Exception:
+                _LOG.exception("compute_filters crashed for %s", sym)
+                filter_result = None
+
+        ts_now = datetime.now(timezone.utc)
+
+        # ----- rule_engine wiring (enable_rule_engine=True) -----
+        rule_kwargs: dict[str, Any] = {}
+        regime_override: RegimeV2 | None = None
+        confidence_override: float | None = None
+        prev_v2_for_envelope: RegimeV2 | None = v2_store.get(sym)
+        v2_lock_override: datetime | None = None
+        v2_lock_provided = False
+        post_v2_regime: RegimeV2 | None = None
+        if enable_rule_engine:
+            prev_env = env_store.get(sym) if env_store is not None else None
+            rk = _run_rule_engine(
+                symbol=sym, features=features, news=news,
+                ea_store=ea_store, prev_envelope=prev_env, now=ts_now,
+            )
+            if rk is not None:
+                (rule_kwargs, regime_override, confidence_override,
+                 post_v2_regime) = rk
+                # Compute v2 transition lock (overrides legacy lock).
+                v2_lock_override = compute_lock_until_v2(
+                    prev_v2_for_envelope, regime_override, ts_now,
+                )
+                # Carryover: if the previous envelope still has a
+                # transition lock in the future, take max(fresh, prev).
+                if prev_env is not None and prev_env.transition_lock_until_ts:
+                    prev_lock = prev_env.transition_lock_until_ts
+                    if prev_lock > ts_now:
+                        if v2_lock_override is None or prev_lock > v2_lock_override:
+                            v2_lock_override = prev_lock
+                v2_lock_provided = True
 
         env = build_envelope(
             sym, features,
             prev_regime=prev,
-            now=datetime.now(timezone.utc),
+            now=ts_now,
             news_classification=news,
             current_exposure_lots=exposure_lots,
-            liquidity_sweep=sweep,
+            liquidity_sweep=sweep_payload,
+            filter_result=filter_result,
             enable_debate=enable_debate,
             exit_decider_chat_fn=exit_decider_chat_fn,
             cost_tracker=cost_tracker,
+            regime_override=regime_override,
+            confidence_override=confidence_override,
+            prev_regime_v2=prev_v2_for_envelope,
+            transition_lock_until_override=v2_lock_override,
+            transition_lock_override_provided=v2_lock_provided,
+            **rule_kwargs,
         )
 
-        # Persist this regime for next poll's transition computation.
-        store.set(sym, features.regime)
+        # Persist regimes for next poll's transition computation.
+        legacy_store.set(sym, features.regime)
+        if post_v2_regime is not None:
+            v2_store.set(sym, post_v2_regime)
+        elif enable_rule_engine and regime_override is not None:
+            v2_store.set(sym, regime_override)
+        if env_store is not None:
+            env_store.set(sym, env)
 
         return JSONResponse(env.model_dump(mode="json"))
 
