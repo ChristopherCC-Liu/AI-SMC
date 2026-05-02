@@ -35,11 +35,22 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from smc.hedgerock import decision_server
+from smc.hedgerock.evolution.anomaly_shield import (
+    AnomalyLevel,
+    AnomalyState,
+    ShieldAction,
+    shield_action,
+)
 from smc.hedgerock.evolution.policy_manifest import (
     CandidateManifest,
     EvidenceBundle,
     GateStatus,
     PromotionGateResult,
+)
+from smc.hedgerock.evolution.regime_engine import (
+    MarketRegime,
+    RegimeSnapshot,
+    regime_adaptive_weights,
 )
 
 
@@ -49,6 +60,7 @@ __all__ = [
     "DECISION_RECOMMEND",
     "REASON_EVIDENCE_CHAIN_INVALID",
     "REASON_INSUFFICIENT_XAUUSD_COVERAGE",
+    "REASON_MARKET_ANOMALY",
     "REASON_NO_TRIGGER",
     "REASON_PARAMETER_CLASS_UNSUPPORTED",
     "REASON_PROPOSAL_OUTSIDE_SAFETY_CLAMP",
@@ -72,6 +84,7 @@ REASON_INSUFFICIENT_XAUUSD_COVERAGE = "insufficient_xauusd_coverage"
 REASON_PROPOSAL_OUTSIDE_SAFETY_CLAMP = "proposal_outside_safety_clamp"
 REASON_PARAMETER_CLASS_UNSUPPORTED = "parameter_class_unsupported"
 REASON_NO_TRIGGER = "no_trigger"
+REASON_MARKET_ANOMALY = "market_anomaly"
 
 _MIN_XAUUSD_YEARS_PASSING = 4
 
@@ -376,8 +389,15 @@ def generate_candidate_proposals(
     ],
     blocking_reasons_per_candidate: Mapping[str, Iterable[str]],
     output_dir: Path | None = None,
+    regime_snapshot: RegimeSnapshot | None = None,
+    anomaly_state: AnomalyState | None = None,
 ) -> list[CandidateProposal]:
     """Generate one :class:`CandidateProposal` per menu entry.
+
+    Optional ``regime_snapshot`` and ``anomaly_state`` come from the
+    upstream :mod:`regime_engine` and :mod:`anomaly_shield` sidecars.
+    When ``anomaly_state`` is at CRITICAL or LOCKDOWN every proposal
+    short-circuits to ``NO_RECOMMENDATION/market_anomaly``.
 
     The function NEVER touches live registry paths. When
     ``output_dir`` is provided, a sidecar JSON snapshot of the
@@ -386,8 +406,19 @@ def generate_candidate_proposals(
     never under ``policy_registry/approved/`` and never
     ``policy_registry/pointer.json``.
     """
+    shield = (
+        shield_action(anomaly_state) if anomaly_state is not None else None
+    )
+
     proposals: list[CandidateProposal] = []
     for candidate in candidate_menu:
+        if shield is not None and not shield.new_candidates_allowed:
+            proposals.append(
+                _no_recommendation(
+                    candidate=candidate, reason=REASON_MARKET_ANOMALY,
+                )
+            )
+            continue
         gate_results = dict(
             gate_results_per_candidate.get(candidate.candidate_id, {})
         )

@@ -28,9 +28,20 @@ from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import math
+
+from smc.hedgerock.evolution.anomaly_shield import (
+    AnomalyDetector,
+    AnomalyLevel,
+    shield_action,
+)
 from smc.hedgerock.evolution.candidate_generator import (
     CandidateProposal,
     DECISION_RECOMMEND,
+)
+from smc.hedgerock.evolution.regime_engine import (
+    MarketRegime,
+    RegimeDetector,
 )
 from smc.hedgerock.evolution.paper_test_ledger import (
     PaperTestLedger,
@@ -45,6 +56,24 @@ import hedgerock_evolution_recommend as recommend_cli  # noqa: E402
 import hedgerock_evolution_queue_inspect as inspect_cli  # noqa: E402
 import hedgerock_evolution_promote as promote_cli  # noqa: E402
 sys.path.pop(0)
+
+
+def _build_demo_market_bars() -> list[dict]:
+    """Synthetic XAUUSD-like OHLC bars for the demo's regime + anomaly
+    stage. Deterministic, NORMAL-regime calm tape."""
+    out: list[dict] = []
+    price = 2000.0
+    pattern = (0.5, -1.0, 1.5, -0.5, 1.0, -1.5)
+    for i in range(80):
+        step = 0.005 * pattern[i % len(pattern)]
+        new = price * math.exp(step)
+        out.append({
+            "open": price, "close": new,
+            "high": max(price, new) * 1.001,
+            "low": min(price, new) * 0.999,
+        })
+        price = new
+    return out
 
 
 _REAL_REGISTRY_ROOT = Path("/Users/christopher/HedgeRock/policy_registry")
@@ -185,6 +214,26 @@ def main(argv: list[str] | None = None) -> int:
     atlas, avail, wf, bounds, audit_log = _seed_evidence(workspace)
     print(f"  fixture under: {workspace / 'fixture'}")
     _audit("observe", "ok", workspace=str(workspace))
+
+    print("== Stage: REGIME + ANOMALY — sidecar self-protection check ==")
+    market_bars = _build_demo_market_bars()
+    regime = RegimeDetector().detect(bars=market_bars)
+    anomaly = AnomalyDetector().detect(bars=market_bars)
+    action = shield_action(anomaly)
+    print(
+        f"  regime={regime.regime.value} "
+        f"(confidence={regime.confidence:.2f}); "
+        f"anomaly={anomaly.level.value}; "
+        f"new_candidates_allowed={action.new_candidates_allowed}; "
+        f"queue_frozen={action.queue_frozen}; "
+        f"full_lockdown={action.full_lockdown}"
+    )
+    _audit(
+        "regime_anomaly", "ok",
+        regime=regime.regime.value,
+        anomaly=anomaly.level.value,
+        new_candidates_allowed=action.new_candidates_allowed,
+    )
 
     print("== Stage: DETECT + RECOMMEND — run report-only recommendation CLI ==")
     report_path = workspace / "report" / "phase-d-evolution-report.md"

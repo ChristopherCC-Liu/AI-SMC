@@ -42,6 +42,12 @@ from smc.hedgerock.evolution.ascii_visualisations import (
     render_heat_ranking,
     render_parameter_comparison_table,
 )
+from smc.hedgerock.evolution.anomaly_shield import (
+    AnomalyDetector,
+    AnomalyLevel,
+    AnomalyState,
+    shield_action,
+)
 from smc.hedgerock.evolution.candidate_generator import (
     CandidateProposal,
     DECISION_NO_RECOMMENDATION,
@@ -51,6 +57,11 @@ from smc.hedgerock.evolution.candidate_generator import (
     SAFETY_CLAMPS,
     generate_candidate_proposals,
     get_live_parameter_snapshot,
+)
+from smc.hedgerock.evolution.regime_engine import (
+    MarketRegime,
+    RegimeDetector,
+    RegimeSnapshot,
 )
 from smc.hedgerock.evolution.candidate_menu import CANDIDATE_MENU_V0
 from smc.hedgerock.evolution.policy_manifest import (
@@ -128,6 +139,8 @@ def _render_recommendation(
     bundle: EvidenceBundle,
     audit_log_path: Path,
     gate_results_per_candidate: dict[str, dict[str, "PromotionGateResult"]] | None = None,
+    regime_snapshot: RegimeSnapshot | None = None,
+    anomaly_state: AnomalyState | None = None,
 ) -> str:
     audit = getattr(bundle, "registry_audit", None)
     audit_present = bool(getattr(audit, "audit_log_present", False))
@@ -153,7 +166,30 @@ def _render_recommendation(
     out.append("- audit_log_path: " + f"`{audit_log_path}`")
     out.append(f"- `audit_log_present`: **{audit_present}**")
     out.append(f"- `registry_append_only_violation`: **{audit_violation}**")
+    if regime_snapshot is not None:
+        out.append(
+            f"- `regime`: **{regime_snapshot.regime.value}** "
+            f"(confidence={regime_snapshot.confidence:.2f})"
+        )
+    if anomaly_state is not None:
+        out.append(
+            f"- `anomaly_level`: **{anomaly_state.level.value}**"
+        )
+        if anomaly_state.triggers:
+            out.append(
+                "- `anomaly_triggers`: "
+                + ", ".join(f"`{t}`" for t in anomaly_state.triggers)
+            )
     out.append("")
+
+    if anomaly_state is not None:
+        action = shield_action(anomaly_state)
+        if action.full_lockdown:
+            out.append(f"> {action.banner}")
+            out.append("")
+        elif not action.new_candidates_allowed:
+            out.append(f"> {action.banner}")
+            out.append("")
 
     out.append("## Baseline summary")
     out.append("")
@@ -293,6 +329,10 @@ def run(
     report_path: Path,
     recommendation_path: Path,
     registry_audit_log_path: Path | None = None,
+    market_bars: list[dict] | None = None,
+    macro_context: dict | None = None,
+    regime_snapshot: RegimeSnapshot | None = None,
+    anomaly_state: AnomalyState | None = None,
 ) -> tuple[list[CandidateProposal], Path]:
     """Library entry point.
 
@@ -333,6 +373,18 @@ def run(
             "recommendations"
         )
 
+    # Step 2b — derive regime + anomaly state. Caller may pass
+    # pre-computed snapshots; otherwise we run the detectors against
+    # ``market_bars`` (when provided). With no bars and no snapshot,
+    # the loop runs unguarded — same behaviour as before this layer
+    # was added.
+    if regime_snapshot is None and market_bars:
+        regime_snapshot = RegimeDetector().detect(
+            bars=market_bars, macro=macro_context or {},
+        )
+    if anomaly_state is None and market_bars:
+        anomaly_state = AnomalyDetector().detect(bars=market_bars)
+
     # Step 3 — call the candidate generator. Output dir is set to the
     # recommendation file's parent so the JSON snapshot lives alongside
     # the markdown for the operator.
@@ -342,6 +394,8 @@ def run(
         gate_results_per_candidate=gate_results_per_candidate,
         blocking_reasons_per_candidate=blocking_reasons_per_candidate,
         output_dir=Path(recommendation_path).parent,
+        regime_snapshot=regime_snapshot,
+        anomaly_state=anomaly_state,
     )
 
     # Step 3b — when the audit log is absent, override every RECOMMEND
@@ -370,6 +424,8 @@ def run(
     body = _render_recommendation(
         proposals=proposals, bundle=bundle, audit_log_path=audit_path,
         gate_results_per_candidate=gate_results_per_candidate,
+        regime_snapshot=regime_snapshot,
+        anomaly_state=anomaly_state,
     )
     Path(recommendation_path).parent.mkdir(parents=True, exist_ok=True)
     Path(recommendation_path).write_text(body, encoding="utf-8")
