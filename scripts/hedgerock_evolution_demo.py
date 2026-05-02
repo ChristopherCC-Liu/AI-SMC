@@ -30,6 +30,10 @@ from pathlib import Path
 
 import math
 
+from smc.hedgerock.evolution.adaptive_stops import (
+    VolatilityRegime,
+    compute_stop_recommendation,
+)
 from smc.hedgerock.evolution.anomaly_shield import (
     AnomalyDetector,
     AnomalyLevel,
@@ -38,6 +42,10 @@ from smc.hedgerock.evolution.anomaly_shield import (
 from smc.hedgerock.evolution.candidate_generator import (
     CandidateProposal,
     DECISION_RECOMMEND,
+)
+from smc.hedgerock.evolution.multi_timeframe_state import (
+    TimeframeState,
+    compute_consensus,
 )
 from smc.hedgerock.evolution.regime_engine import (
     MarketRegime,
@@ -233,6 +241,33 @@ def main(argv: list[str] | None = None) -> int:
         regime=regime.regime.value,
         anomaly=anomaly.level.value,
         new_candidates_allowed=action.new_candidates_allowed,
+    )
+
+    print("== Stage: TIMEFRAME + STOP — multi-TF consensus + stop advisory ==")
+    consensus = compute_consensus(
+        # Demo: stamp explicit READY across timeframes so the consensus
+        # passes the threshold without needing realistic OHLC for each.
+        d1_state=TimeframeState.READY,
+        h4_state=TimeframeState.READY,
+        h1_state=TimeframeState.VALIDATING,
+        m5_state=TimeframeState.VALIDATING,
+    )
+    stop = compute_stop_recommendation(bars=market_bars)
+    print(
+        f"  session={consensus.active_session.value}; "
+        f"score={consensus.consensus_score:.2f}; "
+        f"can_recommend={consensus.can_recommend}; "
+        f"vol_regime={stop.vol_regime.value}; "
+        f"atr_mult={stop.atr_multiplier}; "
+        f"position_scale={stop.position_scale}"
+    )
+    _audit(
+        "timeframe_stop", "ok",
+        session=consensus.active_session.value,
+        consensus_score=consensus.consensus_score,
+        can_recommend=consensus.can_recommend,
+        vol_regime=stop.vol_regime.value,
+        atr_multiplier=stop.atr_multiplier,
     )
 
     print("== Stage: DETECT + RECOMMEND — run report-only recommendation CLI ==")

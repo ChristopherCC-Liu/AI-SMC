@@ -69,6 +69,7 @@ _REQUIRED_KEYS = {"timestamp", "operation", "result", "operator", "details"}
 _EXPECTED_STAGE_ORDER = (
     "observe",
     "regime_anomaly",
+    "timeframe_stop",
     "recommend",
     "queue",
     "inspect",
@@ -79,6 +80,10 @@ _EXPECTED_STAGE_ORDER = (
 _EXPECTED_DETAIL_FIELDS: dict[str, set[str]] = {
     "observe": {"workspace"},
     "regime_anomaly": {"regime", "anomaly", "new_candidates_allowed"},
+    "timeframe_stop": {
+        "session", "consensus_score", "can_recommend",
+        "vol_regime", "atr_multiplier",
+    },
     "recommend": {"report", "recommendation"},
     "queue": {"enqueued", "queue_path"},
     "inspect": {"inspection"},

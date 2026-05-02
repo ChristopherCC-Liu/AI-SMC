@@ -42,11 +42,20 @@ from smc.hedgerock.evolution.ascii_visualisations import (
     render_heat_ranking,
     render_parameter_comparison_table,
 )
+from smc.hedgerock.evolution.adaptive_stops import (
+    StopRecommendation,
+    VolatilityRegime,
+    compute_stop_recommendation,
+)
 from smc.hedgerock.evolution.anomaly_shield import (
     AnomalyDetector,
     AnomalyLevel,
     AnomalyState,
     shield_action,
+)
+from smc.hedgerock.evolution.multi_timeframe_state import (
+    TimeframeConsensus,
+    compute_consensus,
 )
 from smc.hedgerock.evolution.candidate_generator import (
     CandidateProposal,
@@ -141,6 +150,8 @@ def _render_recommendation(
     gate_results_per_candidate: dict[str, dict[str, "PromotionGateResult"]] | None = None,
     regime_snapshot: RegimeSnapshot | None = None,
     anomaly_state: AnomalyState | None = None,
+    timeframe_consensus: TimeframeConsensus | None = None,
+    stop_recommendation: StopRecommendation | None = None,
 ) -> str:
     audit = getattr(bundle, "registry_audit", None)
     audit_present = bool(getattr(audit, "audit_log_present", False))
@@ -190,6 +201,59 @@ def _render_recommendation(
         elif not action.new_candidates_allowed:
             out.append(f"> {action.banner}")
             out.append("")
+
+    if timeframe_consensus is not None:
+        out.append("## Timeframe Consensus")
+        out.append("")
+        out.append(
+            f"- session: **{timeframe_consensus.active_session.value}** "
+            f"(position_scale={timeframe_consensus.session_profile.position_scale})"
+        )
+        out.append(
+            f"- D1: **{timeframe_consensus.d1_state.value}**, "
+            f"H4: **{timeframe_consensus.h4_state.value}**, "
+            f"H1: **{timeframe_consensus.h1_state.value}**, "
+            f"M5: **{timeframe_consensus.m5_state.value}**"
+        )
+        out.append(
+            f"- consensus_score: **{timeframe_consensus.consensus_score:.3f}** "
+            f"(threshold 0.70)"
+        )
+        out.append(
+            f"- can_recommend: **{timeframe_consensus.can_recommend}**"
+        )
+        if timeframe_consensus.blocking_conditions:
+            out.append("- blocking conditions:")
+            for b in timeframe_consensus.blocking_conditions:
+                out.append(f"    - `{b}`")
+        out.append("")
+
+    if stop_recommendation is not None:
+        out.append("## Stop-Loss Advisory (ADVISORY ONLY — does not "
+                   "modify live stops)")
+        out.append("")
+        out.append(
+            f"- vol_regime: **{stop_recommendation.vol_regime.value}**"
+        )
+        out.append(
+            f"- atr_multiplier: **{stop_recommendation.atr_multiplier}**"
+        )
+        out.append(
+            f"- position_scale: **{stop_recommendation.position_scale}**"
+        )
+        out.append(
+            f"- σ_ratio: **{stop_recommendation.sigma_ratio}**"
+        )
+        out.append(
+            f"- Parkinson: **{stop_recommendation.parkinson_vol}**, "
+            f"Garman-Klass: **{stop_recommendation.garman_klass_vol}**"
+        )
+        out.append(f"- reasoning: `{stop_recommendation.reasoning}`")
+        if stop_recommendation.blocking_conditions:
+            out.append("- blockers:")
+            for b in stop_recommendation.blocking_conditions:
+                out.append(f"    - `{b}`")
+        out.append("")
 
     out.append("## Baseline summary")
     out.append("")
@@ -333,6 +397,10 @@ def run(
     macro_context: dict | None = None,
     regime_snapshot: RegimeSnapshot | None = None,
     anomaly_state: AnomalyState | None = None,
+    timeframe_consensus: TimeframeConsensus | None = None,
+    stop_recommendation: StopRecommendation | None = None,
+    timeframe_bars: dict | None = None,
+    active_timeframes: tuple[str, ...] = (),
 ) -> tuple[list[CandidateProposal], Path]:
     """Library entry point.
 
@@ -384,6 +452,16 @@ def run(
         )
     if anomaly_state is None and market_bars:
         anomaly_state = AnomalyDetector().detect(bars=market_bars)
+    if stop_recommendation is None and market_bars:
+        stop_recommendation = compute_stop_recommendation(bars=market_bars)
+    if timeframe_consensus is None and timeframe_bars:
+        timeframe_consensus = compute_consensus(
+            d1_bars=timeframe_bars.get("D1"),
+            h4_bars=timeframe_bars.get("H4"),
+            h1_bars=timeframe_bars.get("H1"),
+            m5_bars=timeframe_bars.get("M5"),
+            active_timeframes=active_timeframes,
+        )
 
     # Step 3 — call the candidate generator. Output dir is set to the
     # recommendation file's parent so the JSON snapshot lives alongside
@@ -396,6 +474,8 @@ def run(
         output_dir=Path(recommendation_path).parent,
         regime_snapshot=regime_snapshot,
         anomaly_state=anomaly_state,
+        timeframe_consensus=timeframe_consensus,
+        stop_recommendation=stop_recommendation,
     )
 
     # Step 3b — when the audit log is absent, override every RECOMMEND
@@ -426,6 +506,8 @@ def run(
         gate_results_per_candidate=gate_results_per_candidate,
         regime_snapshot=regime_snapshot,
         anomaly_state=anomaly_state,
+        timeframe_consensus=timeframe_consensus,
+        stop_recommendation=stop_recommendation,
     )
     Path(recommendation_path).parent.mkdir(parents=True, exist_ok=True)
     Path(recommendation_path).write_text(body, encoding="utf-8")

@@ -35,11 +35,18 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from smc.hedgerock import decision_server
+from smc.hedgerock.evolution.adaptive_stops import (
+    StopRecommendation,
+    VolatilityRegime,
+)
 from smc.hedgerock.evolution.anomaly_shield import (
     AnomalyLevel,
     AnomalyState,
     ShieldAction,
     shield_action,
+)
+from smc.hedgerock.evolution.multi_timeframe_state import (
+    TimeframeConsensus,
 )
 from smc.hedgerock.evolution.policy_manifest import (
     CandidateManifest,
@@ -59,11 +66,13 @@ __all__ = [
     "DECISION_NO_RECOMMENDATION",
     "DECISION_RECOMMEND",
     "REASON_EVIDENCE_CHAIN_INVALID",
+    "REASON_EXTREME_VOLATILITY",
     "REASON_INSUFFICIENT_XAUUSD_COVERAGE",
     "REASON_MARKET_ANOMALY",
     "REASON_NO_TRIGGER",
     "REASON_PARAMETER_CLASS_UNSUPPORTED",
     "REASON_PROPOSAL_OUTSIDE_SAFETY_CLAMP",
+    "REASON_TIMEFRAME_CONSENSUS_INSUFFICIENT",
     "SAFETY_CLAMPS",
     "SafetyClamp",
     "generate_candidate_proposals",
@@ -85,6 +94,8 @@ REASON_PROPOSAL_OUTSIDE_SAFETY_CLAMP = "proposal_outside_safety_clamp"
 REASON_PARAMETER_CLASS_UNSUPPORTED = "parameter_class_unsupported"
 REASON_NO_TRIGGER = "no_trigger"
 REASON_MARKET_ANOMALY = "market_anomaly"
+REASON_TIMEFRAME_CONSENSUS_INSUFFICIENT = "timeframe_consensus_insufficient"
+REASON_EXTREME_VOLATILITY = "extreme_volatility"
 
 _MIN_XAUUSD_YEARS_PASSING = 4
 
@@ -391,20 +402,23 @@ def generate_candidate_proposals(
     output_dir: Path | None = None,
     regime_snapshot: RegimeSnapshot | None = None,
     anomaly_state: AnomalyState | None = None,
+    timeframe_consensus: TimeframeConsensus | None = None,
+    stop_recommendation: StopRecommendation | None = None,
 ) -> list[CandidateProposal]:
     """Generate one :class:`CandidateProposal` per menu entry.
 
-    Optional ``regime_snapshot`` and ``anomaly_state`` come from the
-    upstream :mod:`regime_engine` and :mod:`anomaly_shield` sidecars.
-    When ``anomaly_state`` is at CRITICAL or LOCKDOWN every proposal
-    short-circuits to ``NO_RECOMMENDATION/market_anomaly``.
+    Short-circuit precedence (highest priority first):
 
-    The function NEVER touches live registry paths. When
-    ``output_dir`` is provided, a sidecar JSON snapshot of the
-    proposals is written under it for the recommendation CLI to
-    consume — but the directory MUST be a tmp / report-only path,
-    never under ``policy_registry/approved/`` and never
-    ``policy_registry/pointer.json``.
+      1. ``anomaly_state`` at CRITICAL/LOCKDOWN →
+         ``NO_RECOMMENDATION/market_anomaly``
+      2. ``timeframe_consensus.can_recommend == False`` →
+         ``NO_RECOMMENDATION/timeframe_consensus_insufficient``
+      3. ``stop_recommendation.vol_regime == EXTREME`` AND the
+         candidate's parameter class is ``confidence_threshold_aggressive``
+         → ``NO_RECOMMENDATION/extreme_volatility`` (the aggressive
+         floor must not be loosened in EXTREME vol regimes).
+
+    The function NEVER touches live registry paths.
     """
     shield = (
         shield_action(anomaly_state) if anomaly_state is not None else None
@@ -416,6 +430,31 @@ def generate_candidate_proposals(
             proposals.append(
                 _no_recommendation(
                     candidate=candidate, reason=REASON_MARKET_ANOMALY,
+                )
+            )
+            continue
+        if (
+            timeframe_consensus is not None
+            and not timeframe_consensus.can_recommend
+        ):
+            proposals.append(
+                _no_recommendation(
+                    candidate=candidate,
+                    reason=REASON_TIMEFRAME_CONSENSUS_INSUFFICIENT,
+                )
+            )
+            continue
+        if (
+            stop_recommendation is not None
+            and stop_recommendation.vol_regime == VolatilityRegime.EXTREME
+            and _resolve_parameter_class(candidate.diff.target)
+            == "confidence_threshold_aggressive"
+        ):
+            proposals.append(
+                _no_recommendation(
+                    candidate=candidate,
+                    reason=REASON_EXTREME_VOLATILITY,
+                    parameter_class="confidence_threshold_aggressive",
                 )
             )
             continue
