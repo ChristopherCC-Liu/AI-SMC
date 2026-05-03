@@ -70,6 +70,7 @@ _EXPECTED_STAGE_ORDER = (
     "observe",
     "regime_anomaly",
     "timeframe_stop",
+    "stress_test",
     "recommend",
     "queue",
     "inspect",
@@ -83,6 +84,10 @@ _EXPECTED_DETAIL_FIELDS: dict[str, set[str]] = {
     "timeframe_stop": {
         "session", "consensus_score", "can_recommend",
         "vol_regime", "atr_multiplier",
+    },
+    "stress_test": {
+        "scenarios_total", "scenarios_survived",
+        "scenarios_breached", "all_passed",
     },
     "recommend": {"report", "recommendation"},
     "queue": {"enqueued", "queue_path"},

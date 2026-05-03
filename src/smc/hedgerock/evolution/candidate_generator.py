@@ -72,6 +72,7 @@ __all__ = [
     "REASON_NO_TRIGGER",
     "REASON_PARAMETER_CLASS_UNSUPPORTED",
     "REASON_PROPOSAL_OUTSIDE_SAFETY_CLAMP",
+    "REASON_STRESS_TEST_BREACHED",
     "REASON_TIMEFRAME_CONSENSUS_INSUFFICIENT",
     "SAFETY_CLAMPS",
     "SafetyClamp",
@@ -96,6 +97,7 @@ REASON_NO_TRIGGER = "no_trigger"
 REASON_MARKET_ANOMALY = "market_anomaly"
 REASON_TIMEFRAME_CONSENSUS_INSUFFICIENT = "timeframe_consensus_insufficient"
 REASON_EXTREME_VOLATILITY = "extreme_volatility"
+REASON_STRESS_TEST_BREACHED = "stress_test_breached"
 
 _MIN_XAUUSD_YEARS_PASSING = 4
 
@@ -404,6 +406,9 @@ def generate_candidate_proposals(
     anomaly_state: AnomalyState | None = None,
     timeframe_consensus: TimeframeConsensus | None = None,
     stop_recommendation: StopRecommendation | None = None,
+    stress_test: bool = False,
+    stress_test_sink: dict | None = None,
+    stress_test_scenarios: tuple | None = None,
 ) -> list[CandidateProposal]:
     """Generate one :class:`CandidateProposal` per menu entry.
 
@@ -417,6 +422,10 @@ def generate_candidate_proposals(
          candidate's parameter class is ``confidence_threshold_aggressive``
          → ``NO_RECOMMENDATION/extreme_volatility`` (the aggressive
          floor must not be loosened in EXTREME vol regimes).
+      4. ``stress_test=True`` AND the proposal BREACHED any scenario
+         → ``NO_RECOMMENDATION/stress_test_breached``. Default is
+         OFF; opt-in via the ``stress_test`` kwarg keeps the existing
+         contract bit-for-bit identical for legacy callers.
 
     The function NEVER touches live registry paths.
     """
@@ -471,10 +480,61 @@ def generate_candidate_proposals(
         )
         proposals.append(proposal)
 
+    # Stress test (opt-in). Demote BREACHED candidates to
+    # NO_RECOMMENDATION / stress_test_breached. Pure post-processing —
+    # the existing decision pipeline above is untouched when
+    # ``stress_test=False``.
+    if stress_test:
+        proposals = _apply_stress_test(
+            proposals=proposals,
+            sink=stress_test_sink,
+            scenarios=stress_test_scenarios,
+        )
+
     if output_dir is not None:
         _emit_sidecar_snapshot(proposals=proposals, output_dir=output_dir)
 
     return proposals
+
+
+def _apply_stress_test(
+    *,
+    proposals: list[CandidateProposal],
+    sink: dict | None,
+    scenarios: tuple | None,
+) -> list[CandidateProposal]:
+    """Run the stress tester against every RECOMMEND proposal and
+    demote BREACHED candidates. Lazy import so the unrelated callers
+    don't pay the import cost."""
+    from dataclasses import replace
+    from smc.hedgerock.evolution.stress_tester import (
+        REASON_STRESS_TEST_BREACHED as _STRESS_REASON,
+        StressTester,
+        VERDICT_BREACHED,
+    )
+
+    live_params = decision_server.get_live_parameters()
+    tester = (
+        StressTester(scenarios=scenarios)
+        if scenarios is not None
+        else StressTester()
+    )
+    results = tester.test_all_candidates(proposals, live_params)
+    if sink is not None:
+        sink.update(results)
+
+    out: list[CandidateProposal] = []
+    for p in proposals:
+        if p.decision == DECISION_RECOMMEND:
+            cand_results = results.get(p.candidate_id, [])
+            if any(r.verdict == VERDICT_BREACHED for r in cand_results):
+                p = replace(
+                    p,
+                    decision=DECISION_NO_RECOMMENDATION,
+                    decision_reason=_STRESS_REASON,
+                )
+        out.append(p)
+    return out
 
 
 # ---------------------------------------------------------------------------

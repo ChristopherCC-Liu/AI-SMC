@@ -152,6 +152,7 @@ def _render_recommendation(
     anomaly_state: AnomalyState | None = None,
     timeframe_consensus: TimeframeConsensus | None = None,
     stop_recommendation: StopRecommendation | None = None,
+    stress_test_results: dict | None = None,
 ) -> str:
     audit = getattr(bundle, "registry_audit", None)
     audit_present = bool(getattr(audit, "audit_log_present", False))
@@ -254,6 +255,12 @@ def _render_recommendation(
             for b in stop_recommendation.blocking_conditions:
                 out.append(f"    - `{b}`")
         out.append("")
+
+    if stress_test_results is not None:
+        from smc.hedgerock.evolution.stress_tester import (
+            render_survival_report,
+        )
+        out.append(render_survival_report(stress_test_results))
 
     out.append("## Baseline summary")
     out.append("")
@@ -401,6 +408,8 @@ def run(
     stop_recommendation: StopRecommendation | None = None,
     timeframe_bars: dict | None = None,
     active_timeframes: tuple[str, ...] = (),
+    stress_test: bool = False,
+    stress_test_scenarios: tuple | None = None,
 ) -> tuple[list[CandidateProposal], Path]:
     """Library entry point.
 
@@ -466,6 +475,7 @@ def run(
     # Step 3 — call the candidate generator. Output dir is set to the
     # recommendation file's parent so the JSON snapshot lives alongside
     # the markdown for the operator.
+    stress_test_sink: dict[str, list] = {}
     proposals = generate_candidate_proposals(
         candidate_menu=CANDIDATE_MENU_V0,
         bundle=bundle,
@@ -476,6 +486,9 @@ def run(
         anomaly_state=anomaly_state,
         timeframe_consensus=timeframe_consensus,
         stop_recommendation=stop_recommendation,
+        stress_test=stress_test,
+        stress_test_sink=stress_test_sink if stress_test else None,
+        stress_test_scenarios=stress_test_scenarios,
     )
 
     # Step 3b — when the audit log is absent, override every RECOMMEND
@@ -508,6 +521,7 @@ def run(
         anomaly_state=anomaly_state,
         timeframe_consensus=timeframe_consensus,
         stop_recommendation=stop_recommendation,
+        stress_test_results=(stress_test_sink if stress_test else None),
     )
     Path(recommendation_path).parent.mkdir(parents=True, exist_ok=True)
     Path(recommendation_path).write_text(body, encoding="utf-8")
@@ -541,6 +555,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report-path", type=Path, required=True)
     parser.add_argument("--recommendation-path", type=Path, required=True)
     parser.add_argument("--registry-audit-log", type=Path, default=None)
+    # --stress-test is OFF by default. Operators must explicitly enable
+    # adversarial scenario evaluation. --no-stress-test is the explicit
+    # opt-out spelling for symmetry with future configs that flip the
+    # default ON.
+    stress_group = parser.add_mutually_exclusive_group()
+    stress_group.add_argument(
+        "--stress-test", dest="stress_test", action="store_true",
+        help="Run adversarial scenarios against every RECOMMEND "
+             "candidate; demote BREACHED proposals.",
+    )
+    stress_group.add_argument(
+        "--no-stress-test", dest="stress_test", action="store_false",
+        help="Disable stress test (default).",
+    )
+    parser.set_defaults(stress_test=False)
     args = parser.parse_args(argv)
 
     wf_paths = args.walk_forward_report or []
@@ -559,6 +588,7 @@ def main(argv: list[str] | None = None) -> int:
             report_path=args.report_path,
             recommendation_path=args.recommendation_path,
             registry_audit_log_path=args.registry_audit_log,
+            stress_test=args.stress_test,
         )
     except FileNotFoundError as e:
         print(f"FAILED: {e}", file=sys.stderr)

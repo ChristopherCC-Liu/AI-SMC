@@ -180,6 +180,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ack-no-multi-symbol", action="store_true")
     parser.add_argument("--ack-production-mtimes-unchanged",
                         action="store_true")
+    # P2-1 — optional adversarial stress-test acknowledgement.
+    # NOT a member of the required checklist (keeps backwards-compat
+    # with the existing 7-line set). When passed AND --checklist-mode
+    # is on, an extra `promotion_checklist_ack:stress-test` line
+    # lands in the audit trail.
+    parser.add_argument(
+        "--ack-stress-test", action="store_true",
+        help="Operator acknowledges that the candidate's stress-test "
+             "results have been reviewed.",
+    )
     parser.add_argument(
         "--audit-trail", type=Path, default=None,
         help="Optional. When set, every checklist ack is appended "
@@ -256,6 +266,13 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+        # P2-1 optional ack — recorded only when supplied. Does NOT
+        # block when missing (keeps the legacy 7-line checklist).
+        if getattr(args, "ack_stress_test", False):
+            _audit(
+                "promotion_checklist_ack:stress-test", "ok",
+                candidate_id=args.candidate_id,
+            )
         # Record one audit entry per acknowledged line so the trail
         # carries operator-by-operator attribution for every gate.
         for line, _attr in checklist_required:

@@ -66,6 +66,11 @@ class QueueEntry:
     blocking_conditions: tuple[str, ...]
     reason: str  # empty when QUEUED; populated by future state additions
     audit_log_path: str
+    # P2-1 — adversarial stress test verdict.
+    #   None → not run (default; backwards-compatible with pre-P2-1 entries)
+    #   True → all scenarios SURVIVED
+    #   False → at least one scenario BREACHED
+    stress_test_passed: bool | None = None
 
 
 def _assert_path_safe(path: Path) -> None:
@@ -80,11 +85,17 @@ def _assert_path_safe(path: Path) -> None:
 
 def build_queue_entry(
     *, proposal: CandidateProposal, audit_log_path: Path,
+    stress_test_passed: bool | None = None,
 ) -> QueueEntry:
     """Construct a :class:`QueueEntry` for a single RECOMMEND proposal.
 
     Caller is expected to have filtered out NO_RECOMMENDATION
     proposals; this function does not validate the decision.
+
+    ``stress_test_passed`` is optional and defaults to ``None``
+    (= "not run"). Pre-P2-1 callers don't need to pass it; new
+    callers (recommend CLI / demo) populate it from the stress
+    tester output.
     """
     return QueueEntry(
         candidate_id=proposal.candidate_id,
@@ -99,6 +110,7 @@ def build_queue_entry(
         blocking_conditions=_BLOCKING_CONDITIONS,
         reason="",
         audit_log_path=str(audit_log_path),
+        stress_test_passed=stress_test_passed,
     )
 
 

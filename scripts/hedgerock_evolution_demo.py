@@ -270,6 +270,46 @@ def main(argv: list[str] | None = None) -> int:
         atr_multiplier=stop.atr_multiplier,
     )
 
+    print("== Stage: STRESS-TEST — adversarial scenario survival ==")
+    from smc.hedgerock.evolution.candidate_generator import (
+        CandidateProposal as _CP,
+        DECISION_RECOMMEND as _DR,
+        get_live_parameter_snapshot as _live_snapshot,
+    )
+    from smc.hedgerock.evolution.stress_tester import (
+        StressTester,
+        VERDICT_BREACHED,
+    )
+    demo_proposal = _CP(
+        candidate_id="demo-stress-probe",
+        parameter_target="smc.hedgerock.rule_engine._CONFIDENCE_OBSERVE_FLOOR",
+        parameter_class="confidence_threshold_observe",
+        baseline_value=0.55,
+        proposed_value=0.55,  # neutral — should SURVIVE every scenario
+        triggered_by=("demo",),
+        expected_improvement="demo: neutral probe to exercise the tester",
+        risks=(),
+        next_validation=(),
+        decision=_DR,
+        decision_reason="",
+    )
+    stress_results = StressTester().test_candidate(
+        demo_proposal, _live_snapshot(),
+    )
+    n_survived = sum(1 for r in stress_results if r.verdict != VERDICT_BREACHED)
+    n_breached = sum(1 for r in stress_results if r.verdict == VERDICT_BREACHED)
+    print(
+        f"  scenarios={len(stress_results)} "
+        f"survived={n_survived} breached={n_breached}"
+    )
+    _audit(
+        "stress_test", "ok",
+        scenarios_total=len(stress_results),
+        scenarios_survived=n_survived,
+        scenarios_breached=n_breached,
+        all_passed=(n_breached == 0),
+    )
+
     print("== Stage: DETECT + RECOMMEND — run report-only recommendation CLI ==")
     report_path = workspace / "report" / "phase-d-evolution-report.md"
     rec_path = workspace / "report" / "hedgerock-evolution-recommendation.md"
