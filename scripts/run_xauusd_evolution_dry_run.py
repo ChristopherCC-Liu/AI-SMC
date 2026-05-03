@@ -461,6 +461,62 @@ def _replay_validation_status(replay: DynamicReplayStats) -> str:
     return REPLAY_STATUS_OK
 
 
+# Master promotion-readiness gate. ONE source of truth.
+#
+# PASS *only* when:
+#   - replay_validation_status == "ok"  (i.e. available AND entry_count > 0)
+# Every other input (benchmark stats, regime detection, anomaly level,
+# multi-TF consensus, stress survival, fingerprint, registry presence,
+# operator confirmation) is INSUFFICIENT on its own. They are listed
+# separately on the approval checklist so the operator sees the full
+# picture, but only the replay-validation gate flips this master row.
+#
+# Returns (status, reason) where status ∈ {"PASS", "WAIT"}.
+PROMOTION_PASS = "PASS"
+PROMOTION_WAIT = "WAIT"
+
+
+def _promotion_readiness(
+    replay: DynamicReplayStats,
+) -> tuple[str, str]:
+    """Master gate. PASS requires:
+        available=True AND entry_count>0 AND trade_count>0 AND exit_count>0.
+
+    Three WAIT branches with distinct reasons:
+        * not_available — replay never ran.
+        * no-entry replay is not performance validation — entries==0.
+        * insufficient dynamic replay sample — entries>0 but at least
+          one of (trade_count, exit_count) is missing/zero, meaning
+          we have decisions but no closed trades to validate against.
+    """
+    if not replay.available:
+        return (
+            PROMOTION_WAIT,
+            f"dynamic replay NOT_AVAILABLE — {replay.reason}",
+        )
+    entries = replay.entry_count or 0
+    trades = replay.trade_count or 0
+    exits = replay.exit_count or 0
+    if entries <= 0:
+        return (
+            PROMOTION_WAIT,
+            "replay ran but entry_count=0 — no-entry replay is not "
+            "performance validation; PnL/WinRate/Sharpe are trivial zeros",
+        )
+    if trades <= 0 or exits <= 0:
+        return (
+            PROMOTION_WAIT,
+            f"insufficient dynamic replay sample — entry_count={entries}, "
+            f"trade_count={trades}, exit_count={exits}; promotion requires "
+            "all three > 0 so the operator can audit closed-trade PnL",
+        )
+    return (
+        PROMOTION_PASS,
+        f"replay_validation_status=ok, entry_count={entries}, "
+        f"trade_count={trades}, exit_count={exits}",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Approval checklist (dry-run).
 # ---------------------------------------------------------------------------
@@ -485,6 +541,12 @@ def _approval_checklist(
     NEVER unlocks promotion by itself.
     """
     rows: list[tuple[str, str]] = []
+    pr_status, pr_reason = _promotion_readiness(dynamic_replay)
+    # Master gate first — operator should see ONE-line answer at the top.
+    rows.append((
+        "PROMOTION READINESS (master gate)",
+        f"{pr_status} — {pr_reason}",
+    ))
     rows.append(("health-check pre-flight", "PASS" if health_ok else "WAIT"))
     rows.append((
         "benchmark (long-only) stats produced — INFORMATIONAL ONLY",
@@ -586,6 +648,11 @@ def _render_report(
     lines.append("")
 
     replay_status = _replay_validation_status(dynamic_replay)
+    pr_status, pr_reason = _promotion_readiness(dynamic_replay)
+    lines.append(
+        f"**PROMOTION READINESS (master gate):** `{pr_status}` — {pr_reason}"
+    )
+    lines.append("")
     lines.append(f"**Evidence quality:** `{evidence_quality}`")
     lines.append(
         f"**Replay validation status:** `{replay_status}`"
@@ -1563,6 +1630,10 @@ def run(
                 "replay_validation_status": _replay_validation_status(
                     dynamic_replay,
                 ),
+                "promotion_readiness": {
+                    "status": _promotion_readiness(dynamic_replay)[0],
+                    "reason": _promotion_readiness(dynamic_replay)[1],
+                },
                 "evidence_path": str(evidence_payload_path),
                 "evidence_hash": evidence_hash,
                 "evidence_artefacts": {

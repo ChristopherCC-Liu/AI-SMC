@@ -646,6 +646,134 @@ def test_replay_validation_status_three_state_machine() -> None:
 
 
 @pytest.mark.unit
+def test_promotion_readiness_master_gate_states() -> None:
+    """The master gate is the single PASS/WAIT signal an operator
+    consults. Pinned three-state contract:
+
+      not_available    → WAIT (NOT_AVAILABLE — <reason>)
+      no-entry         → WAIT (no-entry replay is not performance validation)
+      insufficient     → WAIT (insufficient dynamic replay sample)
+      ok               → PASS (entry/trade/exit all > 0)
+    """
+    orch = _import_orchestrator()
+    DRS = orch.DynamicReplayStats
+
+    # 1) not_available
+    status, reason = orch._promotion_readiness(DRS())
+    assert status == "WAIT"
+    assert "NOT_AVAILABLE" in reason
+
+    # 2) no-entry: available=True but entries==0
+    no_entry = DRS(
+        available=True, reason="ran but no entries",
+        pnl_pct=0.0, max_drawdown_pct=0.0, sharpe_annualised=0.0,
+        trade_count=0, entry_count=0, exit_count=0, win_rate=0.0,
+        veto_reasons={}, cooldown_reasons={}, observe_reasons={"x": 1},
+        halt_reasons={}, risk_tier_distribution={"observe": 1},
+        lot_factor_distribution={"0": 1},
+        transition_lock_states={"unlocked": 1},
+        transition_lock_events=0, cooldown_events=0,
+    )
+    status, reason = orch._promotion_readiness(no_entry)
+    assert status == "WAIT"
+    assert "no-entry replay is not performance validation" in reason
+
+    # 3) insufficient: entries>0 but trades or exits missing
+    insufficient = DRS(
+        available=True, reason="opened but never closed",
+        pnl_pct=0.0, max_drawdown_pct=0.0, sharpe_annualised=0.0,
+        trade_count=0, entry_count=3, exit_count=0, win_rate=0.0,
+        veto_reasons={}, cooldown_reasons={}, observe_reasons={},
+        halt_reasons={}, risk_tier_distribution={"normal": 3},
+        lot_factor_distribution={"1.0": 3},
+        transition_lock_states={"unlocked": 3},
+        transition_lock_events=0, cooldown_events=0,
+    )
+    status, reason = orch._promotion_readiness(insufficient)
+    assert status == "WAIT"
+    assert "insufficient dynamic replay sample" in reason
+
+    # 4) ok: entries / trades / exits all > 0
+    ok = DRS(
+        available=True, reason="ok",
+        pnl_pct=2.0, max_drawdown_pct=-0.5, sharpe_annualised=1.1,
+        trade_count=5, entry_count=5, exit_count=5, win_rate=0.6,
+        veto_reasons={}, cooldown_reasons={}, observe_reasons={},
+        halt_reasons={}, risk_tier_distribution={"normal": 5},
+        lot_factor_distribution={"1.0": 5},
+        transition_lock_states={"unlocked": 5},
+        transition_lock_events=0, cooldown_events=0,
+    )
+    status, reason = orch._promotion_readiness(ok)
+    assert status == "PASS"
+    assert "entry_count=5" in reason
+    assert "trade_count=5" in reason
+
+
+@pytest.mark.unit
+def test_promotion_readiness_appears_at_top_of_report_and_snapshot(
+    tmp_path: Path,
+) -> None:
+    """Master gate MUST appear in:
+       - snapshot.promotion_readiness {status, reason}
+       - report.md banner
+       - approval_rows[0] (first row, before everything else)
+    """
+    orch = _import_orchestrator()
+    out = tmp_path / "out"
+    rc = orch.run(
+        output_dir=out, symbol="XAUUSD", lookback_days=60,
+        lake_root=_data_lake_root(),
+    )
+    assert rc == 0
+    snap = json.loads(
+        (out / "xauusd_dry_run_snapshot.json").read_text(encoding="utf-8")
+    )
+    assert "promotion_readiness" in snap
+    assert snap["promotion_readiness"]["status"] in ("PASS", "WAIT")
+    assert isinstance(snap["promotion_readiness"]["reason"], str)
+    assert snap["promotion_readiness"]["reason"]
+    # First approval row IS the master gate.
+    assert snap["approval_rows"][0]["item"] == "PROMOTION READINESS (master gate)"
+    # Real-lake produces 0 entries → WAIT no-entry path.
+    assert snap["promotion_readiness"]["status"] == "WAIT"
+    assert "no-entry" in snap["promotion_readiness"]["reason"]
+    # Markdown banner.
+    body = (out / "xauusd_dry_run_report.md").read_text(encoding="utf-8")
+    assert "PROMOTION READINESS (master gate):" in body
+    assert "`WAIT`" in body
+
+
+@pytest.mark.unit
+def test_promotion_readiness_pass_only_when_all_three_counts_positive(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: only entry_count>0 AND trade_count>0 AND exit_count>0
+    flips the master gate to PASS. Boundary cases stay WAIT."""
+    orch = _import_orchestrator()
+    DRS = orch.DynamicReplayStats
+    # entries>0 but no trades — WAIT
+    s, _ = orch._promotion_readiness(DRS(
+        available=True, reason="x",
+        trade_count=0, entry_count=3, exit_count=0,
+    ))
+    assert s == "WAIT"
+    # entries>0, trades>0, but no exits (open trade) — WAIT
+    s, _ = orch._promotion_readiness(DRS(
+        available=True, reason="x",
+        trade_count=1, entry_count=2, exit_count=0,
+    ))
+    assert s == "WAIT"
+    # all three > 0 — PASS
+    s, r = orch._promotion_readiness(DRS(
+        available=True, reason="ok",
+        trade_count=1, entry_count=2, exit_count=1,
+    ))
+    assert s == "PASS"
+    assert "entry_count=2" in r and "trade_count=1" in r and "exit_count=1" in r
+
+
+@pytest.mark.unit
 def test_no_entries_wait_warning_appears_in_report_and_payload(
     tmp_path: Path,
 ) -> None:
