@@ -34,15 +34,28 @@ data/*.flag
 # Scratch / local drafts
 .scratch/
 
-# Logs
-logs/*.log
-logs/*.jsonl
+# Logs (runtime — not source-controlled)
+logs/
 
 # Testing
 .coverage
 htmlcov/
 .pytest_cache/
 .mypy_cache/
+.hypothesis/
+
+# Generated reports / cached data snapshots
+reports/
+data/regime_cache.parquet
+data/regime_cache.parquet.*
+data/vps_snapshot/
+
+# Claude Code worktrees + scratch
+.claude/worktrees/
+.claude/scratch/
+
+# Remote-desktop launch files (host-specific, private)
+*.rdp
 
 # OS
 .DS_Store
