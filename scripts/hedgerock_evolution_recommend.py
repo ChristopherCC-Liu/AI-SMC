@@ -478,6 +478,29 @@ def run(
     """
     _assert_recommendation_path_safe(Path(recommendation_path))
 
+    # P2 — pre-flight health check. Don't run if any input subsystem
+    # comes back CRITICAL or DOWN (broken queue/ledger files, etc.).
+    # DEGRADED (e.g. missing operator-team registry on a fresh
+    # machine) is fine — we only block on hard failures.
+    from smc.hedgerock.evolution.health_check import (
+        HealthStatus as _HS, diagnose as _diag,
+    )
+    pre = _diag(
+        registry_root=Path(registry_root) if registry_root else None,
+        audit_log_path=registry_audit_log_path,
+        config_path=safety_bounds_path,
+        calibrator_state_path=calibrator_state_path,
+    )
+    if pre.overall in (_HS.CRITICAL, _HS.DOWN):
+        breakdown = "; ".join(
+            f"{s.name}={s.status.value}" for s in pre.subsystems
+            if s.status in (_HS.CRITICAL, _HS.DOWN)
+        )
+        raise RuntimeError(
+            f"recommend: pre-flight health check failed ({pre.overall.value}): "
+            f"{breakdown}"
+        )
+
     # Step 1 — run the diagnostic evolution-report pipeline.
     candidates, _ = report_cli.run(
         atlas_path=atlas_path,

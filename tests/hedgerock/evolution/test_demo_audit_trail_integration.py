@@ -67,6 +67,7 @@ def _read_trail(trail: Path) -> list[dict]:
 
 _REQUIRED_KEYS = {"timestamp", "operation", "result", "operator", "details"}
 _EXPECTED_STAGE_ORDER = (
+    "health_check",
     "observe",
     "regime_anomaly",
     "timeframe_stop",
@@ -79,6 +80,7 @@ _EXPECTED_STAGE_ORDER = (
     "demo_complete",
 )
 _EXPECTED_DETAIL_FIELDS: dict[str, set[str]] = {
+    "health_check": {"overall", "post", "recovered"},
     "observe": {"workspace"},
     "regime_anomaly": {"regime", "anomaly", "new_candidates_allowed"},
     "timeframe_stop": {

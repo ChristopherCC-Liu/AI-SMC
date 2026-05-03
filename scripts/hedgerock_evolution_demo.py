@@ -234,6 +234,39 @@ def main(argv: list[str] | None = None) -> int:
         if _REAL_REGISTRY_ROOT.exists() else 0
     )
 
+    print("== Stage: HEALTH-CHECK — pre-flight subsystem scan ==")
+    from smc.hedgerock.evolution.health_check import (
+        HealthStatus as _HS, diagnose as _diag, auto_recover as _autorecover,
+    )
+    health = _diag(
+        registry_root=workspace / "registry",
+        queue_path=workspace / "queue" / "shadow_test_queue.jsonl",
+        ledger_path=workspace / "ledger" / "paper_test_ledger.jsonl",
+        config_path=None,
+        calibrator_state_path=None,
+    )
+    if health.overall in (_HS.CRITICAL, _HS.DOWN):
+        print(
+            f"  pre-recovery overall={health.overall.value}; attempting safe recovery",
+        )
+        rec_result = _autorecover(
+            health,
+            registry_root=workspace / "registry",
+            queue_path=workspace / "queue" / "shadow_test_queue.jsonl",
+            ledger_path=workspace / "ledger" / "paper_test_ledger.jsonl",
+        )
+        for a in rec_result.actions:
+            print(f"  recover [{a.subsystem}] {a.description} → "
+                  f"{'OK' if a.succeeded else 'FAIL: ' + a.error}")
+        print(f"  post-recovery overall={rec_result.post_status.value}")
+        _audit("health_check", "ok", overall=health.overall.value,
+               post=rec_result.post_status.value,
+               recovered=len(rec_result.actions))
+    else:
+        print(f"  overall={health.overall.value}")
+        _audit("health_check", "ok", overall=health.overall.value,
+               post=health.overall.value, recovered=0)
+
     print("== Stage: OBSERVE — load Phase D evidence + audit state ==")
     atlas, avail, wf, bounds, audit_log = _seed_evidence(workspace)
     print(f"  fixture under: {workspace / 'fixture'}")
