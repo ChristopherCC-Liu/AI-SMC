@@ -75,6 +75,13 @@ from typing import Any
 SYMBOL = "XAUUSD"
 DEFAULT_LOOKBACK_DAYS = 365
 
+# Master promotion-readiness gate threshold. The replay MUST produce
+# at least this many CLOSED trades (entries, trades AND exits ALL
+# above this floor) before PASS unlocks. 20 was chosen as the minimum
+# statistically meaningful sample — operator can raise it via
+# --min-trades but never lower it below this constant.
+MIN_DYNAMIC_REPLAY_TRADES = 20
+
 
 # ---------------------------------------------------------------------------
 # Path helpers (shared with the rest of the sidecar).
@@ -443,21 +450,35 @@ def _evidence_quality(replay: DynamicReplayStats) -> str:
     return EVIDENCE_DYNAMIC_REPLAY if replay.available else EVIDENCE_BENCHMARK_ONLY
 
 
-# Three-state validation status. ``available`` only means the adapter
-# ran; ``ok`` requires the adapter to also have produced ENTRIES, which
-# is the prerequisite for the PnL / win-rate / Sharpe numbers to be
-# real performance evidence. Without entries, those numbers are
-# trivially zero and convey NO promotion-relevant information.
+# Four-state validation status with explicit threshold enforcement.
+#
+#   not_available      — replay never ran
+#   no_entries_wait    — replay ran but entry_count == 0
+#   insufficient_sample — entries>0 but at least one of (entry, trade,
+#                         exit) count is below ``min_trades``. The
+#                         numbers exist but the sample is too small for
+#                         statistical validation.
+#   ok                 — every count >= ``min_trades``.
 REPLAY_STATUS_OK = "ok"
 REPLAY_STATUS_NO_ENTRIES_WAIT = "no_entries_wait"
+REPLAY_STATUS_INSUFFICIENT_SAMPLE = "insufficient_sample"
 REPLAY_STATUS_NOT_AVAILABLE = "not_available"
 
 
-def _replay_validation_status(replay: DynamicReplayStats) -> str:
+def _replay_validation_status(
+    replay: DynamicReplayStats,
+    *,
+    min_trades: int = MIN_DYNAMIC_REPLAY_TRADES,
+) -> str:
     if not replay.available:
         return REPLAY_STATUS_NOT_AVAILABLE
-    if (replay.entry_count or 0) <= 0:
+    entries = replay.entry_count or 0
+    trades = replay.trade_count or 0
+    exits = replay.exit_count or 0
+    if entries <= 0:
         return REPLAY_STATUS_NO_ENTRIES_WAIT
+    if entries < min_trades or trades < min_trades or exits < min_trades:
+        return REPLAY_STATUS_INSUFFICIENT_SAMPLE
     return REPLAY_STATUS_OK
 
 
@@ -478,16 +499,16 @@ PROMOTION_WAIT = "WAIT"
 
 def _promotion_readiness(
     replay: DynamicReplayStats,
+    *,
+    min_trades: int = MIN_DYNAMIC_REPLAY_TRADES,
 ) -> tuple[str, str]:
-    """Master gate. PASS requires:
-        available=True AND entry_count>0 AND trade_count>0 AND exit_count>0.
+    """Master gate. PASS requires (ALL three):
+        entry_count >= min_trades
+        trade_count >= min_trades
+        exit_count  >= min_trades
 
-    Three WAIT branches with distinct reasons:
-        * not_available — replay never ran.
-        * no-entry replay is not performance validation — entries==0.
-        * insufficient dynamic replay sample — entries>0 but at least
-          one of (trade_count, exit_count) is missing/zero, meaning
-          we have decisions but no closed trades to validate against.
+    Otherwise WAIT, with the reason naming the failing counts and the
+    threshold so the operator knows EXACTLY what is missing.
     """
     if not replay.available:
         return (
@@ -503,17 +524,19 @@ def _promotion_readiness(
             "replay ran but entry_count=0 — no-entry replay is not "
             "performance validation; PnL/WinRate/Sharpe are trivial zeros",
         )
-    if trades <= 0 or exits <= 0:
+    if entries < min_trades or trades < min_trades or exits < min_trades:
         return (
             PROMOTION_WAIT,
             f"insufficient dynamic replay sample — entry_count={entries}, "
-            f"trade_count={trades}, exit_count={exits}; promotion requires "
-            "all three > 0 so the operator can audit closed-trade PnL",
+            f"trade_count={trades}, exit_count={exits}; "
+            f"promotion requires all three >= {min_trades} "
+            f"(MIN_DYNAMIC_REPLAY_TRADES)",
         )
     return (
         PROMOTION_PASS,
         f"replay_validation_status=ok, entry_count={entries}, "
-        f"trade_count={trades}, exit_count={exits}",
+        f"trade_count={trades}, exit_count={exits}, "
+        f"min_trades={min_trades}",
     )
 
 
@@ -656,6 +679,14 @@ def _render_report(
     lines.append(f"**Evidence quality:** `{evidence_quality}`")
     lines.append(
         f"**Replay validation status:** `{replay_status}`"
+    )
+    lines.append(
+        f"**Min trades threshold (PASS gate):** `{MIN_DYNAMIC_REPLAY_TRADES}`"
+    )
+    lines.append(
+        f"**Sample counts:** entry=`{dynamic_replay.entry_count}`, "
+        f"trade=`{dynamic_replay.trade_count}`, "
+        f"exit=`{dynamic_replay.exit_count}`"
     )
     if replay_status == REPLAY_STATUS_NO_ENTRIES_WAIT:
         lines.append("")
@@ -919,6 +950,12 @@ def _evidence_payload(
         },
         "evidence_quality": evidence_quality,
         "replay_validation_status": _replay_validation_status(dynamic_replay),
+        "dynamic_replay_min_trades": MIN_DYNAMIC_REPLAY_TRADES,
+        "dynamic_replay_sample_counts": {
+            "entry_count": dynamic_replay.entry_count,
+            "trade_count": dynamic_replay.trade_count,
+            "exit_count": dynamic_replay.exit_count,
+        },
         "bars_loaded": {"H1": n_h1, "H4": n_h4, "D1": n_d1},
         "benchmark_long_only": benchmark.to_dict() if benchmark else None,
         "dynamic_replay": dynamic_replay.to_dict(),
@@ -968,6 +1005,17 @@ def _render_wf_md(payload: dict[str, Any]) -> str:
     rs = payload.get("replay_validation_status")
     if rs:
         lines.append(f"- replay_validation_status: **`{rs}`**")
+    mt = payload.get("dynamic_replay_min_trades")
+    sc = payload.get("dynamic_replay_sample_counts") or {}
+    if mt is not None:
+        lines.append(
+            f"- dynamic_replay_min_trades: **{mt}** (PASS gate threshold)"
+        )
+    if sc:
+        lines.append(
+            f"- sample_counts: entry={sc.get('entry_count')}, "
+            f"trade={sc.get('trade_count')}, exit={sc.get('exit_count')}"
+        )
     bars = payload.get("bars_loaded", {})
     lines.append(
         f"- bars_loaded: H1={bars.get('H1')}, H4={bars.get('H4')}, "
@@ -1630,6 +1678,12 @@ def run(
                 "replay_validation_status": _replay_validation_status(
                     dynamic_replay,
                 ),
+                "dynamic_replay_min_trades": MIN_DYNAMIC_REPLAY_TRADES,
+                "dynamic_replay_sample_counts": {
+                    "entry_count": dynamic_replay.entry_count,
+                    "trade_count": dynamic_replay.trade_count,
+                    "exit_count": dynamic_replay.exit_count,
+                },
                 "promotion_readiness": {
                     "status": _promotion_readiness(dynamic_replay)[0],
                     "reason": _promotion_readiness(dynamic_replay)[1],

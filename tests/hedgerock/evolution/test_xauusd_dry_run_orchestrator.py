@@ -576,16 +576,15 @@ def test_real_lake_replay_with_no_entries_is_wait_not_pass(
 
 
 @pytest.mark.unit
-def test_approval_row_pass_only_when_entries_populated() -> None:
-    """The approval-row PASS path requires available=True AND
-    entry_count > 0. Tested with a synthetic populated
-    DynamicReplayStats so we can pin the contract independently of
-    whatever the real lake produces today."""
+def test_approval_row_pass_only_when_threshold_met() -> None:
+    """The approval-row PASS path requires available=True AND every
+    one of entry/trade/exit count >= MIN_DYNAMIC_REPLAY_TRADES."""
     orch = _import_orchestrator()
+    M = orch.MIN_DYNAMIC_REPLAY_TRADES
     populated = orch.DynamicReplayStats(
-        available=True, reason="synthetic populated",
+        available=True, reason="synthetic populated at threshold",
         pnl_pct=3.4, max_drawdown_pct=-1.2, sharpe_annualised=0.9,
-        trade_count=10, entry_count=10, exit_count=10, win_rate=0.6,
+        trade_count=M, entry_count=M, exit_count=M, win_rate=0.6,
         veto_reasons={}, cooldown_reasons={}, observe_reasons={},
         halt_reasons={},
         risk_tier_distribution={"normal": 100},
@@ -609,13 +608,15 @@ def test_approval_row_pass_only_when_entries_populated() -> None:
 
 
 @pytest.mark.unit
-def test_replay_validation_status_three_state_machine() -> None:
-    """Pin the three-state machine:
-        not_available → available=False
-        no_entries_wait → available=True AND entry_count==0
-        ok → available=True AND entry_count>0
+def test_replay_validation_status_four_state_machine() -> None:
+    """Four-state status machine:
+        not_available     → available=False
+        no_entries_wait   → available=True AND entry_count==0
+        insufficient_sample → entries>0 but any count < MIN_DYNAMIC_REPLAY_TRADES
+        ok                → all three counts >= MIN_DYNAMIC_REPLAY_TRADES
     """
     orch = _import_orchestrator()
+    M = orch.MIN_DYNAMIC_REPLAY_TRADES
 
     not_avail = orch.DynamicReplayStats()
     assert orch._replay_validation_status(not_avail) == "not_available"
@@ -632,8 +633,8 @@ def test_replay_validation_status_three_state_machine() -> None:
     )
     assert orch._replay_validation_status(no_entries) == "no_entries_wait"
 
-    ok = orch.DynamicReplayStats(
-        available=True, reason="ran with entries",
+    insufficient = orch.DynamicReplayStats(
+        available=True, reason="ran but small sample",
         pnl_pct=1.0, max_drawdown_pct=-0.5, sharpe_annualised=1.0,
         trade_count=5, entry_count=5, exit_count=5, win_rate=0.6,
         veto_reasons={}, cooldown_reasons={}, observe_reasons={},
@@ -642,21 +643,32 @@ def test_replay_validation_status_three_state_machine() -> None:
         transition_lock_states={"unlocked": 5},
         transition_lock_events=0, cooldown_events=0,
     )
+    assert orch._replay_validation_status(insufficient) == "insufficient_sample"
+
+    ok = orch.DynamicReplayStats(
+        available=True, reason="ran with adequate sample",
+        pnl_pct=1.0, max_drawdown_pct=-0.5, sharpe_annualised=1.0,
+        trade_count=M, entry_count=M, exit_count=M, win_rate=0.6,
+        veto_reasons={}, cooldown_reasons={}, observe_reasons={},
+        halt_reasons={}, risk_tier_distribution={"normal": M},
+        lot_factor_distribution={"1.0": M},
+        transition_lock_states={"unlocked": M},
+        transition_lock_events=0, cooldown_events=0,
+    )
     assert orch._replay_validation_status(ok) == "ok"
 
 
 @pytest.mark.unit
 def test_promotion_readiness_master_gate_states() -> None:
-    """The master gate is the single PASS/WAIT signal an operator
-    consults. Pinned three-state contract:
-
+    """Master gate four-state contract:
       not_available    → WAIT (NOT_AVAILABLE — <reason>)
       no-entry         → WAIT (no-entry replay is not performance validation)
       insufficient     → WAIT (insufficient dynamic replay sample)
-      ok               → PASS (entry/trade/exit all > 0)
+      ok               → PASS (entry/trade/exit all >= MIN_DYNAMIC_REPLAY_TRADES)
     """
     orch = _import_orchestrator()
     DRS = orch.DynamicReplayStats
+    M = orch.MIN_DYNAMIC_REPLAY_TRADES
 
     # 1) not_available
     status, reason = orch._promotion_readiness(DRS())
@@ -664,50 +676,30 @@ def test_promotion_readiness_master_gate_states() -> None:
     assert "NOT_AVAILABLE" in reason
 
     # 2) no-entry: available=True but entries==0
-    no_entry = DRS(
+    status, reason = orch._promotion_readiness(DRS(
         available=True, reason="ran but no entries",
-        pnl_pct=0.0, max_drawdown_pct=0.0, sharpe_annualised=0.0,
-        trade_count=0, entry_count=0, exit_count=0, win_rate=0.0,
-        veto_reasons={}, cooldown_reasons={}, observe_reasons={"x": 1},
-        halt_reasons={}, risk_tier_distribution={"observe": 1},
-        lot_factor_distribution={"0": 1},
-        transition_lock_states={"unlocked": 1},
-        transition_lock_events=0, cooldown_events=0,
-    )
-    status, reason = orch._promotion_readiness(no_entry)
+        trade_count=0, entry_count=0, exit_count=0,
+    ))
     assert status == "WAIT"
     assert "no-entry replay is not performance validation" in reason
 
-    # 3) insufficient: entries>0 but trades or exits missing
-    insufficient = DRS(
-        available=True, reason="opened but never closed",
-        pnl_pct=0.0, max_drawdown_pct=0.0, sharpe_annualised=0.0,
-        trade_count=0, entry_count=3, exit_count=0, win_rate=0.0,
-        veto_reasons={}, cooldown_reasons={}, observe_reasons={},
-        halt_reasons={}, risk_tier_distribution={"normal": 3},
-        lot_factor_distribution={"1.0": 3},
-        transition_lock_states={"unlocked": 3},
-        transition_lock_events=0, cooldown_events=0,
-    )
-    status, reason = orch._promotion_readiness(insufficient)
+    # 3) insufficient: entries>0 but below threshold
+    status, reason = orch._promotion_readiness(DRS(
+        available=True, reason="small sample",
+        trade_count=5, entry_count=5, exit_count=5,
+    ))
     assert status == "WAIT"
     assert "insufficient dynamic replay sample" in reason
 
-    # 4) ok: entries / trades / exits all > 0
-    ok = DRS(
+    # 4) ok: all three at threshold
+    status, reason = orch._promotion_readiness(DRS(
         available=True, reason="ok",
-        pnl_pct=2.0, max_drawdown_pct=-0.5, sharpe_annualised=1.1,
-        trade_count=5, entry_count=5, exit_count=5, win_rate=0.6,
-        veto_reasons={}, cooldown_reasons={}, observe_reasons={},
-        halt_reasons={}, risk_tier_distribution={"normal": 5},
-        lot_factor_distribution={"1.0": 5},
-        transition_lock_states={"unlocked": 5},
-        transition_lock_events=0, cooldown_events=0,
-    )
-    status, reason = orch._promotion_readiness(ok)
+        trade_count=M, entry_count=M, exit_count=M,
+    ))
     assert status == "PASS"
-    assert "entry_count=5" in reason
-    assert "trade_count=5" in reason
+    assert f"entry_count={M}" in reason
+    assert f"trade_count={M}" in reason
+    assert f"min_trades={M}" in reason
 
 
 @pytest.mark.unit
@@ -745,32 +737,122 @@ def test_promotion_readiness_appears_at_top_of_report_and_snapshot(
 
 
 @pytest.mark.unit
-def test_promotion_readiness_pass_only_when_all_three_counts_positive(
-    tmp_path: Path,
-) -> None:
-    """End-to-end: only entry_count>0 AND trade_count>0 AND exit_count>0
-    flips the master gate to PASS. Boundary cases stay WAIT."""
+def test_promotion_readiness_enforces_min_trades_threshold() -> None:
+    """The master gate uses MIN_DYNAMIC_REPLAY_TRADES (=20) as the
+    PASS threshold for ALL three of entry/trade/exit counts."""
     orch = _import_orchestrator()
     DRS = orch.DynamicReplayStats
-    # entries>0 but no trades — WAIT
-    s, _ = orch._promotion_readiness(DRS(
+    M = orch.MIN_DYNAMIC_REPLAY_TRADES
+    assert M == 20, "min-trades floor must be 20 (statistically meaningful)"
+
+    # Below threshold on entries — WAIT (insufficient_sample).
+    s, r = orch._promotion_readiness(DRS(
         available=True, reason="x",
-        trade_count=0, entry_count=3, exit_count=0,
+        entry_count=M - 1, trade_count=M, exit_count=M,
     ))
     assert s == "WAIT"
-    # entries>0, trades>0, but no exits (open trade) — WAIT
-    s, _ = orch._promotion_readiness(DRS(
+    assert "insufficient dynamic replay sample" in r
+    assert f"all three >= {M}" in r
+
+    # Below threshold on trades — WAIT.
+    s, r = orch._promotion_readiness(DRS(
         available=True, reason="x",
-        trade_count=1, entry_count=2, exit_count=0,
+        entry_count=M, trade_count=M - 1, exit_count=M,
     ))
     assert s == "WAIT"
-    # all three > 0 — PASS
+    assert "insufficient dynamic replay sample" in r
+
+    # Below threshold on exits — WAIT.
+    s, r = orch._promotion_readiness(DRS(
+        available=True, reason="x",
+        entry_count=M, trade_count=M, exit_count=M - 1,
+    ))
+    assert s == "WAIT"
+    assert "insufficient dynamic replay sample" in r
+
+    # All exactly at threshold — PASS.
     s, r = orch._promotion_readiness(DRS(
         available=True, reason="ok",
-        trade_count=1, entry_count=2, exit_count=1,
+        entry_count=M, trade_count=M, exit_count=M,
     ))
     assert s == "PASS"
-    assert "entry_count=2" in r and "trade_count=1" in r and "exit_count=1" in r
+    assert f"min_trades={M}" in r
+    assert f"entry_count={M}" in r
+
+    # 1/1/1 boundary — far below threshold, must stay WAIT.
+    s, r = orch._promotion_readiness(DRS(
+        available=True, reason="x",
+        entry_count=1, trade_count=1, exit_count=1,
+    ))
+    assert s == "WAIT"
+    assert "insufficient dynamic replay sample" in r
+
+
+@pytest.mark.unit
+def test_replay_validation_status_insufficient_sample_state() -> None:
+    """The four-state status machine includes ``insufficient_sample``
+    when entries>0 but the threshold isn't met."""
+    orch = _import_orchestrator()
+    DRS = orch.DynamicReplayStats
+    M = orch.MIN_DYNAMIC_REPLAY_TRADES
+
+    below = DRS(
+        available=True, reason="x",
+        entry_count=5, trade_count=5, exit_count=5,
+        veto_reasons={}, cooldown_reasons={}, observe_reasons={},
+        halt_reasons={}, risk_tier_distribution={},
+        lot_factor_distribution={}, transition_lock_states={},
+        transition_lock_events=0, cooldown_events=0,
+    )
+    assert orch._replay_validation_status(below) == "insufficient_sample"
+
+    at = DRS(
+        available=True, reason="ok",
+        entry_count=M, trade_count=M, exit_count=M,
+        veto_reasons={}, cooldown_reasons={}, observe_reasons={},
+        halt_reasons={}, risk_tier_distribution={},
+        lot_factor_distribution={}, transition_lock_states={},
+        transition_lock_events=0, cooldown_events=0,
+    )
+    assert orch._replay_validation_status(at) == "ok"
+
+
+@pytest.mark.unit
+def test_min_trades_and_sample_counts_in_snapshot_payload_and_report(
+    tmp_path: Path,
+) -> None:
+    """min_trades + sample_counts MUST appear in:
+       * snapshot.dynamic_replay_min_trades + snapshot.dynamic_replay_sample_counts
+       * evidence_payload.json (same two fields)
+       * report.md banner
+       * wf.md (rendered from evidence_payload)
+    """
+    orch = _import_orchestrator()
+    out = tmp_path / "out"
+    rc = orch.run(
+        output_dir=out, symbol="XAUUSD", lookback_days=60,
+        lake_root=_data_lake_root(),
+    )
+    assert rc == 0
+    snap = json.loads(
+        (out / "xauusd_dry_run_snapshot.json").read_text(encoding="utf-8")
+    )
+    assert snap["dynamic_replay_min_trades"] == 20
+    sc = snap["dynamic_replay_sample_counts"]
+    assert set(sc.keys()) == {"entry_count", "trade_count", "exit_count"}
+    payload = json.loads(
+        (out / "fixture" / "evidence_payload.json").read_text(encoding="utf-8")
+    )
+    assert payload["dynamic_replay_min_trades"] == 20
+    assert payload["dynamic_replay_sample_counts"] == sc
+    body = (out / "xauusd_dry_run_report.md").read_text(encoding="utf-8")
+    assert "Min trades threshold (PASS gate):" in body
+    assert "`20`" in body
+    assert "Sample counts:" in body
+    wf = (out / "fixture" / "wf.md").read_text(encoding="utf-8")
+    assert "dynamic_replay_min_trades" in wf
+    assert "20" in wf
+    assert "sample_counts:" in wf
 
 
 @pytest.mark.unit
