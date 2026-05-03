@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,9 +36,23 @@ from smc.hedgerock.phase_d_walk_forward import (
 )
 
 
-_DEFAULT_LAKE = Path("/Users/christopher/claudeworkplace/AI-SMC/data/parquet")
-_DEFAULT_REPORT = Path(
-    "/Users/christopher/HedgeRock/docs/phase-d-walk-forward-report.md"
+def _hedgerock_home() -> Path:
+    raw = os.environ.get("HEDGEROCK_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / "HedgeRock"
+
+
+def _ai_smc_home() -> Path:
+    raw = os.environ.get("AI_SMC_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    return Path(__file__).resolve().parents[1]
+
+
+_DEFAULT_LAKE = _ai_smc_home() / "data" / "parquet"
+_DEFAULT_REPORT = (
+    _hedgerock_home() / "docs" / "phase-d-walk-forward-report.md"
 )
 
 # Phase D-cont1b — red-flag thresholds (per-variant for tiny_normal).

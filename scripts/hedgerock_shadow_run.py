@@ -19,6 +19,7 @@ artefacts via ``--shadow-artefacts <out_dir>`` (R5 double-key join).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,8 +32,24 @@ from smc.hedgerock.evolution.shadow_runner import (
 )
 
 
-_DEFAULT_LAKE = Path("/Users/christopher/claudeworkplace/AI-SMC/data/parquet")
-_DEFAULT_OUT = Path("/Users/christopher/HedgeRock/policy_registry/shadow_artefacts")
+def _hedgerock_home() -> Path:
+    raw = os.environ.get("HEDGEROCK_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / "HedgeRock"
+
+
+def _ai_smc_home() -> Path:
+    raw = os.environ.get("AI_SMC_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    return Path(__file__).resolve().parents[1]
+
+
+_DEFAULT_LAKE = _ai_smc_home() / "data" / "parquet"
+_DEFAULT_OUT = (
+    _hedgerock_home() / "policy_registry" / "shadow_artefacts"
+)
 
 
 def _parse_date(s: str) -> datetime:
