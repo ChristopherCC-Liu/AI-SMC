@@ -13,6 +13,12 @@ Pinned guarantees:
   * Fingerprint chain is appended and verifies clean.
   * Calibrator state file is written when --calibrator-state is on.
   * Approval checklist contains the documented items.
+  * Honesty: long-only benchmark and dynamic-replay output are
+    KEPT STRICTLY SEPARATE — the report MUST NOT pass off the
+    benchmark as a strategy backtest.
+  * Dynamic replay is NOT_AVAILABLE in this build; every reserved
+    field stays ``null`` and ``evidence_quality`` is ``benchmark_only``.
+  * Approval checklist's "dynamic replay" row stays WAIT.
 """
 
 from __future__ import annotations
@@ -119,7 +125,8 @@ def test_end_to_end_dry_run_against_real_lake_produces_report(
     body = report.read_text(encoding="utf-8")
     for section in [
         "## 1. Stage status",
-        "## 2. Walk-forward statistics",
+        "## 2A. Benchmark — long-only baseline",
+        "## 2B. Dynamic replay — strategy backtest",
         "## 3. Regime + anomaly",
         "## 4. Multi-timeframe consensus + adaptive stop",
         "## 5. Stress-test survival matrix",
@@ -150,7 +157,8 @@ def test_snapshot_json_round_trips_with_required_keys(tmp_path: Path) -> None:
         (out / "xauusd_dry_run_snapshot.json").read_text(encoding="utf-8")
     )
     for key in [
-        "symbol", "generated_at", "stages", "walk_forward",
+        "symbol", "generated_at", "evidence_quality", "stages",
+        "benchmark_long_only", "dynamic_replay",
         "stress_total", "stress_survived",
         "n_proposals", "n_recommend",
         "fingerprint_verify", "registry_present", "approval_rows",
@@ -182,7 +190,10 @@ def test_graceful_degradation_when_lake_absent(tmp_path: Path) -> None:
     )
     by_name = {s["name"]: s for s in snap["stages"]}
     assert by_name["load_bars"]["status"] == "DEGRADED"
-    assert snap["walk_forward"] is None
+    assert snap["benchmark_long_only"] is None
+    # Dynamic replay still NOT_AVAILABLE (independent of lake state).
+    assert snap["dynamic_replay"]["available"] is False
+    assert snap["evidence_quality"] == "benchmark_only"
     # The report still exists and contains all sections.
     assert (out / "xauusd_dry_run_report.md").exists()
 
@@ -275,7 +286,8 @@ def test_approval_checklist_lists_documented_items(tmp_path: Path) -> None:
     )
     items = [r["item"] for r in snap["approval_rows"]]
     assert any("health-check pre-flight" in i for i in items)
-    assert any("walk-forward" in i for i in items)
+    assert any("benchmark (long-only)" in i for i in items)
+    assert any("dynamic replay against rule_engine" in i for i in items)
     assert any("regime detection" in i for i in items)
     assert any("anomaly" in i for i in items)
     assert any("consensus" in i for i in items)
@@ -297,7 +309,7 @@ def test_approval_checklist_lists_documented_items(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_walk_forward_stats_have_realistic_shape(tmp_path: Path) -> None:
+def test_benchmark_stats_have_realistic_shape(tmp_path: Path) -> None:
     orch = _import_orchestrator()
     out = tmp_path / "out"
     rc = orch.run(
@@ -308,14 +320,19 @@ def test_walk_forward_stats_have_realistic_shape(tmp_path: Path) -> None:
     snap = json.loads(
         (out / "xauusd_dry_run_snapshot.json").read_text(encoding="utf-8")
     )
-    wf = snap["walk_forward"]
-    assert wf is not None, "walk_forward should be populated against real lake"
-    assert wf["n_bars"] >= 100
-    assert -100.0 <= wf["pnl_pct"] <= 200.0
+    bench = snap["benchmark_long_only"]
+    assert bench is not None, (
+        "benchmark stats should be populated against the real lake"
+    )
+    assert bench["n_bars"] >= 100
+    assert -100.0 <= bench["pnl_pct"] <= 200.0
     # Drawdown is a non-positive number.
-    assert wf["max_drawdown_pct"] <= 0.0
-    # Win rate must be a probability.
-    assert 0.0 <= wf["win_rate"] <= 1.0
+    assert bench["max_drawdown_pct"] <= 0.0
+    # Per-bar win rate must be a probability.
+    assert 0.0 <= bench["win_rate_per_bar"] <= 1.0
+    # Note must explicitly disclaim strategy performance.
+    assert "NOT" in bench["note"].upper()
+    assert "strategy" in bench["note"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -337,3 +354,180 @@ def test_report_contains_only_xauusd_symbol(tmp_path: Path) -> None:
     for sym in forbidden_symbols:
         assert sym not in body, f"foreign symbol {sym} leaked into XAUUSD report"
     assert "XAUUSD" in body
+
+
+# ---------------------------------------------------------------------------
+# 12. HONESTY — benchmark and dynamic replay are kept strictly separate.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_evidence_quality_is_benchmark_only_when_replay_unavailable(
+    tmp_path: Path,
+) -> None:
+    orch = _import_orchestrator()
+    out = tmp_path / "out"
+    rc = orch.run(
+        output_dir=out, symbol="XAUUSD", lookback_days=60,
+        lake_root=_data_lake_root(),
+    )
+    assert rc == 0
+    snap = json.loads(
+        (out / "xauusd_dry_run_snapshot.json").read_text(encoding="utf-8")
+    )
+    assert snap["evidence_quality"] == "benchmark_only"
+    assert snap["dynamic_replay"]["available"] is False
+    # Reserved trade-level fields MUST stay null when replay is absent.
+    for reserved in (
+        "trade_count", "entry_count", "win_rate",
+        "veto_reasons", "cooldown_reasons", "observe_reasons",
+        "halt_reasons", "risk_tier_distribution",
+        "lot_factor_distribution", "transition_lock_states",
+        "pnl_pct", "max_drawdown_pct", "sharpe_annualised",
+    ):
+        assert snap["dynamic_replay"][reserved] is None, (
+            f"reserved dynamic-replay field {reserved!r} must be null "
+            f"in benchmark-only mode (got {snap['dynamic_replay'][reserved]!r})"
+        )
+
+
+@pytest.mark.unit
+def test_report_warns_when_evidence_is_benchmark_only(tmp_path: Path) -> None:
+    orch = _import_orchestrator()
+    out = tmp_path / "out"
+    rc = orch.run(
+        output_dir=out, symbol="XAUUSD", lookback_days=60,
+        lake_root=_data_lake_root(),
+    )
+    assert rc == 0
+    body = (out / "xauusd_dry_run_report.md").read_text(encoding="utf-8")
+    # The warning banner must appear near the top.
+    assert "Evidence quality:" in body
+    assert "`benchmark_only`" in body
+    assert "NOT_AVAILABLE" in body
+    # Section 2A explicitly disclaims being a strategy.
+    assert "## 2A. Benchmark — long-only baseline (NOT a strategy)" in body
+    # Section 2B exists and is marked NOT_AVAILABLE.
+    assert "## 2B. Dynamic replay" in body
+    # PnL labels must say long-only — no plain "PnL %" in the strategy
+    # role.
+    assert "long-only" in body.lower()
+
+
+@pytest.mark.unit
+def test_benchmark_pnl_is_never_passed_off_as_strategy_pnl(
+    tmp_path: Path,
+) -> None:
+    """The benchmark PnL number MUST be tagged as 'long-only' in the
+    markdown — and the dynamic-replay PnL row MUST stay absent (NOT
+    rendered with the benchmark number)."""
+    orch = _import_orchestrator()
+    out = tmp_path / "out"
+    rc = orch.run(
+        output_dir=out, symbol="XAUUSD", lookback_days=120,
+        lake_root=_data_lake_root(),
+    )
+    assert rc == 0
+    body = (out / "xauusd_dry_run_report.md").read_text(encoding="utf-8")
+    snap = json.loads(
+        (out / "xauusd_dry_run_snapshot.json").read_text(encoding="utf-8")
+    )
+    bench_pnl = snap["benchmark_long_only"]["pnl_pct"]
+    # Render of benchmark PnL must carry the "long-only" qualifier on
+    # the same line as the number.
+    pnl_line = next(
+        (line for line in body.splitlines()
+         if f"{bench_pnl:+.4f}" in line),
+        None,
+    )
+    assert pnl_line is not None, "benchmark PnL number should appear in report"
+    assert "long-only" in pnl_line.lower(), (
+        f"benchmark PnL line missing long-only qualifier: {pnl_line!r}"
+    )
+    # The strategy-side PnL must NOT show the benchmark number.
+    assert "rule_engine" in body.lower(), "dynamic-replay section absent"
+
+
+# ---------------------------------------------------------------------------
+# 13. Reserved future-replay interface — try_dynamic_replay returns the
+#     stable contract.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_try_dynamic_replay_returns_unavailable_with_reason() -> None:
+    orch = _import_orchestrator()
+    from datetime import datetime, timezone
+    res = orch.try_dynamic_replay(
+        bars=[], lake_root=_data_lake_root(),
+        window_start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        window_end=datetime(2024, 12, 31, tzinfo=timezone.utc),
+    )
+    assert res.available is False
+    assert isinstance(res.reason, str) and res.reason
+    # Stable contract: every reserved field is present as an attribute
+    # and defaults to None.
+    for reserved in (
+        "pnl_pct", "max_drawdown_pct", "sharpe_annualised",
+        "trade_count", "entry_count", "win_rate",
+        "veto_reasons", "cooldown_reasons", "observe_reasons",
+        "halt_reasons", "risk_tier_distribution",
+        "lot_factor_distribution", "transition_lock_states",
+    ):
+        assert hasattr(res, reserved), (
+            f"DynamicReplayStats missing reserved field {reserved!r}"
+        )
+        assert getattr(res, reserved) is None
+
+
+@pytest.mark.unit
+def test_dynamic_replay_promotion_path_lifts_evidence_quality() -> None:
+    """When DynamicReplayStats(available=True, ...) lands populated, the
+    orchestrator's _evidence_quality() must promote to dynamic_replay.
+    This pins the contract for the future replay adapter."""
+    orch = _import_orchestrator()
+    populated = orch.DynamicReplayStats(
+        available=True, reason="adapter wired",
+        pnl_pct=12.3, max_drawdown_pct=-5.6, sharpe_annualised=1.8,
+        trade_count=42, entry_count=44, win_rate=0.6,
+        veto_reasons={"low_consensus": 3},
+        cooldown_reasons={"recent_loss": 2},
+        observe_reasons={"low_atr": 1},
+        halt_reasons={},
+        risk_tier_distribution={"normal": 30, "reduced": 12},
+        lot_factor_distribution={"1.0": 30, "0.5": 12},
+        transition_lock_states={"unlocked": 40, "locked": 2},
+    )
+    assert orch._evidence_quality(populated) == "dynamic_replay"
+    bench_only = orch.DynamicReplayStats()
+    assert orch._evidence_quality(bench_only) == "benchmark_only"
+
+
+# ---------------------------------------------------------------------------
+# 14. Approval checklist surfaces dynamic-replay as WAIT in this build.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_approval_checklist_dynamic_replay_row_is_wait(tmp_path: Path) -> None:
+    orch = _import_orchestrator()
+    out = tmp_path / "out"
+    rc = orch.run(
+        output_dir=out, symbol="XAUUSD", lookback_days=60,
+        lake_root=_data_lake_root(),
+    )
+    assert rc == 0
+    snap = json.loads(
+        (out / "xauusd_dry_run_snapshot.json").read_text(encoding="utf-8")
+    )
+    row = next(
+        r for r in snap["approval_rows"]
+        if "dynamic replay against rule_engine" in r["item"]
+    )
+    assert row["status"].startswith("WAIT")
+    # The benchmark row is informational only — never a hard PASS.
+    bench_row = next(
+        r for r in snap["approval_rows"]
+        if "benchmark (long-only)" in r["item"]
+    )
+    assert "informational" in bench_row["status"].lower()

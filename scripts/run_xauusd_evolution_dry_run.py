@@ -7,6 +7,22 @@ REPORT-ONLY. NEVER touches live EA, ``rule_engine.py`` (red-line), or
 XAUUSD-ONLY by hard assertion. ``--symbol`` other than ``XAUUSD`` is
 rejected before any IO.
 
+**Honesty rules — what the report does NOT do:**
+
+  * It does NOT pass off the long-only buy-and-hold baseline as a
+    strategy backtest. The "benchmark" section reports what the bars
+    LOOK LIKE; the "dynamic-replay" section is a SEPARATE field whose
+    value is NOT_AVAILABLE / WAIT until a real strategy replay is
+    plumbed in.
+  * It does NOT fabricate trade counts, veto reasons, cooldown reasons,
+    risk-tier distributions, or transition-lock states. Those fields
+    are RESERVED — set to ``None`` until the dynamic replay produces
+    them.
+  * Evidence quality is surfaced in both the markdown report and the
+    JSON snapshot as ``evidence_quality`` ∈ {"benchmark_only",
+    "dynamic_replay"}, so downstream consumers can refuse to act on
+    benchmark-only evidence.
+
 Stages (every stage is wrapped in graceful degradation — missing
 inputs surface as DEGRADED markers in the final report, not a
 crash):
@@ -14,7 +30,9 @@ crash):
     1.  XAUUSD-only assertion
     2.  Health-check pre-flight (with safe auto-recovery)
     3.  Load real XAUUSD H1 / H4 / D1 bars from the data lake
-    4.  Walk-forward statistics over real H1 (PnL / MaxDD / WinRate / Sharpe)
+    4a. Benchmark statistics — long-only baseline over real H1 closes
+    4b. Dynamic replay — strategy backtest against rule_engine
+        (currently NOT_AVAILABLE; reserved fields stay null)
     5.  Regime detection
     6.  Anomaly shield check
     7.  Timeframe consensus
@@ -23,7 +41,7 @@ crash):
     10. Recommend CLI (calibrator + explainability + fingerprint enabled)
     11. Fingerprint chain verify
     12. Registry audit summary
-    13. Approval checklist (dry-run, never approves)
+    13. Approval checklist (dry-run, never approves; dynamic replay = WAIT)
     14. Final XAUUSD report (markdown) + JSON snapshot
 
 Exit codes:
@@ -167,43 +185,126 @@ def _bars_from_lake(
 
 
 # ---------------------------------------------------------------------------
-# Walk-forward statistics from real H1 bars.
+# Evidence-quality flags + walk-forward outputs.
 #
-# We deliberately keep this simple and dependency-light — a long-only
-# bar-to-bar baseline whose only purpose is to surface real, reproducible
-# numbers (PnL / MaxDD / WinRate / Sharpe) computed against the actual
-# XAUUSD price history. NOT a trading strategy.
+# We split the bar-statistics concern into two strictly-separated
+# concepts:
+#
+#   * BenchmarkStats — long-only buy-and-hold reference computed from
+#     close-to-close returns on real XAUUSD H1 bars. NOT A STRATEGY.
+#     This exists only to surface the shape of the price history.
+#
+#   * DynamicReplayStats — a real strategy backtest against
+#     ``rule_engine`` via ``phase_d_walk_forward``. RESERVED until the
+#     replay is plumbed end-to-end; for now ``try_dynamic_replay()``
+#     returns ``None`` and the report renders NOT_AVAILABLE / WAIT.
+#
+# Both objects are passed independently into the snapshot so consumers
+# never confuse one for the other. ``evidence_quality`` is set to
+# ``"benchmark_only"`` until DynamicReplayStats is populated.
 # ---------------------------------------------------------------------------
 
 
+EVIDENCE_BENCHMARK_ONLY = "benchmark_only"
+EVIDENCE_DYNAMIC_REPLAY = "dynamic_replay"
+
+
 @dataclass(frozen=True)
-class WalkForwardStats:
+class BenchmarkStats:
+    """Long-only buy-and-hold reference. NOT A STRATEGY BACKTEST."""
+
     n_bars: int
     pnl_pct: float
     max_drawdown_pct: float
-    win_rate: float
+    win_rate_per_bar: float
     sharpe_annualised: float
     bars_per_year_assumed: int
     window_start: str
     window_end: str
+    note: str = (
+        "long-only buy-and-hold reference; surfaces price-history shape, "
+        "NOT strategy performance"
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "n_bars": self.n_bars,
             "pnl_pct": self.pnl_pct,
             "max_drawdown_pct": self.max_drawdown_pct,
-            "win_rate": self.win_rate,
+            "win_rate_per_bar": self.win_rate_per_bar,
             "sharpe_annualised": self.sharpe_annualised,
             "bars_per_year_assumed": self.bars_per_year_assumed,
             "window_start": self.window_start,
             "window_end": self.window_end,
+            "note": self.note,
+        }
+
+
+@dataclass(frozen=True)
+class DynamicReplayStats:
+    """Real strategy backtest output. RESERVED until run_walk_forward
+    delivers genuine trade-level results.
+
+    All fields default to ``None`` so partial integrations can fill
+    only what they have without faking the rest. Once every required
+    field is populated, the orchestrator promotes ``evidence_quality``
+    to ``dynamic_replay``.
+    """
+
+    available: bool = False
+    reason: str = "dynamic replay not yet plumbed against rule_engine"
+
+    # Aggregate equity-curve metrics (only meaningful with trade-level
+    # output; never derived from long-only bar returns).
+    pnl_pct: float | None = None
+    max_drawdown_pct: float | None = None
+    sharpe_annualised: float | None = None
+
+    # Trade counters.
+    trade_count: int | None = None
+    entry_count: int | None = None
+    win_rate: float | None = None  # closed-trade win rate, NOT per-bar
+
+    # Reason distributions — keys are reason ids, values are counts.
+    veto_reasons: dict[str, int] | None = None
+    cooldown_reasons: dict[str, int] | None = None
+    observe_reasons: dict[str, int] | None = None
+    halt_reasons: dict[str, int] | None = None
+
+    # Dynamic parameter & state distributions.
+    risk_tier_distribution: dict[str, int] | None = None
+    lot_factor_distribution: dict[str, int] | None = None
+    transition_lock_states: dict[str, int] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "available": self.available,
+            "reason": self.reason,
+            "pnl_pct": self.pnl_pct,
+            "max_drawdown_pct": self.max_drawdown_pct,
+            "sharpe_annualised": self.sharpe_annualised,
+            "trade_count": self.trade_count,
+            "entry_count": self.entry_count,
+            "win_rate": self.win_rate,
+            "veto_reasons": self.veto_reasons,
+            "cooldown_reasons": self.cooldown_reasons,
+            "observe_reasons": self.observe_reasons,
+            "halt_reasons": self.halt_reasons,
+            "risk_tier_distribution": self.risk_tier_distribution,
+            "lot_factor_distribution": self.lot_factor_distribution,
+            "transition_lock_states": self.transition_lock_states,
         }
 
 
 _BARS_PER_YEAR_H1 = 24 * 365
 
 
-def _walk_forward_stats(bars: list[dict]) -> WalkForwardStats | None:
+def _benchmark_stats(bars: list[dict]) -> BenchmarkStats | None:
+    """Compute long-only reference metrics from real H1 bars.
+
+    Explicitly NOT a strategy backtest — every metric is a property of
+    the price history alone (no entries, no exits, no rule_engine).
+    """
     if len(bars) < 24:
         return None
     closes = [b["close"] for b in bars if b.get("close") is not None]
@@ -221,7 +322,7 @@ def _walk_forward_stats(bars: list[dict]) -> WalkForwardStats | None:
 
     pnl_pct = (closes[-1] / closes[0] - 1.0) * 100.0
     wins = sum(1 for r in rets if r > 0)
-    win_rate = wins / len(rets)
+    win_rate_per_bar = wins / len(rets)
 
     equity = 1.0
     peak = 1.0
@@ -240,16 +341,49 @@ def _walk_forward_stats(bars: list[dict]) -> WalkForwardStats | None:
     else:
         sharpe = 0.0
 
-    return WalkForwardStats(
+    return BenchmarkStats(
         n_bars=len(bars),
         pnl_pct=round(pnl_pct, 4),
         max_drawdown_pct=round(max_drawdown_pct, 4),
-        win_rate=round(win_rate, 4),
+        win_rate_per_bar=round(win_rate_per_bar, 4),
         sharpe_annualised=round(sharpe, 4),
         bars_per_year_assumed=_BARS_PER_YEAR_H1,
         window_start=bars[0].get("ts") or "",
         window_end=bars[-1].get("ts") or "",
     )
+
+
+def try_dynamic_replay(
+    *,
+    bars: list[dict],
+    lake_root: Path,
+    window_start: datetime,
+    window_end: datetime,
+) -> DynamicReplayStats:
+    """Attempt a real rule_engine-backed walk-forward replay.
+
+    Returns ``DynamicReplayStats(available=False, reason=...)`` when the
+    replay can't be produced — currently always returns
+    NOT_AVAILABLE because hooking ``run_walk_forward`` end-to-end
+    against XAUUSD requires a strategy adapter that is not part of
+    this orchestrator.
+
+    The signature is intentionally stable: once the adapter lands, this
+    function returns ``DynamicReplayStats(available=True, ...)`` with
+    every reserved field populated, and the orchestrator promotes
+    ``evidence_quality`` to ``dynamic_replay`` automatically.
+    """
+    return DynamicReplayStats(
+        available=False,
+        reason=(
+            "rule_engine-backed replay not plumbed in this build; "
+            "reserved fields remain null"
+        ),
+    )
+
+
+def _evidence_quality(replay: DynamicReplayStats) -> str:
+    return EVIDENCE_DYNAMIC_REPLAY if replay.available else EVIDENCE_BENCHMARK_ONLY
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +394,8 @@ def _walk_forward_stats(bars: list[dict]) -> WalkForwardStats | None:
 def _approval_checklist(
     *,
     health_ok: bool,
-    walk_forward_ok: bool,
+    benchmark_ok: bool,
+    dynamic_replay: DynamicReplayStats,
     regime_ok: bool,
     anomaly_state: Any | None,
     consensus: Any | None,
@@ -268,12 +403,21 @@ def _approval_checklist(
     fingerprint_ok: bool,
     registry_present: bool,
 ) -> list[tuple[str, str]]:
-    """Return (item, status) tuples — status is PASS / WAIT / SKIP."""
+    """Return (item, status) tuples — status is PASS / WAIT / SKIP.
+
+    The dynamic-replay row is ALWAYS WAIT until ``DynamicReplayStats``
+    arrives populated; the benchmark row is informational only and
+    NEVER unlocks promotion by itself.
+    """
     rows: list[tuple[str, str]] = []
     rows.append(("health-check pre-flight", "PASS" if health_ok else "WAIT"))
     rows.append((
-        "walk-forward stats produced",
-        "PASS" if walk_forward_ok else "WAIT",
+        "benchmark (long-only) stats produced — INFORMATIONAL ONLY",
+        "PASS (informational)" if benchmark_ok else "WAIT",
+    ))
+    rows.append((
+        "dynamic replay against rule_engine",
+        "PASS" if dynamic_replay.available else f"WAIT ({dynamic_replay.reason})",
     ))
     rows.append((
         "regime detection produced snapshot",
@@ -320,7 +464,9 @@ def _render_report(
     output_dir: Path,
     symbol: str,
     stages: list[StageResult],
-    walk_forward: WalkForwardStats | None,
+    benchmark: BenchmarkStats | None,
+    dynamic_replay: DynamicReplayStats,
+    evidence_quality: str,
     regime: Any | None,
     anomaly: Any | None,
     consensus: Any | None,
@@ -342,6 +488,21 @@ def _render_report(
     )
     lines.append("")
 
+    lines.append(f"**Evidence quality:** `{evidence_quality}`")
+    if evidence_quality == EVIDENCE_BENCHMARK_ONLY:
+        lines.append("")
+        lines.append(
+            "> ⚠️  This run carries **benchmark-only** evidence. The "
+            "dynamic-replay backtest against `rule_engine` is "
+            "NOT_AVAILABLE in this build, so trade-level metrics "
+            "(trade count, veto/cooldown reasons, risk-tier mix, "
+            "transition locks) are reserved as `null`. The "
+            "long-only baseline below describes the **price history**, "
+            "**NOT** strategy performance — do not promote on its "
+            "basis."
+        )
+    lines.append("")
+
     lines.append("## 1. Stage status")
     lines.append("")
     lines.append("| Stage | Status | Note |")
@@ -350,31 +511,84 @@ def _render_report(
         lines.append(f"| {s.name} | {s.status} | {s.note} |")
     lines.append("")
 
-    lines.append("## 2. Walk-forward statistics (real XAUUSD H1)")
+    lines.append("## 2A. Benchmark — long-only baseline (NOT a strategy)")
     lines.append("")
-    if walk_forward is not None:
+    if benchmark is not None:
         lines.append("| Metric | Value |")
         lines.append("|---|---|")
-        lines.append(f"| Bars | {walk_forward.n_bars} |")
-        lines.append(f"| Window | {walk_forward.window_start} → {walk_forward.window_end} |")
-        lines.append(f"| PnL % (long-only baseline) | {walk_forward.pnl_pct:+.4f} |")
-        lines.append(f"| Max drawdown % | {walk_forward.max_drawdown_pct:.4f} |")
-        lines.append(f"| Win rate (per-bar) | {walk_forward.win_rate:.4f} |")
-        lines.append(f"| Sharpe (annualised) | {walk_forward.sharpe_annualised:+.4f} |")
+        lines.append(f"| Bars | {benchmark.n_bars} |")
         lines.append(
-            "| Annualisation factor (bars/yr) "
-            f"| {walk_forward.bars_per_year_assumed} |"
+            f"| Window | {benchmark.window_start} → {benchmark.window_end} |"
+        )
+        lines.append(
+            f"| PnL % (long-only buy-and-hold) | {benchmark.pnl_pct:+.4f} |"
+        )
+        lines.append(f"| Max drawdown % | {benchmark.max_drawdown_pct:.4f} |")
+        lines.append(
+            f"| Win rate (per-bar, NOT per-trade) "
+            f"| {benchmark.win_rate_per_bar:.4f} |"
+        )
+        lines.append(
+            f"| Sharpe (annualised) | {benchmark.sharpe_annualised:+.4f} |"
+        )
+        lines.append(
+            f"| Annualisation factor (bars/yr) "
+            f"| {benchmark.bars_per_year_assumed} |"
         )
         lines.append("")
-        lines.append(
-            "*Baseline = long-only bar-to-bar reference on closes; surfaces "
-            "the true price-history shape, not a trading strategy.*"
-        )
+        lines.append(f"_{benchmark.note}_")
     else:
         lines.append("_DEGRADED — no XAUUSD bars available in the lake._")
     lines.append("")
 
-    lines.append("## 3. Regime + anomaly")
+    lines.append("## 2B. Dynamic replay — strategy backtest (rule_engine)")
+    lines.append("")
+    if dynamic_replay.available:
+        lines.append("| Metric | Value |")
+        lines.append("|---|---|")
+        lines.append(f"| Trade count | {dynamic_replay.trade_count} |")
+        lines.append(f"| Entry count | {dynamic_replay.entry_count} |")
+        lines.append(f"| Win rate (closed trades) | {dynamic_replay.win_rate} |")
+        lines.append(f"| PnL % | {dynamic_replay.pnl_pct} |")
+        lines.append(f"| Max drawdown % | {dynamic_replay.max_drawdown_pct} |")
+        lines.append(
+            f"| Sharpe (annualised) | {dynamic_replay.sharpe_annualised} |"
+        )
+        for label, dist in (
+            ("veto reasons", dynamic_replay.veto_reasons),
+            ("cooldown reasons", dynamic_replay.cooldown_reasons),
+            ("observe reasons", dynamic_replay.observe_reasons),
+            ("halt reasons", dynamic_replay.halt_reasons),
+            ("risk-tier distribution", dynamic_replay.risk_tier_distribution),
+            ("lot-factor distribution", dynamic_replay.lot_factor_distribution),
+            ("transition-lock states", dynamic_replay.transition_lock_states),
+        ):
+            if dist:
+                top = ", ".join(f"{k}:{v}" for k, v in list(dist.items())[:6])
+                lines.append(f"| {label} | {top} |")
+    else:
+        lines.append(
+            f"**NOT_AVAILABLE** — {dynamic_replay.reason}"
+        )
+        lines.append("")
+        lines.append("Reserved fields (all `null` in this run):")
+        lines.append("")
+        lines.append(
+            "- `trade_count`, `entry_count`, `win_rate` "
+            "(closed-trade, NOT per-bar)"
+        )
+        lines.append("- `pnl_pct`, `max_drawdown_pct`, `sharpe_annualised`")
+        lines.append(
+            "- `veto_reasons`, `cooldown_reasons`, `observe_reasons`, "
+            "`halt_reasons`"
+        )
+        lines.append(
+            "- `risk_tier_distribution`, `lot_factor_distribution`, "
+            "`transition_lock_states`"
+        )
+    lines.append("")
+
+    lines.append("## 3. Regime + anomaly (real H1 bars)")
     lines.append("")
     if regime is not None:
         lines.append(
@@ -420,6 +634,13 @@ def _render_report(
 
     lines.append("## 6. Recommendation pipeline")
     lines.append("")
+    lines.append(f"- evidence quality: `{evidence_quality}`")
+    if evidence_quality == EVIDENCE_BENCHMARK_ONLY:
+        lines.append(
+            "- ⚠️  recommendation evidence is **benchmark-only**; "
+            "candidate generator ran against the price-history baseline, "
+            "**not** trade-level replay output"
+        )
     lines.append(f"- candidates produced: {n_proposals}")
     lines.append(f"- proposals with decision=RECOMMEND: {n_recommend}")
     lines.append("")
@@ -625,22 +846,49 @@ def run(
         ))
         print(f"  DEGRADED — no bars under {lake_root}")
 
-    # Stage 4 — walk-forward stats.
-    print("[4/13] WALK-FORWARD STATS")
-    walk_forward = _walk_forward_stats(h1_bars) if h1_bars else None
-    if walk_forward is not None:
-        stages.append(_ok("walk_forward", **walk_forward.to_dict()))
+    # Stage 4a — benchmark (long-only baseline). NOT a strategy.
+    print("[4a/13] BENCHMARK STATS (long-only baseline; NOT a strategy)")
+    benchmark = _benchmark_stats(h1_bars) if h1_bars else None
+    if benchmark is not None:
+        stages.append(_ok("benchmark_long_only", **benchmark.to_dict()))
         print(
-            f"  PnL={walk_forward.pnl_pct:+.4f}% "
-            f"MaxDD={walk_forward.max_drawdown_pct:.4f}% "
-            f"WR={walk_forward.win_rate:.4f} "
-            f"Sharpe={walk_forward.sharpe_annualised:+.4f}"
+            f"  benchmark PnL={benchmark.pnl_pct:+.4f}% "
+            f"MaxDD={benchmark.max_drawdown_pct:.4f}% "
+            f"WR/bar={benchmark.win_rate_per_bar:.4f} "
+            f"Sharpe={benchmark.sharpe_annualised:+.4f} "
+            "(NOT strategy)"
         )
     else:
         stages.append(_degraded(
-            "walk_forward", note="insufficient bars for stats",
+            "benchmark_long_only", note="insufficient bars for benchmark",
         ))
         print("  DEGRADED — insufficient bars")
+
+    # Stage 4b — dynamic replay against rule_engine. Currently
+    # NOT_AVAILABLE; reserved fields stay null.
+    print("[4b/13] DYNAMIC REPLAY (rule_engine-backed walk-forward)")
+    dynamic_replay = try_dynamic_replay(
+        bars=h1_bars or [],
+        lake_root=lake_root,
+        window_start=start, window_end=end,
+    )
+    if dynamic_replay.available:
+        stages.append(_ok("dynamic_replay", **dynamic_replay.to_dict()))
+        print(
+            f"  trades={dynamic_replay.trade_count} "
+            f"entries={dynamic_replay.entry_count} "
+            f"PnL={dynamic_replay.pnl_pct} "
+            f"Sharpe={dynamic_replay.sharpe_annualised}"
+        )
+    else:
+        stages.append(_degraded(
+            "dynamic_replay",
+            note=f"NOT_AVAILABLE — {dynamic_replay.reason}",
+            **dynamic_replay.to_dict(),
+        ))
+        print(f"  NOT_AVAILABLE — {dynamic_replay.reason}")
+    evidence_quality = _evidence_quality(dynamic_replay)
+    print(f"  evidence_quality = {evidence_quality}")
 
     # Stage 5 — regime.
     print("[5/13] REGIME DETECTION")
@@ -901,7 +1149,8 @@ def run(
     print("[13/13] APPROVAL CHECKLIST (DRY-RUN)")
     approval_rows = _approval_checklist(
         health_ok=health_ok,
-        walk_forward_ok=walk_forward is not None,
+        benchmark_ok=benchmark is not None,
+        dynamic_replay=dynamic_replay,
         regime_ok=regime is not None,
         anomaly_state=anomaly,
         consensus=consensus,
@@ -916,7 +1165,9 @@ def run(
         output_dir=output_dir,
         symbol=symbol,
         stages=stages,
-        walk_forward=walk_forward,
+        benchmark=benchmark,
+        dynamic_replay=dynamic_replay,
+        evidence_quality=evidence_quality,
         regime=regime,
         anomaly=anomaly,
         consensus=consensus,
@@ -937,13 +1188,17 @@ def run(
             {
                 "symbol": symbol,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
+                "evidence_quality": evidence_quality,
                 "stages": [
                     {
                         "name": s.name, "status": s.status,
                         "note": s.note, "details": s.details,
                     } for s in stages
                 ],
-                "walk_forward": walk_forward.to_dict() if walk_forward else None,
+                "benchmark_long_only": (
+                    benchmark.to_dict() if benchmark else None
+                ),
+                "dynamic_replay": dynamic_replay.to_dict(),
                 "stress_total": stress_total,
                 "stress_survived": stress_survived,
                 "n_proposals": n_proposals,
