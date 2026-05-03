@@ -531,3 +531,193 @@ def test_approval_checklist_dynamic_replay_row_is_wait(tmp_path: Path) -> None:
         if "benchmark (long-only)" in r["item"]
     )
     assert "informational" in bench_row["status"].lower()
+
+
+# ---------------------------------------------------------------------------
+# 15. SEMANTIC CLOSEOUT — run_id, evidence_path, evidence_hash, real
+#     evidence injected into atlas/availability/wf, snapshot binds
+#     the recommendation chain to this run's evidence.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_run_id_and_evidence_hash_appear_in_snapshot_and_report(
+    tmp_path: Path,
+) -> None:
+    orch = _import_orchestrator()
+    out = tmp_path / "out"
+    rc = orch.run(
+        output_dir=out, symbol="XAUUSD", lookback_days=60,
+        lake_root=_data_lake_root(),
+    )
+    assert rc == 0
+    snap = json.loads(
+        (out / "xauusd_dry_run_snapshot.json").read_text(encoding="utf-8")
+    )
+    # Snapshot carries run_id + evidence_path + evidence_hash.
+    assert snap["run_id"].startswith("xauusd-dry-run-")
+    assert snap["evidence_path"].endswith("evidence_payload.json")
+    assert isinstance(snap["evidence_hash"], str)
+    assert len(snap["evidence_hash"]) == 64  # sha-256 hex
+    # Evidence artefacts dict points at the four fixture paths.
+    art = snap["evidence_artefacts"]
+    for key in ("atlas", "availability", "wf", "audit_log"):
+        assert key in art
+        assert Path(art[key]).exists()
+    # Final markdown report carries run_id + evidence_hash banner.
+    body = (out / "xauusd_dry_run_report.md").read_text(encoding="utf-8")
+    assert snap["run_id"] in body
+    assert snap["evidence_hash"] in body
+    assert "Evidence payload:" in body
+
+
+@pytest.mark.unit
+def test_evidence_payload_json_round_trips_with_run_data(
+    tmp_path: Path,
+) -> None:
+    orch = _import_orchestrator()
+    out = tmp_path / "out"
+    rc = orch.run(
+        output_dir=out, symbol="XAUUSD", lookback_days=60,
+        lake_root=_data_lake_root(),
+    )
+    assert rc == 0
+    payload = json.loads(
+        (out / "fixture" / "evidence_payload.json").read_text(encoding="utf-8")
+    )
+    # Required top-level keys for downstream consumers.
+    for key in (
+        "run_id", "symbol", "lookback_days", "window",
+        "evidence_quality", "bars_loaded",
+        "benchmark_long_only", "dynamic_replay",
+        "registry_audit", "promotion_status",
+    ):
+        assert key in payload, f"evidence payload missing key {key!r}"
+    assert payload["symbol"] == "XAUUSD"
+    assert payload["dynamic_replay"]["available"] is False
+    assert payload["evidence_quality"] == "benchmark_only"
+    assert payload["promotion_status"] == "NOT LIVE / NOT APPROVED / NOT DEPLOYED"
+    # The hash in the snapshot MUST match a fresh hash of the payload bytes
+    # — cross-binding guarantee for fingerprint auditors.
+    snap = json.loads(
+        (out / "xauusd_dry_run_snapshot.json").read_text(encoding="utf-8")
+    )
+    assert orch._evidence_hash(payload) == snap["evidence_hash"]
+
+
+@pytest.mark.unit
+def test_wf_md_is_per_run_evidence_not_static_fixture(tmp_path: Path) -> None:
+    orch = _import_orchestrator()
+    out = tmp_path / "out"
+    rc = orch.run(
+        output_dir=out, symbol="XAUUSD", lookback_days=60,
+        lake_root=_data_lake_root(),
+    )
+    assert rc == 0
+    wf_body = (out / "fixture" / "wf.md").read_text(encoding="utf-8")
+    snap = json.loads(
+        (out / "xauusd_dry_run_snapshot.json").read_text(encoding="utf-8")
+    )
+    # Every required field that distinguishes this run from a static
+    # fixture MUST land in wf.md.
+    assert snap["run_id"] in wf_body
+    assert "XAUUSD" in wf_body
+    assert "lookback_days: 60" in wf_body
+    assert snap["evidence_quality"] in wf_body
+    # Benchmark numbers from THIS run.
+    bench_pnl = snap["benchmark_long_only"]["pnl_pct"]
+    assert f"{bench_pnl:+.4f}" in wf_body
+    # Dynamic replay reason verbatim — no occlusion.
+    assert snap["dynamic_replay"]["reason"] in wf_body
+    # All 13 reserved trade-level field names must appear in the
+    # NOT_AVAILABLE block, so an operator reading wf.md can verify
+    # nothing was silently filled.
+    for reserved in (
+        "trade_count", "entry_count", "win_rate", "pnl_pct",
+        "max_drawdown_pct", "sharpe_annualised", "veto_reasons",
+        "cooldown_reasons", "observe_reasons", "halt_reasons",
+        "risk_tier_distribution", "lot_factor_distribution",
+        "transition_lock_states",
+    ):
+        assert f"`{reserved}`" in wf_body, (
+            f"reserved field {reserved} missing from wf.md NOT_AVAILABLE block"
+        )
+    # Registry audit binding.
+    assert "registry_present:" in wf_body
+    # Hard NOT-LIVE banner.
+    assert "NOT LIVE" in wf_body
+
+
+@pytest.mark.unit
+def test_availability_and_atlas_md_carry_run_binding(tmp_path: Path) -> None:
+    orch = _import_orchestrator()
+    out = tmp_path / "out"
+    rc = orch.run(
+        output_dir=out, symbol="XAUUSD", lookback_days=60,
+        lake_root=_data_lake_root(),
+    )
+    assert rc == 0
+    snap = json.loads(
+        (out / "xauusd_dry_run_snapshot.json").read_text(encoding="utf-8")
+    )
+    avail = (out / "fixture" / "availability.md").read_text(encoding="utf-8")
+    atlas = (out / "fixture" / "atlas.md").read_text(encoding="utf-8")
+    for body in (avail, atlas):
+        assert snap["run_id"] in body
+        assert "XAUUSD" in body
+        assert snap["evidence_quality"] in body
+        assert "NOT LIVE" in body
+
+
+@pytest.mark.unit
+def test_evidence_hash_is_canonical_sha256_and_stable() -> None:
+    """The hash MUST be SHA-256 over canonical JSON (sort_keys=True,
+    no whitespace separators) — same canonicalisation as the
+    fingerprint module so chain entries can cross-reference it."""
+    orch = _import_orchestrator()
+    payload_a = {
+        "run_id": "x", "symbol": "XAUUSD",
+        "evidence_quality": "benchmark_only",
+        "extra": [1, 2, 3], "nested": {"a": 1, "b": 2},
+    }
+    # Same payload, different key insertion order.
+    payload_b = {
+        "nested": {"b": 2, "a": 1}, "extra": [1, 2, 3],
+        "evidence_quality": "benchmark_only",
+        "symbol": "XAUUSD", "run_id": "x",
+    }
+    assert orch._evidence_hash(payload_a) == orch._evidence_hash(payload_b)
+    assert len(orch._evidence_hash(payload_a)) == 64
+
+
+@pytest.mark.unit
+def test_recommend_chain_runs_against_run_evidence_not_demo_fixture(
+    tmp_path: Path,
+) -> None:
+    """End-to-end binding: the recommend CLI's outputs (proposals,
+    fingerprint chain, calibrator/explainability output) all originate
+    from a wf.md tagged with this run's run_id — no inheritance from a
+    stale demo fixture."""
+    orch = _import_orchestrator()
+    out = tmp_path / "out"
+    rc = orch.run(
+        output_dir=out, symbol="XAUUSD", lookback_days=60,
+        lake_root=_data_lake_root(),
+    )
+    assert rc == 0
+    snap = json.loads(
+        (out / "xauusd_dry_run_snapshot.json").read_text(encoding="utf-8")
+    )
+    # The wf.md handed to the recommend CLI is the one written under
+    # <out>/fixture/wf.md — and it MUST carry this run's id.
+    wf_path = Path(snap["evidence_artefacts"]["wf"])
+    assert wf_path == out / "fixture" / "wf.md"
+    assert snap["run_id"] in wf_path.read_text(encoding="utf-8")
+    # A recommend run that did NOT bind to this evidence would never
+    # produce a populated candidate_proposals.json under <out>/report.
+    proposals = json.loads(
+        (out / "report" / "candidate_proposals.json").read_text(encoding="utf-8")
+    )
+    assert proposals.get("proposals"), (
+        "recommend chain produced no proposals — evidence binding broken"
+    )

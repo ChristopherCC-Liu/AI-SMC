@@ -463,6 +463,9 @@ def _render_report(
     *,
     output_dir: Path,
     symbol: str,
+    run_id: str,
+    evidence_path: Path,
+    evidence_hash: str,
     stages: list[StageResult],
     benchmark: BenchmarkStats | None,
     dynamic_replay: DynamicReplayStats,
@@ -485,6 +488,18 @@ def _render_report(
     lines.append(
         f"_Generated at {datetime.now(timezone.utc).isoformat()} — "
         "REPORT-ONLY. NOT LIVE / NOT APPROVED / NOT DEPLOYED._"
+    )
+    lines.append("")
+    lines.append(f"**Run id:** `{run_id}`")
+    lines.append(f"**Evidence payload:** `{evidence_path}`")
+    lines.append(f"**Evidence hash (SHA-256):** `{evidence_hash}`")
+    lines.append("")
+    lines.append(
+        "> The recommendation / calibrator / explainability / fingerprint "
+        "chain ran against the evidence at the path above. The hash is "
+        "the same canonical-JSON SHA-256 used by the fingerprint "
+        "module — operators can audit which evidence the chain was "
+        "bound to without re-running the orchestrator."
     )
     lines.append("")
 
@@ -690,36 +705,239 @@ def _render_report(
 # ---------------------------------------------------------------------------
 
 
-_DEMO_AVAILABILITY = """
-# Phase D-cont3-preflight (XAUUSD-only dry-run fixture)
-
-## Year-replication summary
-
-| Symbol | Year | Bars | trend_up | range@≥0.80 | breakout_signed_by_h4 | halt events |
-|---|---|---|---|---|---|---|
-| XAUUSD | 2024 | 5693 | +0.239% ±0.067 | +0.172% ±0.040 | -0.015% ±0.096 (CI∋0) | 1 |
-
-## Action gate
-
-```yaml
-NO_STRATEGY_CHANGE: false
-```
-"""
+def _make_run_id() -> str:
+    """Stable, sortable per-run identifier — used as evidence-binding tag."""
+    return "xauusd-dry-run-" + datetime.now(timezone.utc).strftime(
+        "%Y%m%dT%H%M%SZ"
+    )
 
 
-def _seed_evidence(workspace: Path) -> tuple[Path, Path, Path, Path, Path]:
+def _evidence_payload(
+    *,
+    run_id: str,
+    symbol: str,
+    lookback_days: int,
+    window_start: datetime,
+    window_end: datetime,
+    benchmark: BenchmarkStats | None,
+    dynamic_replay: DynamicReplayStats,
+    evidence_quality: str,
+    n_h1: int,
+    n_h4: int,
+    n_d1: int,
+    registry_present: bool,
+    registry_root: Path,
+    registry_json_count: int | None,
+) -> dict[str, Any]:
+    """Canonical dict shape that BOTH wf.md/availability.md/atlas.md AND
+    the snapshot's evidence_hash are derived from. Single source of
+    truth — operators auditing the fingerprint chain hash the same
+    bytes that the markdown reflects."""
+    return {
+        "run_id": run_id,
+        "symbol": symbol,
+        "lookback_days": lookback_days,
+        "window": {
+            "start": window_start.isoformat(),
+            "end": window_end.isoformat(),
+        },
+        "evidence_quality": evidence_quality,
+        "bars_loaded": {"H1": n_h1, "H4": n_h4, "D1": n_d1},
+        "benchmark_long_only": benchmark.to_dict() if benchmark else None,
+        "dynamic_replay": dynamic_replay.to_dict(),
+        "registry_audit": {
+            "present": registry_present,
+            "root": str(registry_root),
+            "json_count": registry_json_count,
+        },
+        "promotion_status": "NOT LIVE / NOT APPROVED / NOT DEPLOYED",
+    }
+
+
+def _evidence_hash(payload: dict[str, Any]) -> str:
+    """SHA-256 over canonical JSON of the evidence payload — same
+    canonicalisation as the fingerprint module so chain entries can
+    cross-reference this hash by value."""
+    import hashlib
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _render_wf_md(payload: dict[str, Any]) -> str:
+    """Render the walk-forward evidence markdown bound to this run.
+
+    REPLACES the previous static fixture. Every field is sourced from
+    the run's actual evidence so the recommend pipeline (and through
+    it the calibrator + explainability + fingerprint) operates on
+    THIS run's data, not a placeholder."""
+    bench = payload.get("benchmark_long_only")
+    replay = payload.get("dynamic_replay") or {}
+    reg = payload.get("registry_audit") or {}
+
+    lines: list[str] = []
+    lines.append(
+        f"# Walk-forward evidence — run `{payload['run_id']}`"
+    )
+    lines.append("")
+    lines.append(f"- symbol: **{payload['symbol']}**")
+    lines.append(f"- lookback_days: {payload['lookback_days']}")
+    lines.append(
+        f"- window: `{payload['window']['start']}` → "
+        f"`{payload['window']['end']}`"
+    )
+    lines.append(f"- evidence_quality: **`{payload['evidence_quality']}`**")
+    bars = payload.get("bars_loaded", {})
+    lines.append(
+        f"- bars_loaded: H1={bars.get('H1')}, H4={bars.get('H4')}, "
+        f"D1={bars.get('D1')}"
+    )
+    lines.append("")
+
+    lines.append("## Benchmark — long-only baseline (NOT a strategy)")
+    lines.append("")
+    if bench:
+        lines.append("| Metric | Value |")
+        lines.append("|---|---|")
+        lines.append(f"| n_bars | {bench['n_bars']} |")
+        lines.append(f"| pnl_pct (long-only) | {bench['pnl_pct']:+.4f} |")
+        lines.append(f"| max_drawdown_pct | {bench['max_drawdown_pct']:.4f} |")
+        lines.append(
+            f"| win_rate_per_bar (NOT per-trade) | "
+            f"{bench['win_rate_per_bar']:.4f} |"
+        )
+        lines.append(
+            f"| sharpe_annualised | {bench['sharpe_annualised']:+.4f} |"
+        )
+        lines.append(f"| window_start | {bench['window_start']} |")
+        lines.append(f"| window_end | {bench['window_end']} |")
+        lines.append("")
+        lines.append(f"_{bench['note']}_")
+    else:
+        lines.append("_DEGRADED — no XAUUSD bars available._")
+    lines.append("")
+
+    lines.append("## Dynamic replay — strategy backtest (rule_engine)")
+    lines.append("")
+    if replay.get("available"):
+        lines.append("| Metric | Value |")
+        lines.append("|---|---|")
+        for key in (
+            "trade_count", "entry_count", "win_rate",
+            "pnl_pct", "max_drawdown_pct", "sharpe_annualised",
+        ):
+            lines.append(f"| {key} | {replay.get(key)} |")
+    else:
+        lines.append(
+            f"**NOT_AVAILABLE** — {replay.get('reason', 'unspecified')}"
+        )
+        lines.append("")
+        lines.append(
+            "Reserved trade-level fields (all `null` in this run): "
+            "`trade_count`, `entry_count`, `win_rate`, `pnl_pct`, "
+            "`max_drawdown_pct`, `sharpe_annualised`, `veto_reasons`, "
+            "`cooldown_reasons`, `observe_reasons`, `halt_reasons`, "
+            "`risk_tier_distribution`, `lot_factor_distribution`, "
+            "`transition_lock_states`."
+        )
+    lines.append("")
+
+    lines.append("## Registry audit")
+    lines.append("")
+    lines.append(f"- registry_present: {reg.get('present')}")
+    lines.append(f"- registry_root: `{reg.get('root')}`")
+    lines.append(f"- json_count: {reg.get('json_count')}")
+    lines.append("")
+
+    lines.append("## Action gate")
+    lines.append("")
+    lines.append("```yaml")
+    lines.append("NO_STRATEGY_CHANGE: false")
+    lines.append("```")
+    lines.append("")
+    lines.append(f"**status: {payload['promotion_status']}**")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _render_availability_md(payload: dict[str, Any]) -> str:
+    bars = payload.get("bars_loaded", {})
+    lines: list[str] = []
+    lines.append(
+        f"# Phase D-cont3-preflight — run `{payload['run_id']}`"
+    )
+    lines.append("")
+    lines.append(f"- symbol: **{payload['symbol']}**")
+    lines.append(
+        f"- window: `{payload['window']['start']}` → "
+        f"`{payload['window']['end']}`"
+    )
+    lines.append(f"- evidence_quality: **`{payload['evidence_quality']}`**")
+    lines.append("")
+    lines.append("## Bars loaded this run")
+    lines.append("")
+    lines.append("| Symbol | Timeframe | Bar count |")
+    lines.append("|---|---|---|")
+    for tf in ("H1", "H4", "D1"):
+        lines.append(f"| {payload['symbol']} | {tf} | {bars.get(tf, 0)} |")
+    lines.append("")
+    lines.append("## Action gate")
+    lines.append("")
+    lines.append("```yaml")
+    lines.append("NO_STRATEGY_CHANGE: false")
+    lines.append("```")
+    lines.append("")
+    lines.append(f"**status: {payload['promotion_status']}**")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _render_atlas_md(payload: dict[str, Any]) -> str:
+    lines: list[str] = []
+    lines.append(f"# Atlas — run `{payload['run_id']}`")
+    lines.append("")
+    lines.append(f"- symbol: **{payload['symbol']}**")
+    lines.append(f"- evidence_quality: **`{payload['evidence_quality']}`**")
+    lines.append(
+        f"- window: `{payload['window']['start']}` → "
+        f"`{payload['window']['end']}`"
+    )
+    lines.append("")
+    lines.append(
+        "Atlas regime/opportunity replication is upstream of this "
+        "orchestrator; this file marks the run binding so the "
+        "downstream recommend / calibrator / explainability / "
+        "fingerprint chain anchors to this evidence."
+    )
+    lines.append("")
+    lines.append(f"**status: {payload['promotion_status']}**")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _seed_evidence(
+    workspace: Path,
+    *,
+    payload: dict[str, Any],
+) -> tuple[Path, Path, Path, Path, Path]:
+    """Write atlas / availability / wf / audit fixtures bound to this
+    run's evidence payload. ``safety_bounds.yaml`` is intentionally
+    absent so G6 fires safety_bound_undefined, which is the v0
+    candidate-generator trigger that lets the chain produce proposals."""
     fixture = workspace / "fixture"
     fixture.mkdir(parents=True, exist_ok=True)
     atlas = fixture / "atlas.md"
-    atlas.write_text("# atlas (xauusd-dry-run fixture)\n", encoding="utf-8")
+    atlas.write_text(_render_atlas_md(payload), encoding="utf-8")
     avail = fixture / "availability.md"
-    avail.write_text(_DEMO_AVAILABILITY, encoding="utf-8")
+    avail.write_text(_render_availability_md(payload), encoding="utf-8")
     wf = fixture / "wf.md"
-    wf.write_text("# walk-forward (xauusd-dry-run fixture)\n", encoding="utf-8")
+    wf.write_text(_render_wf_md(payload), encoding="utf-8")
     bounds = fixture / "safety_bounds.yaml"  # absent on purpose — fires G6
     audit_log = fixture / "_audit.md"
     audit_log.write_text(
-        "# Shadow-Artefact Registry Audit Log (xauusd-dry-run)\n\n(no incidents)\n",
+        f"# Shadow-Artefact Registry Audit Log — run `{payload['run_id']}`\n\n"
+        "(no incidents)\n",
         encoding="utf-8",
     )
     return atlas, avail, wf, bounds, audit_log
@@ -750,11 +968,12 @@ def run(
     lake_root = (lake_root or (_ai_smc_home() / "data" / "parquet")).resolve()
     registry_root = (registry_root or _REAL_REGISTRY_ROOT).resolve()
 
+    run_id = _make_run_id()
     stages: list[StageResult] = []
 
     # Stage 1 — XAUUSD-only assertion (already done above; record it).
-    stages.append(_ok("xauusd_only", symbol=symbol))
-    print(f"[1/13] XAUUSD-only assertion OK (symbol={symbol})")
+    stages.append(_ok("xauusd_only", symbol=symbol, run_id=run_id))
+    print(f"[1/13] XAUUSD-only assertion OK (symbol={symbol}, run_id={run_id})")
 
     # Stage 2 — health check.
     print("[2/13] HEALTH-CHECK")
@@ -1034,9 +1253,39 @@ def run(
         stages.append(_degraded("stress_test", note=f"raised: {e!r}"))
         print(f"  DEGRADED — {e!r}")
 
+    # Build the canonical evidence payload for this run BEFORE the
+    # recommend pipeline runs. wf.md / availability.md / atlas.md are
+    # rendered FROM this payload — same bytes as evidence_hash, so the
+    # fingerprint chain entry references provably-matching evidence.
+    registry_json_count: int | None = None
+    if registry_root.exists():
+        registry_json_count = sum(1 for _ in registry_root.rglob("*.json"))
+    evidence_payload = _evidence_payload(
+        run_id=run_id,
+        symbol=symbol,
+        lookback_days=lookback_days,
+        window_start=start, window_end=end,
+        benchmark=benchmark,
+        dynamic_replay=dynamic_replay,
+        evidence_quality=evidence_quality,
+        n_h1=len(h1_bars), n_h4=len(h4_bars), n_d1=len(d1_bars),
+        registry_present=registry_root.exists(),
+        registry_root=registry_root,
+        registry_json_count=registry_json_count,
+    )
+    evidence_hash = _evidence_hash(evidence_payload)
+    evidence_payload_path = output_dir / "fixture" / "evidence_payload.json"
+    evidence_payload_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_payload_path.write_text(
+        json.dumps(evidence_payload, indent=2, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+
     # Stage 10 — recommend CLI (with calibrator + explainability + fingerprint).
     print("[10/13] RECOMMEND (calibrator + explainability + fingerprint)")
-    atlas, avail, wf, bounds, audit_log = _seed_evidence(output_dir)
+    atlas, avail, wf, bounds, audit_log = _seed_evidence(
+        output_dir, payload=evidence_payload,
+    )
     report_path = output_dir / "report" / "phase-d-evolution-report.md"
     rec_path = output_dir / "report" / "hedgerock-evolution-recommendation.md"
     fingerprint_path = output_dir / "fingerprint" / "chain.jsonl"
@@ -1164,6 +1413,9 @@ def run(
     body = _render_report(
         output_dir=output_dir,
         symbol=symbol,
+        run_id=run_id,
+        evidence_path=evidence_payload_path,
+        evidence_hash=evidence_hash,
         stages=stages,
         benchmark=benchmark,
         dynamic_replay=dynamic_replay,
@@ -1187,8 +1439,17 @@ def run(
         json.dumps(
             {
                 "symbol": symbol,
+                "run_id": run_id,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "evidence_quality": evidence_quality,
+                "evidence_path": str(evidence_payload_path),
+                "evidence_hash": evidence_hash,
+                "evidence_artefacts": {
+                    "atlas": str(atlas),
+                    "availability": str(avail),
+                    "wf": str(wf),
+                    "audit_log": str(audit_log),
+                },
                 "stages": [
                     {
                         "name": s.name, "status": s.status,
@@ -1214,8 +1475,11 @@ def run(
         encoding="utf-8",
     )
     print(f"\n== XAUUSD dry-run complete ==")
-    print(f"  report:   {final_md}")
-    print(f"  snapshot: {snap_path}")
+    print(f"  run_id:        {run_id}")
+    print(f"  evidence:      {evidence_payload_path}")
+    print(f"  evidence_hash: {evidence_hash}")
+    print(f"  report:        {final_md}")
+    print(f"  snapshot:      {snap_path}")
     print(f"  status: NOT LIVE / NOT APPROVED / NOT DEPLOYED")
     return 0
 
