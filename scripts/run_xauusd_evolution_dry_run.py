@@ -399,15 +399,32 @@ def try_dynamic_replay(
             reason="no XAUUSD H1 bars supplied to replay",
         )
     try:
-        from smc.hedgerock.evolution.dynamic_replay import replay_xauusd_h1
+        from smc.hedgerock.evolution.dynamic_replay import (
+            replay_via_walk_forward, replay_xauusd_h1,
+        )
     except Exception as e:
         return DynamicReplayStats(
             available=False,
             reason=f"replay module import failed: {e!r}",
         )
 
+    # Prefer the canonical phase_d_walk_forward harness — it is the
+    # sanctioned interface for XAUUSD walk-forward evidence. We pull
+    # TradeMetrics + envelope_log onto our 13 fields. When that path
+    # produces useful trades we use its numbers; otherwise we fall
+    # back to the closed-bar bar-by-bar replay so the operator still
+    # sees the per-bar reason distributions.
+    wf_result = None
     try:
-        result = replay_xauusd_h1(
+        wf_result = replay_via_walk_forward(
+            lake_root=lake_root, instrument=SYMBOL,
+            start=window_start, end=window_end,
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        wf_result = None
+
+    try:
+        bar_result = replay_xauusd_h1(
             symbol=SYMBOL,
             h1_bars=bars,
             h4_bars=h4_bars or [],
@@ -419,9 +436,22 @@ def try_dynamic_replay(
             reason=f"replay raised: {e!r}",
         )
 
-    if not result.available:
+    # Use the walk-forward result whenever it produced ANY trades; in
+    # the current build the simulator stub returns 0 trades, so we
+    # fall through to the bar-by-bar replay automatically.
+    if wf_result is not None and wf_result.available and (wf_result.trade_count or 0) > 0:
+        result = wf_result
+    elif bar_result.available:
+        result = bar_result
+    elif wf_result is not None and wf_result.available:
+        # Both ran; bar replay would have populated reasons too. Prefer
+        # bar_result since it carries closed-bar guarantees.
+        result = bar_result
+    else:
         return DynamicReplayStats(
-            available=False, reason=result.reason,
+            available=False,
+            reason=(bar_result.reason or
+                    (wf_result.reason if wf_result else "replay unavailable")),
         )
 
     return DynamicReplayStats(

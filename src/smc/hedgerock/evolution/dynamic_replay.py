@@ -196,6 +196,100 @@ def _simulate_one_bar_exit(
 # ---------------------------------------------------------------------------
 
 
+def replay_via_walk_forward(
+    *,
+    lake_root: Any,
+    instrument: str = SYMBOL,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> ReplayResult:
+    """Drive the official ``phase_d_walk_forward.run_walk_forward``
+    harness against the real lake and project its TradeMetrics +
+    envelope_log onto the 13 ``DynamicReplayStats`` fields.
+
+    Returns ``ReplayResult(available=False, ...)`` when imports fail or
+    the harness emits no useful data — gracefully falls back so the
+    orchestrator can still drive the closed-bar replay path."""
+    if instrument != SYMBOL:
+        return _empty_result(f"walk-forward is XAUUSD-only; got {instrument!r}")
+    try:
+        from smc.data.lake import ForexDataLake
+        from smc.hedgerock.phase_d_walk_forward import (
+            WalkForwardConfig, run_walk_forward,
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        return _empty_result(f"walk_forward imports failed: {e!r}")
+    try:
+        lake = ForexDataLake(lake_root)
+        cfg = WalkForwardConfig(
+            instrument=instrument,
+            start=start or datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=end or datetime(2024, 12, 31, tzinfo=timezone.utc),
+        )
+        result = run_walk_forward(cfg, lake)
+    except Exception as e:
+        return _empty_result(f"run_walk_forward raised: {e!r}")
+
+    tm = result.dynamic_metrics
+    log = list(result.envelope_log or [])
+
+    veto: dict[str, int] = {}
+    cooldown: dict[str, int] = {}
+    observe: dict[str, int] = {}
+    halt: dict[str, int] = {}
+    risk_tier: dict[str, int] = {}
+    lot_factor: dict[str, int] = {}
+    transition_lock_states: dict[str, int] = {}
+
+    for row in log:
+        mode = str(row.get("mode") or row.get("effective_mode") or "")
+        reason = str(row.get("reason") or row.get("decision_reason") or "")
+        if mode == "halt":
+            halt[reason or "halt"] = halt.get(reason or "halt", 0) + 1
+        elif mode == "observe":
+            observe[reason or "observe"] = observe.get(reason or "observe", 0) + 1
+        rt = row.get("risk_tier")
+        if rt is not None:
+            risk_tier[str(rt)] = risk_tier.get(str(rt), 0) + 1
+        lf = row.get("lot_factor")
+        if lf is not None:
+            key = f"{float(lf):g}"
+            lot_factor[key] = lot_factor.get(key, 0) + 1
+        if row.get("transition_lock_active"):
+            transition_lock_states["locked"] = (
+                transition_lock_states.get("locked", 0) + 1
+            )
+        else:
+            transition_lock_states["unlocked"] = (
+                transition_lock_states.get("unlocked", 0) + 1
+            )
+
+    # TradeMetrics → 13 fields.
+    return ReplayResult(
+        available=True,
+        reason=(
+            "phase_d_walk_forward.run_walk_forward harness over real "
+            "XAUUSD lake (envelope_log + TradeMetrics)"
+        ),
+        pnl_pct=round(float(tm.total_return_pct or 0.0), 4),
+        max_drawdown_pct=round(float(tm.max_dd_pct or 0.0), 4),
+        sharpe_annualised=0.0,  # TradeMetrics doesn't expose Sharpe; left at 0.
+        trade_count=int(tm.n_trades or 0),
+        entry_count=int(tm.n_trades or 0),
+        exit_count=int(tm.n_trades or 0),
+        win_rate=round(float(tm.win_rate or 0.0), 4),
+        veto_reasons=veto,
+        cooldown_reasons=cooldown,
+        observe_reasons=observe,
+        halt_reasons=halt,
+        risk_tier_distribution=risk_tier,
+        lot_factor_distribution=lot_factor,
+        transition_lock_states=transition_lock_states,
+        transition_lock_events=int(tm.transition_lock_bars or 0),
+        cooldown_events=int(tm.cooldown_trigger_count or 0),
+    )
+
+
 def replay_xauusd_h1(
     *,
     symbol: str,

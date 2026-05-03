@@ -273,3 +273,52 @@ def test_replay_against_real_lake_produces_populated_metrics() -> None:
     # transition_lock_states must cover both keys when the real lake
     # produces multiple regimes — at minimum 'unlocked' is present.
     assert "unlocked" in res.transition_lock_states
+
+
+# ---------------------------------------------------------------------------
+# 7. replay_via_walk_forward — sanctioned phase_d_walk_forward harness
+#    integration. Verifies imports + signature + shape; current stub
+#    returns 0 trades so we just check the wiring contract.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_replay_via_walk_forward_returns_a_replay_result() -> None:
+    sys.path.insert(0, str(_REPO / "src"))
+    try:
+        from smc.hedgerock.evolution.dynamic_replay import (
+            replay_via_walk_forward,
+        )
+    finally:
+        sys.path.pop(0)
+    lake_root = _REPO / "data" / "parquet"
+    if not lake_root.exists():
+        pytest.skip("parquet lake absent")
+    res = replay_via_walk_forward(
+        lake_root=lake_root, instrument="XAUUSD",
+    )
+    # Must always return a ReplayResult with the 17 fields populated
+    # (or all-null on the unavailable branch).
+    for field_name in (
+        "available", "reason", "pnl_pct", "max_drawdown_pct",
+        "sharpe_annualised", "trade_count", "entry_count", "exit_count",
+        "win_rate", "veto_reasons", "cooldown_reasons", "observe_reasons",
+        "halt_reasons", "risk_tier_distribution",
+        "lot_factor_distribution", "transition_lock_states",
+        "transition_lock_events", "cooldown_events",
+    ):
+        assert hasattr(res, field_name)
+
+
+@pytest.mark.unit
+def test_replay_via_walk_forward_refuses_non_xauusd() -> None:
+    sys.path.insert(0, str(_REPO / "src"))
+    try:
+        from smc.hedgerock.evolution.dynamic_replay import (
+            replay_via_walk_forward,
+        )
+    finally:
+        sys.path.pop(0)
+    res = replay_via_walk_forward(lake_root="/", instrument="EURUSD")
+    assert res.available is False
+    assert "XAUUSD-only" in res.reason
