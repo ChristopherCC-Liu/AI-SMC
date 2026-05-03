@@ -23,6 +23,9 @@ dependencies = [
     "smartmoneyconcepts>=0.0.9",
     "python-dotenv>=1.0",
     "httpx>=0.27",
+    # HedgeRock decision server runtime + evolution-layer reports.
+    "fastapi>=0.109",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

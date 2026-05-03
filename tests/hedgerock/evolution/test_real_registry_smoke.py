@@ -2,7 +2,7 @@
 
 Drives `replay_validator` + `candidate_generator` + recommendation
 CLI against the **real** shadow-artefact registry under
-``/Users/christopher/HedgeRock/policy_registry``. Skips when the
+``$HEDGEROCK_HOME/policy_registry``. Skips when the
 registry is absent (CI) so this remains portable.
 
 Invariants asserted:
@@ -37,10 +37,20 @@ from smc.hedgerock.evolution.candidate_menu import CANDIDATE_MENU_V0
 from smc.hedgerock.evolution.replay_validator import summarise_replay
 
 
+from tests.hedgerock.evolution._paths import (
+    ai_smc_home as _ai_smc_home_p,
+    hedgerock_home as _hedgerock_home_p,
+    real_audit_log as _real_audit_log_p,
+    real_registry_root as _real_registry_p,
+    real_shadow_artefacts_root as _real_shadow_p,
+    scripts_dir as _scripts_dir_p,
+)
+
+
 _REPO = Path(__file__).resolve().parents[3]
-_REAL_REGISTRY = Path("/Users/christopher/HedgeRock/policy_registry")
-_REAL_SHADOW = _REAL_REGISTRY / "shadow_artefacts"
-_REAL_AUDIT_LOG = _REAL_SHADOW / "_audit.md"
+_REAL_REGISTRY = _real_registry_p()
+_REAL_SHADOW = _real_shadow_p()
+_REAL_AUDIT_LOG = _real_audit_log_p()
 _TEMPLATE = _REPO / "config" / "safety_bounds_template.yaml"
 
 

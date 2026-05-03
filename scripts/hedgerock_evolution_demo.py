@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
 import sys
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
@@ -84,10 +85,25 @@ def _build_demo_market_bars() -> list[dict]:
     return out
 
 
-_REAL_REGISTRY_ROOT = Path("/Users/christopher/HedgeRock/policy_registry")
+def _hedgerock_home() -> Path:
+    raw = os.environ.get("HEDGEROCK_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / "HedgeRock"
+
+
+def _ai_smc_home() -> Path:
+    raw = os.environ.get("AI_SMC_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    # scripts/<this>.py → repo root via parents[1].
+    return Path(__file__).resolve().parents[1]
+
+
+_REAL_REGISTRY_ROOT = _hedgerock_home() / "policy_registry"
 _FORBIDDEN_WORKSPACE_PARENTS = (
     _REAL_REGISTRY_ROOT,
-    Path("/Users/christopher/claudeworkplace/AI-SMC/config"),
+    _ai_smc_home() / "config",
 )
 
 

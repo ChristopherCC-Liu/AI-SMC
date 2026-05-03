@@ -33,10 +33,18 @@ from pathlib import Path
 import pytest
 
 
-_REPO = Path(__file__).resolve().parents[3]
-_REAL_AUDIT_LOG = Path(
-    "/Users/christopher/HedgeRock/policy_registry/shadow_artefacts/_audit.md"
+from tests.hedgerock.evolution._paths import (
+    ai_smc_home as _ai_smc_home_p,
+    hedgerock_home as _hedgerock_home_p,
+    real_audit_log as _real_audit_log_p,
+    real_registry_root as _real_registry_p,
+    real_shadow_artefacts_root as _real_shadow_p,
+    scripts_dir as _scripts_dir_p,
 )
+
+
+_REPO = Path(__file__).resolve().parents[3]
+_REAL_AUDIT_LOG = _real_audit_log_p()
 
 
 def _import_recommend_cli():
@@ -268,7 +276,7 @@ def test_recommendation_cli_does_not_touch_real_registry(tmp_path: Path) -> None
     report_path = tmp_path / "phase-d-evolution-report.md"
     rec_path = tmp_path / "hedgerock-evolution-recommendation.md"
 
-    real_root = Path("/Users/christopher/HedgeRock/policy_registry")
+    real_root = (_real_registry_p())
     pre = sum(1 for _ in real_root.rglob("*.json")) if real_root.exists() else 0
 
     argv = _argv(

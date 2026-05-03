@@ -1,27 +1,30 @@
 """Root pytest configuration.
 
-1. Ensures ``src/smc`` takes precedence over the ``tests/smc`` shadow
-   package.
+1. Ensures ``src/smc`` takes precedence over the ``tests/smc``
+   shadow package.
 
    Problem: pytest adds ``tests/`` to ``sys.path`` when it finds
    ``tests/smc/__init__.py``, causing ``import smc`` to resolve to
    the test package instead of the source package. This file is
-   loaded before any sub-package conftest, so it patches ``sys.path``
-   and evicts the wrong ``smc`` from ``sys.modules`` before
-   ``tests/smc/conftest.py`` runs.
+   loaded before any sub-package conftest, so it patches
+   ``sys.path`` and evicts the wrong ``smc`` from ``sys.modules``
+   before ``tests/smc/conftest.py`` runs.
 
-2. Tier-1 unseal — the branch ``claude/interesting-bell-82f0fd``
-   only commits the evolution sidecar plus the two newly-unsealed
-   prod modules (``phase_d_walk_forward.py``, ``decision_server.py``).
-   Sibling files like ``policy_manifest.py`` / ``candidate_menu.py``
-   live in the parent worktree's ``src/`` directory. We append the
-   parent's matching dirs to the package ``__path__`` lists so
-   sibling modules resolve, with the worktree's own files taking
-   precedence.
+2. Tier-1 unseal worktree extension (no-op on fresh checkouts).
+
+   When the suite runs inside a sparse Claude Code worktree under
+   ``.claude/worktrees/<branch>/`` the worktree's ``src/`` only
+   ships the evolution sidecar; the rest of ``smc.hedgerock`` lives
+   in the parent worktree's ``src/``. We extend the package
+   ``__path__`` to the location named by ``$AI_SMC_HOME`` (default:
+   the repo root inferred from this file's location) so sibling
+   files resolve. On a normal ``git clone`` ``AI_SMC_HOME`` and the
+   conftest's own repo are identical and this section is a no-op.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -45,7 +48,14 @@ for _key in _stale:
 # ---------------------------------------------------------------------------
 
 
-_PARENT_REPO_SRC = Path("/Users/christopher/claudeworkplace/AI-SMC/src")
+def _ai_smc_home() -> Path:
+    raw = os.environ.get("AI_SMC_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    return Path(__file__).resolve().parent.parent
+
+
+_PARENT_REPO_SRC = _ai_smc_home() / "src"
 
 
 def _extend_namespace(module_name: str, extra_dir: Path) -> None:

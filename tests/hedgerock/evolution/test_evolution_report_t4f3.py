@@ -9,7 +9,7 @@ registry-audit wiring. T4-F3 closes the operator-facing leg:
     summary names every blocked candidate.
   * Use a tmp ``--registry-root`` and tmp ``--report-path`` so the
     real
-    ``/Users/christopher/HedgeRock/policy_registry/shadow_artefacts``
+    ``$HEDGEROCK_HOME/policy_registry/shadow_artefacts``
     is never written to.
   * Use the **real** ``_audit.md`` (or a verbatim tmp copy of it)
     as the audit-log source so the dry-run exercises a real-world
@@ -44,8 +44,18 @@ from pathlib import Path
 import pytest
 
 
+from tests.hedgerock.evolution._paths import (
+    ai_smc_home as _ai_smc_home_p,
+    hedgerock_home as _hedgerock_home_p,
+    real_audit_log as _real_audit_log_p,
+    real_registry_root as _real_registry_p,
+    real_shadow_artefacts_root as _real_shadow_p,
+    scripts_dir as _scripts_dir_p,
+)
+
+
 _REPO = Path(__file__).resolve().parents[3]
-_REAL_REGISTRY_ROOT = Path("/Users/christopher/HedgeRock/policy_registry")
+_REAL_REGISTRY_ROOT = (_real_registry_p())
 _REAL_AUDIT_LOG = _REAL_REGISTRY_ROOT / "shadow_artefacts" / "_audit.md"
 _LOST_SHA_COUNT = 4
 

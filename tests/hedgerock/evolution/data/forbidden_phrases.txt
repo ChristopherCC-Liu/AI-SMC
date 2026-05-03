@@ -1,0 +1,30 @@
+# Phase D-cont3 / Ticket 1 — forbidden-phrase fixture for the
+# `test_plan_doc_does_not_authorise_safety_bounds_writes` integrity
+# check. Each non-empty, non-comment line is a phrase that MUST NOT
+# appear in docs/ticket-1-report-only-policy-registry-plan.md.
+#
+# This fixture is the canonical home of these strings — they are
+# never reproduced inline in the plan itself (see plan §6.3 + §5.6).
+# A future careless edit to the plan that re-introduces any of these
+# phrases will cause the integrity test to fail.
+#
+# Add new variants here as they are discovered in audit. Removal
+# requires explicit reviewer approval.
+
+land an unrelated
+separately-reviewed bounds change
+separately-reviewed
+bounds change BEFORE
+BEFORE Ticket 1
+separate human-reviewed commit
+human-reviewed commit
+Defining new bands
+extend safety_bounds
+separate, reviewed config commit
+separate reviewed config commit
+pending the bounds commit
+pending the config commit
+bands-change
+bounds change"
+separate commit"
+adjust ... safety_bounds

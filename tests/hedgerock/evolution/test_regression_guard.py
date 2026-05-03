@@ -31,6 +31,16 @@ from pathlib import Path
 import pytest
 
 
+from tests.hedgerock.evolution._paths import (
+    ai_smc_home as _ai_smc_home_p,
+    hedgerock_home as _hedgerock_home_p,
+    real_audit_log as _real_audit_log_p,
+    real_registry_root as _real_registry_p,
+    real_shadow_artefacts_root as _real_shadow_p,
+    scripts_dir as _scripts_dir_p,
+)
+
+
 _REPO = Path(__file__).resolve().parents[3]
 _EVOLUTION_SRC = _REPO / "src" / "smc" / "hedgerock" / "evolution"
 _EVOLUTION_SCRIPTS_GLOB = "hedgerock_evolution_*.py"
@@ -39,10 +49,10 @@ _EVOLUTION_SCRIPTS_GLOB = "hedgerock_evolution_*.py"
 # committed sidecar) and the parent worktree (full tree of prod
 # helpers). Both contribute files that must clear the same isolation
 # checks.
-_PARENT_EVOLUTION_SRC = Path(
-    "/Users/christopher/claudeworkplace/AI-SMC/src/smc/hedgerock/evolution"
+_PARENT_REPO = _ai_smc_home_p()
+_PARENT_EVOLUTION_SRC = (
+    _PARENT_REPO / "src" / "smc" / "hedgerock" / "evolution"
 )
-_PARENT_REPO = Path("/Users/christopher/claudeworkplace/AI-SMC")
 
 
 # rule_engine remains red-line. ALL files in the evolution layer

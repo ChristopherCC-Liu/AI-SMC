@@ -35,6 +35,7 @@ import pytest
 
 from smc.hedgerock.evolution.candidate_menu import CANDIDATE_MENU_V0
 from smc.hedgerock.evolution.policy_manifest import (
+
     EvidenceBundle,
     GateStatus,
     PromotionGateResult,
@@ -54,6 +55,15 @@ from smc.hedgerock.evolution.candidate_generator import (
     generate_candidate_proposals,
 )
 
+
+from tests.hedgerock.evolution._paths import (
+    ai_smc_home as _ai_smc_home_p,
+    hedgerock_home as _hedgerock_home_p,
+    real_audit_log as _real_audit_log_p,
+    real_registry_root as _real_registry_p,
+    real_shadow_artefacts_root as _real_shadow_p,
+    scripts_dir as _scripts_dir_p,
+)
 
 _REPO = Path(__file__).resolve().parents[3]
 
@@ -408,7 +418,7 @@ def test_generator_does_not_create_approved_or_pointer(tmp_path: Path) -> None:
         assert not p.exists(), f"generator created forbidden path: {p}"
 
     # Real production paths untouched (the canonical tree).
-    real_root = Path("/Users/christopher/HedgeRock/policy_registry")
+    real_root = (_real_registry_p())
     if real_root.exists():
         assert not (real_root / "approved").exists() or \
             (real_root / "approved").is_dir()

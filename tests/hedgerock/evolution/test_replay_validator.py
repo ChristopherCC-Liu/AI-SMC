@@ -28,14 +28,24 @@ from pathlib import Path
 import pytest
 
 from smc.hedgerock.evolution.replay_validator import (
+
     ReplayValidationReport,
     summarise_replay,
     render_replay_report,
 )
 
 
+from tests.hedgerock.evolution._paths import (
+    ai_smc_home as _ai_smc_home_p,
+    hedgerock_home as _hedgerock_home_p,
+    real_audit_log as _real_audit_log_p,
+    real_registry_root as _real_registry_p,
+    real_shadow_artefacts_root as _real_shadow_p,
+    scripts_dir as _scripts_dir_p,
+)
+
 _REPO = Path(__file__).resolve().parents[3]
-_REAL_REGISTRY_ROOT = Path("/Users/christopher/HedgeRock/policy_registry")
+_REAL_REGISTRY_ROOT = (_real_registry_p())
 
 
 def _seed_artefact(
