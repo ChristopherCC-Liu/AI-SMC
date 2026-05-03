@@ -123,6 +123,11 @@ def _render_proposal(p: CandidateProposal) -> list[str]:
     out.append(f"- decision: `{p.decision}`")
     if p.decision_reason:
         out.append(f"- reason: `{p.decision_reason}`")
+    if p.calibrated_confidence is not None:
+        out.append(
+            f"- calibrated_confidence: **{p.calibrated_confidence:.4f}** "
+            "(Beta posterior mean over historical paper-test outcomes)"
+        )
     if p.triggered_by:
         out.append("- triggered by:")
         for t in p.triggered_by:
@@ -411,6 +416,7 @@ def run(
     stress_test: bool = False,
     stress_test_scenarios: tuple | None = None,
     fingerprint_chain_path: Path | None = None,
+    calibrator_state_path: Path | None = None,
 ) -> tuple[list[CandidateProposal], Path]:
     """Library entry point.
 
@@ -480,6 +486,12 @@ def run(
     fingerprint_sink: dict | None = (
         {} if fingerprint_chain_path is not None else None
     )
+    calibrator = None
+    if calibrator_state_path is not None:
+        from smc.hedgerock.evolution.bayesian_calibrator import (
+            load_calibrator,
+        )
+        calibrator = load_calibrator(calibrator_state_path)
     proposals = generate_candidate_proposals(
         candidate_menu=CANDIDATE_MENU_V0,
         bundle=bundle,
@@ -494,6 +506,7 @@ def run(
         stress_test_sink=stress_test_sink if stress_test else None,
         stress_test_scenarios=stress_test_scenarios,
         fingerprint_sink=fingerprint_sink,
+        calibrator=calibrator,
     )
 
     # Append a fingerprint to the chain when --fingerprint is on.
@@ -601,6 +614,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_const", const=None,
         help="Disable fingerprint emission (default).",
     )
+    parser.add_argument(
+        "--calibrator-state", type=Path, default=None,
+        help="Path to a saved Bayesian calibrator state JSON. When "
+             "supplied, every proposal carries the posterior-mean "
+             "calibrated_confidence for its parameter class.",
+    )
     args = parser.parse_args(argv)
 
     wf_paths = args.walk_forward_report or []
@@ -621,6 +640,7 @@ def main(argv: list[str] | None = None) -> int:
             registry_audit_log_path=args.registry_audit_log,
             stress_test=args.stress_test,
             fingerprint_chain_path=args.fingerprint_chain_path,
+            calibrator_state_path=args.calibrator_state,
         )
     except FileNotFoundError as e:
         print(f"FAILED: {e}", file=sys.stderr)

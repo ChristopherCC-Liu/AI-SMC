@@ -169,6 +169,11 @@ class CandidateProposal:
     generated_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+    # P1-1 — calibrated confidence (Beta posterior mean) for this
+    # candidate's parameter class. None when no calibrator was
+    # supplied; in that case downstream renderers fall back to the
+    # static safety-clamp band.
+    calibrated_confidence: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +415,7 @@ def generate_candidate_proposals(
     stress_test_sink: dict | None = None,
     stress_test_scenarios: tuple | None = None,
     fingerprint_sink: dict | None = None,
+    calibrator: Any = None,
 ) -> list[CandidateProposal]:
     """Generate one :class:`CandidateProposal` per menu entry.
 
@@ -491,6 +497,22 @@ def generate_candidate_proposals(
             sink=stress_test_sink,
             scenarios=stress_test_scenarios,
         )
+
+    # P1-1 — annotate every proposal with a calibrated_confidence
+    # value when a calibrator is supplied. Pure post-processing —
+    # legacy callers (calibrator=None) get the existing tuple
+    # bit-for-bit.
+    if calibrator is not None:
+        from dataclasses import replace as _replace
+        proposals = [
+            _replace(
+                p,
+                calibrated_confidence=float(
+                    calibrator.calibrated_confidence(p.parameter_class)
+                ),
+            )
+            for p in proposals
+        ]
 
     # P0-2 — populate the fingerprint sink so the caller can append
     # to a chain. We only build the payload when a sink is supplied
