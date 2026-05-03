@@ -410,6 +410,7 @@ def run(
     active_timeframes: tuple[str, ...] = (),
     stress_test: bool = False,
     stress_test_scenarios: tuple | None = None,
+    fingerprint_chain_path: Path | None = None,
 ) -> tuple[list[CandidateProposal], Path]:
     """Library entry point.
 
@@ -476,6 +477,9 @@ def run(
     # recommendation file's parent so the JSON snapshot lives alongside
     # the markdown for the operator.
     stress_test_sink: dict[str, list] = {}
+    fingerprint_sink: dict | None = (
+        {} if fingerprint_chain_path is not None else None
+    )
     proposals = generate_candidate_proposals(
         candidate_menu=CANDIDATE_MENU_V0,
         bundle=bundle,
@@ -489,7 +493,19 @@ def run(
         stress_test=stress_test,
         stress_test_sink=stress_test_sink if stress_test else None,
         stress_test_scenarios=stress_test_scenarios,
+        fingerprint_sink=fingerprint_sink,
     )
+
+    # Append a fingerprint to the chain when --fingerprint is on.
+    if fingerprint_chain_path is not None and fingerprint_sink is not None:
+        from smc.hedgerock.evolution.fingerprint import FingerprintChain
+        chain = FingerprintChain(Path(fingerprint_chain_path))
+        chain.append(
+            operation_type="recommend_cli",
+            inputs=fingerprint_sink.get("inputs", {}),
+            outputs=fingerprint_sink.get("outputs", []),
+            params=fingerprint_sink.get("params", {}),
+        )
 
     # Step 3b — when the audit log is absent, override every RECOMMEND
     # to NO_RECOMMENDATION/evidence_chain_invalid. The generator's own
@@ -570,6 +586,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Disable stress test (default).",
     )
     parser.set_defaults(stress_test=False)
+    # P0-2 — fingerprint chain. Default OFF. When ON, every run
+    # appends one entry to the supplied chain file. Combine with
+    # ``scripts/hedgerock_evolution_verify.py`` to audit the chain.
+    fp_group = parser.add_mutually_exclusive_group()
+    fp_group.add_argument(
+        "--fingerprint", dest="fingerprint_chain_path", type=Path,
+        default=None,
+        help="Append a deterministic fingerprint of this run to the "
+             "supplied JSONL chain file.",
+    )
+    fp_group.add_argument(
+        "--no-fingerprint", dest="fingerprint_chain_path",
+        action="store_const", const=None,
+        help="Disable fingerprint emission (default).",
+    )
     args = parser.parse_args(argv)
 
     wf_paths = args.walk_forward_report or []
@@ -589,6 +620,7 @@ def main(argv: list[str] | None = None) -> int:
             recommendation_path=args.recommendation_path,
             registry_audit_log_path=args.registry_audit_log,
             stress_test=args.stress_test,
+            fingerprint_chain_path=args.fingerprint_chain_path,
         )
     except FileNotFoundError as e:
         print(f"FAILED: {e}", file=sys.stderr)

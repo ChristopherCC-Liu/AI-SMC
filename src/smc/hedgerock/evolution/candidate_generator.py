@@ -409,6 +409,7 @@ def generate_candidate_proposals(
     stress_test: bool = False,
     stress_test_sink: dict | None = None,
     stress_test_scenarios: tuple | None = None,
+    fingerprint_sink: dict | None = None,
 ) -> list[CandidateProposal]:
     """Generate one :class:`CandidateProposal` per menu entry.
 
@@ -490,6 +491,50 @@ def generate_candidate_proposals(
             sink=stress_test_sink,
             scenarios=stress_test_scenarios,
         )
+
+    # P0-2 — populate the fingerprint sink so the caller can append
+    # to a chain. We only build the payload when a sink is supplied
+    # — opting in is free of cost when this kwarg is omitted.
+    if fingerprint_sink is not None:
+        from smc.hedgerock.evolution.fingerprint import (
+            compute_fingerprint as _fp,
+        )
+        live_for_fp = decision_server.get_live_parameters()
+        inputs_payload = {
+            "candidate_ids": [c.candidate_id for c in candidate_menu],
+            "audit_log_present": bool(
+                getattr(
+                    getattr(bundle, "registry_audit", None),
+                    "audit_log_present", False,
+                )
+            ),
+            "audit_violation": bool(
+                getattr(
+                    getattr(bundle, "registry_audit", None),
+                    "registry_append_only_violation", False,
+                )
+            ),
+            "stress_test": bool(stress_test),
+        }
+        outputs_payload = [
+            {
+                "candidate_id": p.candidate_id,
+                "decision": p.decision,
+                "decision_reason": p.decision_reason,
+                "proposed_value": p.proposed_value,
+            }
+            for p in proposals
+        ]
+        entry = _fp(
+            operation_type="generate_candidate_proposals",
+            inputs=inputs_payload,
+            outputs=outputs_payload,
+            params=live_for_fp,
+        )
+        fingerprint_sink["entry"] = entry
+        fingerprint_sink["inputs"] = inputs_payload
+        fingerprint_sink["outputs"] = outputs_payload
+        fingerprint_sink["params"] = live_for_fp
 
     if output_dir is not None:
         _emit_sidecar_snapshot(proposals=proposals, output_dir=output_dir)
