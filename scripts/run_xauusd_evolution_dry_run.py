@@ -443,6 +443,24 @@ def _evidence_quality(replay: DynamicReplayStats) -> str:
     return EVIDENCE_DYNAMIC_REPLAY if replay.available else EVIDENCE_BENCHMARK_ONLY
 
 
+# Three-state validation status. ``available`` only means the adapter
+# ran; ``ok`` requires the adapter to also have produced ENTRIES, which
+# is the prerequisite for the PnL / win-rate / Sharpe numbers to be
+# real performance evidence. Without entries, those numbers are
+# trivially zero and convey NO promotion-relevant information.
+REPLAY_STATUS_OK = "ok"
+REPLAY_STATUS_NO_ENTRIES_WAIT = "no_entries_wait"
+REPLAY_STATUS_NOT_AVAILABLE = "not_available"
+
+
+def _replay_validation_status(replay: DynamicReplayStats) -> str:
+    if not replay.available:
+        return REPLAY_STATUS_NOT_AVAILABLE
+    if (replay.entry_count or 0) <= 0:
+        return REPLAY_STATUS_NO_ENTRIES_WAIT
+    return REPLAY_STATUS_OK
+
+
 # ---------------------------------------------------------------------------
 # Approval checklist (dry-run).
 # ---------------------------------------------------------------------------
@@ -472,10 +490,17 @@ def _approval_checklist(
         "benchmark (long-only) stats produced — INFORMATIONAL ONLY",
         "PASS (informational)" if benchmark_ok else "WAIT",
     ))
-    rows.append((
-        "dynamic replay against rule_engine",
-        "PASS" if dynamic_replay.available else f"WAIT ({dynamic_replay.reason})",
-    ))
+    replay_status = _replay_validation_status(dynamic_replay)
+    if replay_status == REPLAY_STATUS_OK:
+        replay_row = "PASS"
+    elif replay_status == REPLAY_STATUS_NO_ENTRIES_WAIT:
+        replay_row = (
+            "WAIT (replay ran but produced no entries — "
+            "no-entry replay is not performance validation)"
+        )
+    else:
+        replay_row = f"WAIT ({dynamic_replay.reason})"
+    rows.append(("dynamic replay against rule_engine", replay_row))
     rows.append((
         "regime detection produced snapshot",
         "PASS" if regime_ok else "WAIT",
@@ -560,7 +585,21 @@ def _render_report(
     )
     lines.append("")
 
+    replay_status = _replay_validation_status(dynamic_replay)
     lines.append(f"**Evidence quality:** `{evidence_quality}`")
+    lines.append(
+        f"**Replay validation status:** `{replay_status}`"
+    )
+    if replay_status == REPLAY_STATUS_NO_ENTRIES_WAIT:
+        lines.append("")
+        lines.append(
+            "> ⚠️  The replay adapter ran end-to-end against real "
+            "rule_engine, but EVERY bar landed in observe / halt / "
+            "veto — **0 entries**. PnL, WinRate and Sharpe are "
+            "trivially `0` and are **NOT performance validation**. "
+            "Approval is held at WAIT until a replay produces real "
+            "entries with real exits."
+        )
     if evidence_quality == EVIDENCE_BENCHMARK_ONLY:
         lines.append("")
         lines.append(
@@ -615,6 +654,13 @@ def _render_report(
 
     lines.append("## 2B. Dynamic replay — strategy backtest (rule_engine)")
     lines.append("")
+    if replay_status == REPLAY_STATUS_NO_ENTRIES_WAIT:
+        lines.append(
+            "**Validation status: `no_entries_wait`** — replay ran "
+            "but produced 0 entries. The metrics below are TRIVIAL "
+            "ZEROS, NOT performance evidence."
+        )
+        lines.append("")
     if dynamic_replay.available:
         lines.append("| Metric | Value |")
         lines.append("|---|---|")
@@ -707,11 +753,17 @@ def _render_report(
     lines.append("## 6. Recommendation pipeline")
     lines.append("")
     lines.append(f"- evidence quality: `{evidence_quality}`")
+    lines.append(f"- replay validation status: `{replay_status}`")
     if evidence_quality == EVIDENCE_BENCHMARK_ONLY:
         lines.append(
             "- ⚠️  recommendation evidence is **benchmark-only**; "
             "candidate generator ran against the price-history baseline, "
             "**not** trade-level replay output"
+        )
+    elif replay_status == REPLAY_STATUS_NO_ENTRIES_WAIT:
+        lines.append(
+            "- ⚠️  replay produced 0 entries — operator cannot see "
+            "real PnL/WinRate/Sharpe yet; promotion readiness held at WAIT"
         )
     lines.append(f"- candidates produced: {n_proposals}")
     lines.append(f"- proposals with decision=RECOMMEND: {n_recommend}")
@@ -799,6 +851,7 @@ def _evidence_payload(
             "end": window_end.isoformat(),
         },
         "evidence_quality": evidence_quality,
+        "replay_validation_status": _replay_validation_status(dynamic_replay),
         "bars_loaded": {"H1": n_h1, "H4": n_h4, "D1": n_d1},
         "benchmark_long_only": benchmark.to_dict() if benchmark else None,
         "dynamic_replay": dynamic_replay.to_dict(),
@@ -845,6 +898,9 @@ def _render_wf_md(payload: dict[str, Any]) -> str:
         f"`{payload['window']['end']}`"
     )
     lines.append(f"- evidence_quality: **`{payload['evidence_quality']}`**")
+    rs = payload.get("replay_validation_status")
+    if rs:
+        lines.append(f"- replay_validation_status: **`{rs}`**")
     bars = payload.get("bars_loaded", {})
     lines.append(
         f"- bars_loaded: H1={bars.get('H1')}, H4={bars.get('H4')}, "
@@ -1504,6 +1560,9 @@ def run(
                 "run_id": run_id,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "evidence_quality": evidence_quality,
+                "replay_validation_status": _replay_validation_status(
+                    dynamic_replay,
+                ),
                 "evidence_path": str(evidence_payload_path),
                 "evidence_hash": evidence_hash,
                 "evidence_artefacts": {

@@ -534,12 +534,16 @@ def test_approval_checklist_dynamic_replay_row_is_wait_when_unavailable(
 
 
 @pytest.mark.unit
-def test_approval_checklist_dynamic_replay_row_is_pass_when_available(
+def test_real_lake_replay_with_no_entries_is_wait_not_pass(
     tmp_path: Path,
 ) -> None:
-    """When the real lake serves bars, the replay adapter runs
-    end-to-end and the dynamic-replay row flips to PASS while
-    benchmark stays informational only."""
+    """CRITICAL HONESTY GATE: when the real lake serves bars and the
+    replay runs end-to-end but produces 0 entries (rule_engine refused
+    every bar), the approval row MUST be WAIT — auto-PASS would
+    mislead operators into believing 0 entries == validated. The
+    replay-validation-status snapshot field surfaces this distinction.
+    evidence_quality stays at dynamic_replay (the replay DID run with
+    real rule_engine), but promotion readiness stays held."""
     orch = _import_orchestrator()
     out = tmp_path / "out"
     rc = orch.run(
@@ -550,18 +554,120 @@ def test_approval_checklist_dynamic_replay_row_is_pass_when_available(
     snap = json.loads(
         (out / "xauusd_dry_run_snapshot.json").read_text(encoding="utf-8")
     )
+    # evidence_quality stays at dynamic_replay regardless.
     assert snap["evidence_quality"] == "dynamic_replay"
     assert snap["dynamic_replay"]["available"] is True
+    # But: 0 entries → no_entries_wait → row is WAIT, not PASS.
+    assert snap["dynamic_replay"]["entry_count"] == 0
+    assert snap["replay_validation_status"] == "no_entries_wait"
     row = next(
         r for r in snap["approval_rows"]
         if "dynamic replay against rule_engine" in r["item"]
     )
-    assert row["status"] == "PASS"
+    assert row["status"].startswith("WAIT"), (
+        f"replay row must be WAIT when entries==0; got {row['status']!r}"
+    )
+    assert "no entries" in row["status"].lower()
     bench_row = next(
         r for r in snap["approval_rows"]
         if "benchmark (long-only)" in r["item"]
     )
     assert "informational" in bench_row["status"].lower()
+
+
+@pytest.mark.unit
+def test_approval_row_pass_only_when_entries_populated() -> None:
+    """The approval-row PASS path requires available=True AND
+    entry_count > 0. Tested with a synthetic populated
+    DynamicReplayStats so we can pin the contract independently of
+    whatever the real lake produces today."""
+    orch = _import_orchestrator()
+    populated = orch.DynamicReplayStats(
+        available=True, reason="synthetic populated",
+        pnl_pct=3.4, max_drawdown_pct=-1.2, sharpe_annualised=0.9,
+        trade_count=10, entry_count=10, exit_count=10, win_rate=0.6,
+        veto_reasons={}, cooldown_reasons={}, observe_reasons={},
+        halt_reasons={},
+        risk_tier_distribution={"normal": 100},
+        lot_factor_distribution={"1.0": 100},
+        transition_lock_states={"unlocked": 100},
+        transition_lock_events=0, cooldown_events=0,
+    )
+    assert orch._replay_validation_status(populated) == "ok"
+    rows = orch._approval_checklist(
+        health_ok=True, benchmark_ok=True,
+        dynamic_replay=populated,
+        regime_ok=True, anomaly_state=None,
+        consensus=None, stress_all_passed=True,
+        fingerprint_ok=True, registry_present=True,
+    )
+    replay_row = next(
+        r for r in rows
+        if r[0] == "dynamic replay against rule_engine"
+    )
+    assert replay_row[1] == "PASS"
+
+
+@pytest.mark.unit
+def test_replay_validation_status_three_state_machine() -> None:
+    """Pin the three-state machine:
+        not_available → available=False
+        no_entries_wait → available=True AND entry_count==0
+        ok → available=True AND entry_count>0
+    """
+    orch = _import_orchestrator()
+
+    not_avail = orch.DynamicReplayStats()
+    assert orch._replay_validation_status(not_avail) == "not_available"
+
+    no_entries = orch.DynamicReplayStats(
+        available=True, reason="ran but 0 entries",
+        pnl_pct=0.0, max_drawdown_pct=0.0, sharpe_annualised=0.0,
+        trade_count=0, entry_count=0, exit_count=0, win_rate=0.0,
+        veto_reasons={}, cooldown_reasons={}, observe_reasons={"x": 1},
+        halt_reasons={}, risk_tier_distribution={"observe": 1},
+        lot_factor_distribution={"0": 1},
+        transition_lock_states={"unlocked": 1},
+        transition_lock_events=0, cooldown_events=0,
+    )
+    assert orch._replay_validation_status(no_entries) == "no_entries_wait"
+
+    ok = orch.DynamicReplayStats(
+        available=True, reason="ran with entries",
+        pnl_pct=1.0, max_drawdown_pct=-0.5, sharpe_annualised=1.0,
+        trade_count=5, entry_count=5, exit_count=5, win_rate=0.6,
+        veto_reasons={}, cooldown_reasons={}, observe_reasons={},
+        halt_reasons={}, risk_tier_distribution={"normal": 5},
+        lot_factor_distribution={"1.0": 5},
+        transition_lock_states={"unlocked": 5},
+        transition_lock_events=0, cooldown_events=0,
+    )
+    assert orch._replay_validation_status(ok) == "ok"
+
+
+@pytest.mark.unit
+def test_no_entries_wait_warning_appears_in_report_and_payload(
+    tmp_path: Path,
+) -> None:
+    """When the real lake produces 0 entries, BOTH the markdown report
+    AND the evidence payload MUST surface the no_entries_wait status
+    with the explicit 'not performance validation' wording."""
+    orch = _import_orchestrator()
+    out = tmp_path / "out"
+    rc = orch.run(
+        output_dir=out, symbol="XAUUSD", lookback_days=60,
+        lake_root=_data_lake_root(),
+    )
+    assert rc == 0
+    body = (out / "xauusd_dry_run_report.md").read_text(encoding="utf-8")
+    assert "Replay validation status:" in body
+    assert "`no_entries_wait`" in body
+    assert "NOT performance validation" in body or "not performance validation" in body.lower()
+    assert "0 entries" in body
+    payload = json.loads(
+        (out / "fixture" / "evidence_payload.json").read_text(encoding="utf-8")
+    )
+    assert payload["replay_validation_status"] == "no_entries_wait"
 
 
 # ---------------------------------------------------------------------------
