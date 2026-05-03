@@ -158,6 +158,7 @@ def _render_recommendation(
     timeframe_consensus: TimeframeConsensus | None = None,
     stop_recommendation: StopRecommendation | None = None,
     stress_test_results: dict | None = None,
+    explainability_certificates: list | None = None,
 ) -> str:
     audit = getattr(bundle, "registry_audit", None)
     audit_present = bool(getattr(audit, "audit_log_present", False))
@@ -266,6 +267,55 @@ def _render_recommendation(
             render_survival_report,
         )
         out.append(render_survival_report(stress_test_results))
+
+    if explainability_certificates:
+        out.append("## Decision Explainability")
+        out.append("")
+        out.append(
+            "Per-candidate causal-factor breakdown + counterfactuals. "
+            "Weights are signed and normalised so |weights| sum to 1. "
+            "Positive = pushed toward RECOMMEND; negative = pushed toward "
+            "NO_RECOMMENDATION."
+        )
+        out.append("")
+        for cert in explainability_certificates:
+            out.append(f"### {cert.candidate_id}")
+            out.append("")
+            out.append(f"- verdict: `{cert.decision}`"
+                       + (f" (`{cert.decision_reason}`)"
+                          if cert.decision_reason else ""))
+            if cert.regime_at_decision:
+                out.append(
+                    f"- regime: **{cert.regime_at_decision}**"
+                )
+            if cert.anomaly_at_decision:
+                out.append(
+                    f"- anomaly: **{cert.anomaly_at_decision}**"
+                )
+            if cert.consensus_at_decision is not None:
+                out.append(
+                    f"- consensus_score: **{cert.consensus_at_decision:.3f}** "
+                    f"(can_recommend={cert.can_recommend_at_decision})"
+                )
+            if cert.stress_test_pass_rate is not None:
+                out.append(
+                    f"- stress_test_pass_rate: **{cert.stress_test_pass_rate:.0%}**"
+                )
+            out.append("- top causal factors:")
+            for f in cert.causal_factors[:5]:
+                sign = "+" if f.weight >= 0 else "−"
+                out.append(
+                    f"    - `{f.name}` {sign}{abs(f.weight):.2%} — {f.detail}"
+                )
+            if cert.counterfactual_comparison:
+                out.append("- counterfactuals:")
+                for cf in cert.counterfactual_comparison:
+                    out.append(
+                        f"    - if `{cf.factor}` were "
+                        f"`{cf.proposed_alternative}`, → {cf.would_change_to}"
+                    )
+            out.append(f"- explanation: {cert.verdict_explanation}")
+            out.append("")
 
     out.append("## Baseline summary")
     out.append("")
@@ -417,6 +467,7 @@ def run(
     stress_test_scenarios: tuple | None = None,
     fingerprint_chain_path: Path | None = None,
     calibrator_state_path: Path | None = None,
+    explainability: bool = False,
 ) -> tuple[list[CandidateProposal], Path]:
     """Library entry point.
 
@@ -543,6 +594,26 @@ def run(
 
     audit_path = Path(getattr(audit, "audit_log_path", "<unknown>")) \
         if audit is not None else Path("<unknown>")
+    certs: list | None = None
+    if explainability:
+        from smc.hedgerock.evolution.explainability import (
+            generate_certificate as _gen_cert,
+        )
+        certs = []
+        for p in proposals:
+            cand_stress = (
+                stress_test_sink.get(p.candidate_id, [])
+                if stress_test else None
+            )
+            certs.append(_gen_cert(
+                proposal=p, bundle=bundle,
+                stress_results=cand_stress,
+                regime_snapshot=regime_snapshot,
+                anomaly_state=anomaly_state,
+                consensus=timeframe_consensus,
+                stop_recommendation=stop_recommendation,
+            ))
+
     body = _render_recommendation(
         proposals=proposals, bundle=bundle, audit_log_path=audit_path,
         gate_results_per_candidate=gate_results_per_candidate,
@@ -551,6 +622,7 @@ def run(
         timeframe_consensus=timeframe_consensus,
         stop_recommendation=stop_recommendation,
         stress_test_results=(stress_test_sink if stress_test else None),
+        explainability_certificates=certs,
     )
     Path(recommendation_path).parent.mkdir(parents=True, exist_ok=True)
     Path(recommendation_path).write_text(body, encoding="utf-8")
@@ -620,6 +692,18 @@ def main(argv: list[str] | None = None) -> int:
              "supplied, every proposal carries the posterior-mean "
              "calibrated_confidence for its parameter class.",
     )
+    expl_group = parser.add_mutually_exclusive_group()
+    expl_group.add_argument(
+        "--explainability", dest="explainability", action="store_true",
+        help="Append a per-candidate Decision Explainability section "
+             "with causal factors + counterfactuals.",
+    )
+    expl_group.add_argument(
+        "--no-explainability", dest="explainability",
+        action="store_false",
+        help="Disable explainability section (default).",
+    )
+    parser.set_defaults(explainability=False)
     args = parser.parse_args(argv)
 
     wf_paths = args.walk_forward_report or []
@@ -641,6 +725,7 @@ def main(argv: list[str] | None = None) -> int:
             stress_test=args.stress_test,
             fingerprint_chain_path=args.fingerprint_chain_path,
             calibrator_state_path=args.calibrator_state,
+            explainability=args.explainability,
         )
     except FileNotFoundError as e:
         print(f"FAILED: {e}", file=sys.stderr)
