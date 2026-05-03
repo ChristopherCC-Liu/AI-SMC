@@ -87,11 +87,24 @@ _FORBIDDEN_MODULE_IMPORTS_RUNTIME = {
     "smc.hedgerock.decision_server",
 }
 
+# Tier-1 read-only unseal — files explicitly authorised to import
+# production decision-side code for replay/backtest purposes only.
+# Each entry is allowed to read decision_server (MarketFeatures shape)
+# AND derive_envelope_params (rule_engine) for closed-bar replay; they
+# are NEVER permitted to mutate state, write to policy_registry, or be
+# called from the live /signal path.
+_TIER1_UNSEAL_RUNTIME = {
+    "src/smc/hedgerock/evolution/dynamic_replay.py",
+}
+
 
 @pytest.mark.unit
 def test_runtime_modules_do_not_import_production_decision_path() -> None:
     failures: list[str] = []
     for f in _runtime_python_files():
+        rel = str(f.relative_to(_REPO_ROOT))
+        if rel in _TIER1_UNSEAL_RUNTIME:
+            continue  # Tier-1 read-only unseal — replay adapter
         text = f.read_text(encoding="utf-8")
         try:
             tree = ast.parse(text)
@@ -130,11 +143,15 @@ def test_runtime_modules_do_not_import_production_decision_path() -> None:
 
 @pytest.mark.unit
 def test_only_test_modules_import_production_derive_envelope_params() -> None:
-    """ALLOW production derive_envelope_params in test/* only."""
+    """ALLOW production derive_envelope_params in test/* only,
+    plus the explicitly-Tier-1-unsealed replay adapter."""
     violations: list[str] = []
     for f in _all_python_files_for_b_boundary():
         if "tests/" in str(f):
             continue  # tests are exempt
+        rel = str(f.relative_to(_REPO_ROOT))
+        if rel in _TIER1_UNSEAL_RUNTIME:
+            continue  # Tier-1 read-only unseal — replay adapter
         text = f.read_text(encoding="utf-8")
         try:
             tree = ast.parse(text)

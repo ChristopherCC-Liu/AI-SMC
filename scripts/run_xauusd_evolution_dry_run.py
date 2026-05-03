@@ -263,6 +263,7 @@ class DynamicReplayStats:
     # Trade counters.
     trade_count: int | None = None
     entry_count: int | None = None
+    exit_count: int | None = None
     win_rate: float | None = None  # closed-trade win rate, NOT per-bar
 
     # Reason distributions — keys are reason ids, values are counts.
@@ -276,6 +277,11 @@ class DynamicReplayStats:
     lot_factor_distribution: dict[str, int] | None = None
     transition_lock_states: dict[str, int] | None = None
 
+    # Event counters — number of times the gate FIRED (not the
+    # per-bar state).
+    transition_lock_events: int | None = None
+    cooldown_events: int | None = None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "available": self.available,
@@ -285,6 +291,7 @@ class DynamicReplayStats:
             "sharpe_annualised": self.sharpe_annualised,
             "trade_count": self.trade_count,
             "entry_count": self.entry_count,
+            "exit_count": self.exit_count,
             "win_rate": self.win_rate,
             "veto_reasons": self.veto_reasons,
             "cooldown_reasons": self.cooldown_reasons,
@@ -293,6 +300,8 @@ class DynamicReplayStats:
             "risk_tier_distribution": self.risk_tier_distribution,
             "lot_factor_distribution": self.lot_factor_distribution,
             "transition_lock_states": self.transition_lock_states,
+            "transition_lock_events": self.transition_lock_events,
+            "cooldown_events": self.cooldown_events,
         }
 
 
@@ -359,26 +368,74 @@ def try_dynamic_replay(
     lake_root: Path,
     window_start: datetime,
     window_end: datetime,
+    h4_bars: list[dict] | None = None,
+    d1_bars: list[dict] | None = None,
 ) -> DynamicReplayStats:
     """Attempt a real rule_engine-backed walk-forward replay.
 
-    Returns ``DynamicReplayStats(available=False, reason=...)`` when the
-    replay can't be produced — currently always returns
-    NOT_AVAILABLE because hooking ``run_walk_forward`` end-to-end
-    against XAUUSD requires a strategy adapter that is not part of
-    this orchestrator.
+    Calls into ``smc.hedgerock.evolution.dynamic_replay`` which performs
+    a closed-bar / no-lookahead replay over real XAUUSD H1 bars,
+    honouring the live ``mode``, ``cooldown_until`` and transition-lock
+    gates. When the replay produces a populated result, every reserved
+    field is filled and ``DynamicReplayStats.available`` is ``True``;
+    the orchestrator's ``_evidence_quality()`` then promotes the run
+    to ``dynamic_replay``.
 
-    The signature is intentionally stable: once the adapter lands, this
-    function returns ``DynamicReplayStats(available=True, ...)`` with
-    every reserved field populated, and the orchestrator promotes
-    ``evidence_quality`` to ``dynamic_replay`` automatically.
+    Graceful degradation: import failures, insufficient bars, or
+    XAUUSD-only assertion violations all surface as
+    ``DynamicReplayStats(available=False, reason=...)`` with every
+    reserved field null — never a partial / fabricated metric.
     """
+    if not bars:
+        return DynamicReplayStats(
+            available=False,
+            reason="no XAUUSD H1 bars supplied to replay",
+        )
+    try:
+        from smc.hedgerock.evolution.dynamic_replay import replay_xauusd_h1
+    except Exception as e:
+        return DynamicReplayStats(
+            available=False,
+            reason=f"replay module import failed: {e!r}",
+        )
+
+    try:
+        result = replay_xauusd_h1(
+            symbol=SYMBOL,
+            h1_bars=bars,
+            h4_bars=h4_bars or [],
+            d1_bars=d1_bars or [],
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        return DynamicReplayStats(
+            available=False,
+            reason=f"replay raised: {e!r}",
+        )
+
+    if not result.available:
+        return DynamicReplayStats(
+            available=False, reason=result.reason,
+        )
+
     return DynamicReplayStats(
-        available=False,
-        reason=(
-            "rule_engine-backed replay not plumbed in this build; "
-            "reserved fields remain null"
-        ),
+        available=True,
+        reason=result.reason,
+        pnl_pct=result.pnl_pct,
+        max_drawdown_pct=result.max_drawdown_pct,
+        sharpe_annualised=result.sharpe_annualised,
+        trade_count=result.trade_count,
+        entry_count=result.entry_count,
+        exit_count=result.exit_count,
+        win_rate=result.win_rate,
+        veto_reasons=result.veto_reasons,
+        cooldown_reasons=result.cooldown_reasons,
+        observe_reasons=result.observe_reasons,
+        halt_reasons=result.halt_reasons,
+        risk_tier_distribution=result.risk_tier_distribution,
+        lot_factor_distribution=result.lot_factor_distribution,
+        transition_lock_states=result.transition_lock_states,
+        transition_lock_events=result.transition_lock_events,
+        cooldown_events=result.cooldown_events,
     )
 
 
@@ -820,12 +877,15 @@ def _render_wf_md(payload: dict[str, Any]) -> str:
 
     lines.append("## Dynamic replay — strategy backtest (rule_engine)")
     lines.append("")
+    lines.append(f"_Source: {replay.get('reason', 'unspecified')}_")
+    lines.append("")
     if replay.get("available"):
         lines.append("| Metric | Value |")
         lines.append("|---|---|")
         for key in (
-            "trade_count", "entry_count", "win_rate",
+            "trade_count", "entry_count", "exit_count", "win_rate",
             "pnl_pct", "max_drawdown_pct", "sharpe_annualised",
+            "transition_lock_events", "cooldown_events",
         ):
             lines.append(f"| {key} | {replay.get(key)} |")
     else:
@@ -1088,6 +1148,8 @@ def run(
     print("[4b/13] DYNAMIC REPLAY (rule_engine-backed walk-forward)")
     dynamic_replay = try_dynamic_replay(
         bars=h1_bars or [],
+        h4_bars=h4_bars or [],
+        d1_bars=d1_bars or [],
         lake_root=lake_root,
         window_start=start, window_end=end,
     )

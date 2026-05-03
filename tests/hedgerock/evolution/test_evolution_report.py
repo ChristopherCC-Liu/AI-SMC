@@ -726,7 +726,14 @@ def test_evolution_modules_have_no_production_imports() -> None:
     import smc.hedgerock.evolution as pkg
     pkg_root = Path(pkg.__file__).parent
     forbidden = {"smc.hedgerock.rule_engine", "smc.hedgerock.decision_server"}
+    # Tier-1 read-only unseal — dynamic_replay imports decision_server
+    # (MarketFeatures only) and rule_engine (derive_envelope_params)
+    # for closed-bar replay. Authorised by
+    # _RULE_ENGINE_REPLAY_WHITELIST in test_regression_guard.py.
+    tier1_unseal_files = {"dynamic_replay.py"}
     for py in pkg_root.glob("*.py"):
+        if py.name in tier1_unseal_files:
+            continue
         tree = ast.parse(py.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

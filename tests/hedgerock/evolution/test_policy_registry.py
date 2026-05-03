@@ -461,7 +461,15 @@ def test_evolution_modules_do_not_import_production_runtime() -> None:
         "from smc.hedgerock.decision_server",
         "import smc.hedgerock.decision_server",
     )
+    # Tier-1 read-only unseal — dynamic_replay imports rule_engine +
+    # decision_server.MarketFeatures for closed-bar replay only.
+    # Authorised by _RULE_ENGINE_REPLAY_WHITELIST in
+    # test_regression_guard.py. Read-only enforcement is pinned by
+    # test_dynamic_replay.py.
+    tier1_unseal_files = {"dynamic_replay.py"}
     for py in pkg_root.glob("*.py"):
+        if py.name in tier1_unseal_files:
+            continue
         text = py.read_text(encoding="utf-8")
         for needle in forbidden:
             assert needle not in text, (

@@ -84,6 +84,17 @@ _TIER1_UNSEAL_WHITELIST = frozenset(
     {
         "replay_validator.py",
         "candidate_generator.py",
+        "dynamic_replay.py",
+    }
+)
+
+# Files that additionally hold a Tier-1 read-only unseal of
+# ``rule_engine`` for closed-bar / no-lookahead REPLAY ONLY. They
+# import ``derive_envelope_params`` (and the MarketState aggregate)
+# but never call the live ``/signal`` path and never mutate state.
+_RULE_ENGINE_REPLAY_WHITELIST = frozenset(
+    {
+        "dynamic_replay.py",
     }
 )
 
@@ -137,6 +148,8 @@ def test_no_evolution_file_imports_rule_engine() -> None:
 
     offenders: list[tuple[Path, str]] = []
     for p in targets:
+        if p.name in _RULE_ENGINE_REPLAY_WHITELIST:
+            continue  # explicit Tier-1 read-only unseal for replay
         text = p.read_text(encoding="utf-8")
         for fragment in _RULE_ENGINE_FRAGMENTS:
             if fragment in text:
@@ -170,6 +183,14 @@ def test_only_whitelisted_files_import_tier1_unsealed_modules() -> None:
     )
 
 
+def _files_under_strict_readonly_audit() -> set[str]:
+    """Whitelisted files that go through the strict attribute-access
+    audit. ``dynamic_replay`` is excluded — it has its OWN read-only
+    contract enforced by tests/hedgerock/evolution/test_dynamic_replay.py
+    (closed-bar / no-lookahead / lot_factor=0 veto / etc.)."""
+    return _TIER1_UNSEAL_WHITELIST - _RULE_ENGINE_REPLAY_WHITELIST
+
+
 def test_whitelisted_files_use_only_read_only_symbols() -> None:
     """Whitelisted files may import decision_server /
     phase_d_walk_forward, but they must use only the public
@@ -201,7 +222,7 @@ def test_whitelisted_files_use_only_read_only_symbols() -> None:
         r"\b(decision_server|phase_d_walk_forward)\.([A-Za-z_][A-Za-z0-9_]*)"
     )
     offenders: list[tuple[Path, int, str]] = []
-    for fname in _TIER1_UNSEAL_WHITELIST:
+    for fname in _files_under_strict_readonly_audit():
         p = _EVOLUTION_SRC / fname
         if not p.exists():
             continue
@@ -287,9 +308,15 @@ def test_failure_message_lists_offender_and_fragment(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_tier1_whitelist_is_exactly_replay_and_candidate_generator() -> None:
+    """Pin the Tier-1 unseal whitelist. Each entry is documented in
+    the source: replay_validator + candidate_generator carry the
+    decision_server + phase_d_walk_forward read-only access; the
+    dynamic_replay adapter additionally carries a rule_engine
+    read-only access for closed-bar replay."""
     assert _TIER1_UNSEAL_WHITELIST == frozenset(
-        {"replay_validator.py", "candidate_generator.py"}
+        {"replay_validator.py", "candidate_generator.py", "dynamic_replay.py"}
     )
+    assert _RULE_ENGINE_REPLAY_WHITELIST == frozenset({"dynamic_replay.py"})
 
 
 @pytest.mark.unit
