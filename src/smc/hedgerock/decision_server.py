@@ -549,6 +549,7 @@ def create_app(
     cost_tracker: CostTracker | None = None,
     symbol_whitelist: frozenset[str] | None = None,
     market_provider_label: str = "unknown",
+    fusion_controller: Any | None = None,
 ) -> FastAPI:
     """Build the FastAPI app the EA polls.
 
@@ -689,6 +690,46 @@ def create_app(
                 filter_result = None
 
         ts_now = datetime.now(timezone.utc)
+
+        # ----- fusion_controller path (highest priority) -----
+        # 若注入了 FusionController，绕过 legacy rule_engine path，直接
+        # 调用 fusion 全链路。向后兼容：fusion_controller 缺省 → 走老路径。
+        if fusion_controller is not None:
+            prev_env_for_fusion = (
+                env_store.get(sym) if env_store is not None else None
+            )
+            try:
+                spread_for_fusion: int | None = None
+                rec_for_fusion = ea_store.get_record(sym)
+                if (
+                    rec_for_fusion is not None
+                    and rec_for_fusion.state.spread_pts is not None
+                ):
+                    spread_for_fusion = rec_for_fusion.state.spread_pts
+                outcome = fusion_controller.on_signal_request(
+                    symbol=sym,
+                    features=features,
+                    ea_state_store=ea_store,
+                    prev_envelope=prev_env_for_fusion,
+                    news_classification=news,
+                    spread_pts=spread_for_fusion,
+                    exposure_lots=exposure_lots,
+                    liquidity_sweep=sweep_payload,
+                    filter_result=filter_result,
+                    now=ts_now,
+                )
+            except Exception:  # pragma: no cover
+                _LOG.exception("fusion_controller crashed for %s", sym)
+                outcome = None
+            if outcome is not None:
+                env = outcome.envelope
+                # 持久化 regime + envelope，让下一次 poll 看到 prev
+                legacy_store.set(sym, features.regime)
+                v2_store.set(sym, outcome.post_v2_regime)
+                if env_store is not None:
+                    env_store.set(sym, env)
+                return JSONResponse(env.model_dump(mode="json"))
+            # outcome=None（fusion crash）→ fallthrough 到 legacy 路径
 
         # ----- rule_engine wiring (enable_rule_engine=True) -----
         rule_kwargs: dict[str, Any] = {}
