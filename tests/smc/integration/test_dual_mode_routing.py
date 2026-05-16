@@ -211,3 +211,131 @@ class TestDualModeRouting:
             guards_passed=True,
         )
         assert mode.mode == "ranging"
+
+
+# ---------------------------------------------------------------------------
+# R10 P2.1 + P2.2 wiring tests
+#
+# Verify the live_demo end-to-end pathway: when (a) the caller threads the
+# D1 SMA50 slope through to the router and (b) the caller threads ai_direction
+# through to range_trader, the new gates fire correctly. These mirror the
+# wiring inside scripts/live_demo.determine_action without importing the
+# script (which has top-level MetaTrader5 import).
+# ---------------------------------------------------------------------------
+
+
+class TestR10P2WiringThroughLiveDemo:
+    """End-to-end wiring: caller-provided kwargs propagate through router + RangeTrader."""
+
+    def test_router_consumes_d1_slope_to_demote_ranging(self):
+        """When caller supplies d1_sma50_slope_pct + ai_regime_assessment,
+        the router demotes a would-be-ranging cycle to trending under the
+        trending_dominance flag — proving the wiring lands.
+        """
+        from datetime import datetime, timezone
+
+        from smc.ai.models import AIRegimeAssessment
+        from smc.ai.param_router import route
+
+        assessment = AIRegimeAssessment(
+            regime="TREND_UP",
+            trend_direction="bullish",
+            confidence=0.65,
+            param_preset=route("TREND_UP"),
+            reasoning="wiring fixture",
+            assessed_at=datetime(2026, 4, 26, 12, 0, tzinfo=timezone.utc),
+            source="ai_debate",
+            cost_usd=0.0,
+        )
+        mode = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.30,
+            regime="ranging",
+            session="LONDON",
+            range_bounds=make_bounds(),
+            guards_passed=True,
+            d1_sma50_slope_pct=0.06,
+            trending_dominance_enabled=True,
+            ai_regime_assessment=assessment,
+            ai_regime_trust_threshold=0.7,
+        )
+        # P0 trust gate is 0.7 (above 0.65) → P0 cannot fire; the only path
+        # to trending here is the dominance demote, proving wiring ⇒ effect.
+        assert mode.mode == "trending"
+        assert mode.ai_regime_decision == "trending_dominance_over_ranging"
+
+    def test_range_trader_consumes_ai_direction_to_veto_setup(self, tmp_path):
+        """When caller supplies ai_direction + confidence, RangeTrader vetoes
+        opposing setups under the entry-gate flag.
+        """
+        from smc.smc_core.types import (
+            OrderBlock,
+            SMCSnapshot,
+            StructureBreak,
+            SwingPoint,
+        )
+        from smc.data.schemas import Timeframe
+        from smc.strategy.range_trader import RangeTrader
+        import polars as pl
+
+        BASE_TS = datetime(2026, 4, 26, 0, 0, tzinfo=timezone.utc)
+
+        def _snap(structure_breaks=(), order_blocks=(), swing_points=(), tf=Timeframe.H1):
+            return SMCSnapshot(
+                ts=BASE_TS,
+                timeframe=tf,
+                swing_points=swing_points,
+                order_blocks=order_blocks,
+                fvgs=(),
+                structure_breaks=structure_breaks,
+                liquidity_levels=(),
+                trend_direction="ranging",
+            )
+
+        h1_snap = _snap(
+            order_blocks=(
+                OrderBlock(
+                    ts_start=BASE_TS, ts_end=BASE_TS,
+                    high=2370.00, low=2366.00,
+                    ob_type="bearish", timeframe=Timeframe.H1,
+                ),
+                OrderBlock(
+                    ts_start=BASE_TS, ts_end=BASE_TS,
+                    high=2352.00, low=2348.00,
+                    ob_type="bullish", timeframe=Timeframe.H1,
+                ),
+            ),
+            swing_points=(
+                SwingPoint(ts=BASE_TS, price=2348.00, swing_type="low", strength=5),
+                SwingPoint(ts=BASE_TS, price=2370.00, swing_type="high", strength=5),
+            ),
+        )
+        m15_short_choch = _snap(
+            structure_breaks=(
+                StructureBreak(
+                    ts=BASE_TS, price=2369.0,
+                    break_type="choch", direction="bearish",
+                    timeframe=Timeframe.M15,
+                ),
+            ),
+            tf=Timeframe.M15,
+        )
+
+        trader = RangeTrader(
+            min_range_width=300, max_range_width=3000,
+            cooldown_state_path=tmp_path / "cd.json",
+            ai_direction_entry_gate_enabled=True,
+        )
+        h1_df = pl.DataFrame({"high": [2380.0], "low": [2340.0], "close": [2360.0]})
+        bounds = trader.detect_range(h1_df, h1_snap)
+        assert bounds is not None
+
+        setups = trader.generate_range_setups(
+            h1_snap, m15_short_choch,
+            current_price=2369.5, bounds=bounds, h1_atr=2.0,
+            ai_direction="bullish",
+            ai_direction_confidence=0.70,
+        )
+        # bullish AI must veto the short setup; verify diagnostic key present.
+        assert all(s.direction != "short" for s in setups)
+        assert "short_ai_direction_blocked" in trader._last_setups_diagnostic

@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<!--
+  Synthetic ForexFactory weekly calendar fixture for HedgeRock news_engine tests.
+
+  This file is intentionally a *simplified* form of the live FF page; we
+  capture only the row shapes the parser actually needs (calendar__row,
+  calendar__currency, calendar__event, calendar__actual / forecast /
+  previous, plus a stable data-event-datetime attribute for timestamp
+  extraction).
+
+  Coverage goals — this fixture must produce, when parsed:
+
+  - 2024-03-06 13:30 UTC : Non-Farm Payrolls (USD, intensity=high)
+  - 2024-03-06 13:30 UTC : ADP Employment (USD, intensity=medium)
+  - 2024-03-06 13:30 UTC : Retail Sales (EUR, intensity=medium)
+  - 2024-03-12 12:30 UTC : CPI YoY (USD, intensity=high)
+  - 2024-03-12 12:30 UTC : Daylight Saving (intensity=none, 0 dots)
+  - 2024-03-12 13:00 UTC : ECB Rate Decision (EUR, intensity=high)
+  - 2024-03-13 09:00 UTC : Manufacturing PMI (GBP, intensity=low)
+
+  The date 2024-03-06 was chosen deliberately so the fixture
+  filename matches the lead's task description.
+-->
+<html>
+<head><title>Forex Factory: Economic Calendar</title></head>
+<body>
+<table class="calendar__table">
+  <tbody>
+    <tr class="calendar__row" data-event-datetime="2024-03-06T13:30:00+00:00">
+      <td class="calendar__date">Wed Mar 6</td>
+      <td class="calendar__time">8:30am</td>
+      <td class="calendar__currency">USD</td>
+      <td class="calendar__impact ff-impact-red3" data-impact-dots="3">
+        <span class="impact-icon"></span>
+      </td>
+      <td class="calendar__event">Non-Farm Payrolls</td>
+      <td class="calendar__actual">272K</td>
+      <td class="calendar__forecast">200K</td>
+      <td class="calendar__previous">229K</td>
+    </tr>
+    <tr class="calendar__row" data-event-datetime="2024-03-06T13:30:00+00:00">
+      <td class="calendar__currency">USD</td>
+      <td class="calendar__impact ff-impact-ora" data-impact-dots="2"></td>
+      <td class="calendar__event">ADP Employment Change</td>
+      <td class="calendar__actual">152K</td>
+      <td class="calendar__forecast">150K</td>
+      <td class="calendar__previous">107K</td>
+    </tr>
+    <tr class="calendar__row" data-event-datetime="2024-03-06T13:30:00+00:00">
+      <td class="calendar__currency">EUR</td>
+      <td class="calendar__impact" data-impact-dots="2"></td>
+      <td class="calendar__event">Retail Sales</td>
+      <td class="calendar__actual">-0.1%</td>
+      <td class="calendar__forecast">0.2%</td>
+      <td class="calendar__previous">-1.1%</td>
+    </tr>
+    <tr class="calendar__row" data-event-datetime="2024-03-12T12:30:00+00:00">
+      <td class="calendar__currency">USD</td>
+      <td class="calendar__impact ff-impact-red3" data-impact-dots="3"></td>
+      <td class="calendar__event">CPI YoY</td>
+      <td class="calendar__actual">3.4%</td>
+      <td class="calendar__forecast">3.3%</td>
+      <td class="calendar__previous">3.1%</td>
+    </tr>
+    <tr class="calendar__row" data-event-datetime="2024-03-12T12:30:00+00:00">
+      <td class="calendar__currency">USD</td>
+      <td class="calendar__impact" data-impact-dots="0"></td>
+      <td class="calendar__event">Daylight Saving Time</td>
+      <td class="calendar__actual">--</td>
+      <td class="calendar__forecast">--</td>
+      <td class="calendar__previous">--</td>
+    </tr>
+    <tr class="calendar__row" data-event-datetime="2024-03-12T13:00:00+00:00">
+      <td class="calendar__currency">EUR</td>
+      <td class="calendar__impact ff-impact-red3" data-impact-dots="3"></td>
+      <td class="calendar__event">ECB Rate Decision</td>
+      <td class="calendar__actual"></td>
+      <td class="calendar__forecast">4.50%</td>
+      <td class="calendar__previous">4.50%</td>
+    </tr>
+    <tr class="calendar__row" data-event-datetime="2024-03-13T09:00:00+00:00">
+      <td class="calendar__currency">GBP</td>
+      <td class="calendar__impact ff-impact-yel" data-impact-dots="1"></td>
+      <td class="calendar__event">Manufacturing PMI</td>
+      <td class="calendar__actual">49.8</td>
+      <td class="calendar__forecast">49.5</td>
+      <td class="calendar__previous">49.6</td>
+    </tr>
+  </tbody>
+</table>
+</body>
+</html>

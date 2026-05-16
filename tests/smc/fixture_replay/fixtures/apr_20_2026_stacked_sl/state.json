@@ -1,0 +1,29 @@
+{
+  "incident": {
+    "slug": "apr_20_2026_stacked_sl",
+    "occurred_at_utc": "2026-04-20T02:46:00+00:00",
+    "summary": "Five XAUUSD BUY positions opened in a 30-minute window from the same H1 demand zone all hit SL simultaneously for a combined -$212.25 loss. The R4 v5 anti-stack gate (check_concurrent_cap + check_anti_stack_cooldown) was added in the post-mortem to prevent recurrence.",
+    "evidence": "data/vps_snapshot/XAUUSD/journal/live_trades.jsonl (production journal — not in this repo) showed 5 RANGE BUY entries between 02:18 and 02:44 UTC, all SL'd between 03:01 and 03:14."
+  },
+  "symbol": "XAUUSD",
+  "magic": 19760418,
+  "max_concurrent": 1,
+  "anti_stack_cooldown_minutes": 30,
+  "now_utc": "2026-04-20T02:46:00+00:00",
+  "candidate_setup": {
+    "direction": "long",
+    "entry_price": 4779.50,
+    "sl_price": 4754.20,
+    "atr_h1_points": 1850.0
+  },
+  "open_positions": [
+    {"symbol": "XAUUSD", "magic": 19760418, "entry_price": 4781.10, "opened_at_utc": "2026-04-20T02:18:00+00:00"}
+  ],
+  "recent_long_entries": [
+    {"symbol": "XAUUSD", "magic": 19760418, "type": 0, "entry": 0, "time_utc": "2026-04-20T02:18:00+00:00"},
+    {"symbol": "XAUUSD", "magic": 19760418, "type": 0, "entry": 0, "time_utc": "2026-04-20T02:25:00+00:00"},
+    {"symbol": "XAUUSD", "magic": 19760418, "type": 0, "entry": 0, "time_utc": "2026-04-20T02:33:00+00:00"},
+    {"symbol": "XAUUSD", "magic": 19760418, "type": 0, "entry": 0, "time_utc": "2026-04-20T02:39:00+00:00"},
+    {"symbol": "XAUUSD", "magic": 19760418, "type": 0, "entry": 0, "time_utc": "2026-04-20T02:44:00+00:00"}
+  ]
+}

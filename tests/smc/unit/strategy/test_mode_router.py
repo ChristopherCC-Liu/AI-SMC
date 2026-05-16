@@ -1007,3 +1007,122 @@ class TestAIRegimeDecisionTelemetry:
             result.ai_regime_decision
             == "transition_momentum_follow_conf_0.70"
         )
+
+
+# ---------------------------------------------------------------------------
+# R10 P2.1: trending dominance — adaptive Priority-1 + ranging demote
+#
+# Two surgical changes inside the existing P1/P2 blocks, both gated behind
+# ``trending_dominance_enabled=True`` (default OFF preserves prior behavior):
+#   1. When |D1 SMA50 slope| >= 0.05%/bar, lower the Priority-1 directional
+#      threshold from 0.45 to 0.30.
+#   2. After Priority-1 falls through, if D1 slope confirms trending AND a
+#      confident AI trend regime exists (TREND_UP/TREND_DOWN/ATH_BREAKOUT,
+#      conf >= 0.6), demote any otherwise-ranging route to trending.
+#
+# Constants are tagged ``_PHASE2_CALIBRATION_PENDING`` until the live-bake
+# gate_funnel.json validates the empirical thresholds.
+# ---------------------------------------------------------------------------
+
+
+class TestR10P21TrendingDominance:
+    def test_p1_default_threshold_unchanged_when_slope_unset(self) -> None:
+        """Backward compat: omitting slope kwarg keeps Priority-1 at 0.45."""
+        result = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.30,
+            regime="trending",
+            session="LONDON",
+            range_bounds=None,
+        )
+        # 0.30 < 0.45 → must NOT enter trending; falls through.
+        assert result.mode != "trending"
+
+    def test_p1_lowered_threshold_with_strong_slope_and_dominance_on(self) -> None:
+        """|slope| >= 0.05%/bar + dominance ON → Priority-1 drops to 0.30."""
+        result = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.30,
+            regime="trending",
+            session="LONDON",
+            range_bounds=None,
+            d1_sma50_slope_pct=0.06,
+            trending_dominance_enabled=True,
+        )
+        assert result.mode == "trending"
+
+    def test_p1_unchanged_when_slope_below_threshold(self) -> None:
+        """|slope| < 0.05%/bar → Priority-1 stays at 0.45 even with flag ON."""
+        result = route_trading_mode(
+            ai_direction="bullish",
+            ai_confidence=0.30,
+            regime="trending",
+            session="LONDON",
+            range_bounds=None,
+            d1_sma50_slope_pct=0.03,
+            trending_dominance_enabled=True,
+        )
+        assert result.mode != "trending"
+
+    def test_dominance_demote_fires_with_confident_ai_trend(
+        self, sample_range_bounds: RangeBounds
+    ) -> None:
+        """Strong slope + AI TREND_UP @ 0.65 → ranging demoted to trending.
+
+        We push ``ai_regime_trust_threshold=0.7`` so the AI regime stays
+        BELOW Priority-0's trust gate (no P0 force-trending fire), proving
+        the demote path itself is what's promoting the cycle.
+        """
+        assessment = _make_ai_assessment("TREND_UP", confidence=0.65)
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.30,
+            regime="ranging",
+            session="LONDON",
+            range_bounds=sample_range_bounds,
+            guards_passed=True,
+            d1_sma50_slope_pct=0.06,
+            trending_dominance_enabled=True,
+            ai_regime_assessment=assessment,
+            ai_regime_trust_threshold=0.7,
+        )
+        assert result.mode == "trending"
+        assert result.ai_regime_decision == "trending_dominance_over_ranging"
+
+    def test_dominance_demote_off_when_flag_disabled(
+        self, sample_range_bounds: RangeBounds
+    ) -> None:
+        """Flag OFF → ranging route preserved (regression guard)."""
+        assessment = _make_ai_assessment("TREND_UP", confidence=0.65)
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.30,
+            regime="ranging",
+            session="LONDON",
+            range_bounds=sample_range_bounds,
+            guards_passed=True,
+            d1_sma50_slope_pct=0.06,
+            trending_dominance_enabled=False,
+            ai_regime_assessment=assessment,
+            ai_regime_trust_threshold=0.7,
+        )
+        assert result.mode == "ranging"
+
+    def test_dominance_demote_skipped_when_ai_regime_low_confidence(
+        self, sample_range_bounds: RangeBounds
+    ) -> None:
+        """AI regime conf < 0.6 → demote does NOT fire, ranging preserved."""
+        assessment = _make_ai_assessment("TREND_UP", confidence=0.45)
+        result = route_trading_mode(
+            ai_direction="neutral",
+            ai_confidence=0.30,
+            regime="ranging",
+            session="LONDON",
+            range_bounds=sample_range_bounds,
+            guards_passed=True,
+            d1_sma50_slope_pct=0.06,
+            trending_dominance_enabled=True,
+            ai_regime_assessment=assessment,
+            ai_regime_trust_threshold=0.7,
+        )
+        assert result.mode == "ranging"

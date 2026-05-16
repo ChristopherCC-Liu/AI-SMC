@@ -827,6 +827,37 @@ def main() -> None:
         )
     print(f"\nReport: {output_path}", flush=True)
 
+    # R10 P4.2: statistical promotion gate. Pool trades across years for both
+    # arms, evaluate the gate, and print the verdict line. PROMOTE/HOLD is
+    # an additional decision criterion ON TOP of the executive-summary
+    # recommendation — the rule (per docs/R_ROUND_GATE.md) is intentionally
+    # conservative so we do not flip live config on noise.
+    from smc.eval.promotion_gate import evaluate_promotion
+
+    pooled_baseline = [
+        t for v in per_year.values() for t in v["baseline"].trades
+    ]
+    pooled_treatment = [
+        t for v in per_year.values() for t in v["treatment"].trades
+    ]
+    verdict = evaluate_promotion(
+        pooled_baseline,
+        pooled_treatment,
+        min_n=30,
+        confidence=0.95,
+        n_iter=10_000,
+        rng_seed=0,
+    )
+    decision = "PROMOTE" if verdict.promote else "HOLD"
+    ci_lo, ci_hi = verdict.pf_diff_ci
+    print(
+        f"\n[GATE] n=B/T={verdict.n_baseline}/{verdict.n_treatment} "
+        f"PF_diff={verdict.pf_diff:+.3f} 95%CI=[{ci_lo:+.3f}, {ci_hi:+.3f}] "
+        f"WR_chi2_p={verdict.wr_chi2_p:.3f} (informational) -> {decision}",
+        flush=True,
+    )
+    print(f"[GATE] rationale: {verdict.rationale}", flush=True)
+
 
 if __name__ == "__main__":
     main()

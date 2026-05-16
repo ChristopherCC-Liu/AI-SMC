@@ -1,0 +1,824 @@
+"""HedgeRock decision server — HTTP endpoint the MQL5 EA polls.
+
+Reconstructed from consumer signatures + test contracts after the
+P0/P1 merge accidentally overwrote the original untracked file. The
+public surface is the union of:
+
+  * Tests in ``tests/hedgerock/test_decision_server.py`` (most
+    complete behavioural contract).
+  * Consumer imports across ``src/smc/hedgerock/`` (market_state,
+    mock_provider, decision_replay, replay_data_source_impl,
+    news_features_provider_impl, forex_data_lake_provider,
+    regime_opportunity_atlas).
+  * The Tier-1 unseal additions from the self-evolution sidecar
+    (:func:`get_live_parameters`, :data:`LIVE_PARAMETER_KEYS`).
+
+The reconstruction stays faithful to the documented behaviour but
+cannot guarantee bit-for-bit equality with the lost source. Anywhere
+in doubt, behaviour follows the test contract.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from threading import Lock
+from typing import Any, Callable, Literal, Mapping, Protocol
+
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
+
+from smc.ai.cost_tracker import CostTracker
+from smc.ai.models import MarketRegimeAI
+from smc.hedgerock.ea_state import EAState, EAStateRecord, EAStateStore, build_ea_state
+from smc.hedgerock.exit_decider import ChatFn, ExitDecision, decide_exit
+from smc.hedgerock.news_classifier import NewsClassification
+from smc.hedgerock.regime_filters import FilterInputs, FilterResult, compute_filters
+from smc.hedgerock.schemas import (
+    SCHEMA_VERSION,
+    Mode,
+    NewsDirection,
+    NewsIntensity,
+    RegimeV2,
+    RiskTier,
+    SignalEnvelope,
+    Timeframe,
+    regime_v1_to_v2,
+)
+from smc.hedgerock.tf_router import TimeframeRoute, route_timeframe
+from smc.hedgerock.transition_lock import compute_lock_until, compute_lock_until_v2
+from types import MappingProxyType
+from datetime import timedelta
+
+
+__all__ = [
+    "DEFAULT_PORT",
+    "EAState",
+    "EAStateRecord",
+    "EAStateStore",
+    "ExposureProvider",
+    "FeaturesUnavailable",
+    "FilterInputsProvider",
+    "LIVE_PARAMETER_KEYS",
+    "LiquiditySweepProvider",
+    "MarketFeatures",
+    "MarketFeaturesProvider",
+    "NewsFeaturesProvider",
+    "NewsUnavailable",
+    "PrevRegimeStore",
+    "PrevRegimeV2Store",
+    "build_ea_state",
+    "build_envelope",
+    "build_strategy_id",
+    "create_app",
+    "get_live_parameters",
+]
+
+
+_LOG = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+
+DEFAULT_PORT: int = 8788
+"""HTTP port the EA polls. Distinct from strategy_server's 8080."""
+
+
+# ---------------------------------------------------------------------------
+# Public dataclasses + exceptions
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MarketFeatures:
+    """Current-market snapshot consumed by the decision pipeline.
+
+    Intentionally minimal — feature enrichment happens upstream in
+    ``ForexDataLakeMarketFeaturesProvider`` (or its mock). Keeping this
+    class flat lets ``decision_server`` stay decoupled from the data
+    source and lets tests construct a ``MarketFeatures`` inline.
+    """
+
+    volatility_rank: float
+    hh_count: int
+    ll_count: int
+    h4_trend_bars: int
+    regime: MarketRegimeAI
+
+
+class FeaturesUnavailable(RuntimeError):
+    """Raised by a :class:`MarketFeaturesProvider` when the underlying
+    data lake / cache cannot serve a feature snapshot for the given
+    symbol. ``decision_server`` returns 503 in response."""
+
+
+class NewsUnavailable(RuntimeError):
+    """Raised by a :class:`NewsFeaturesProvider` when the news source
+    is temporarily unreachable. ``decision_server`` swallows this and
+    proceeds without a news classification."""
+
+
+# ---------------------------------------------------------------------------
+# Protocols (provider seams)
+# ---------------------------------------------------------------------------
+
+
+class MarketFeaturesProvider(Protocol):
+    def get_features(self, symbol: str) -> MarketFeatures: ...
+
+
+class NewsFeaturesProvider(Protocol):
+    def get_news_classification(
+        self, symbol: str,
+    ) -> NewsClassification | None: ...
+
+
+class ExposureProvider(Protocol):
+    def get_exposure_lots(self, symbol: str) -> float: ...
+
+
+class LiquiditySweepProvider(Protocol):
+    def get_liquidity_sweep(
+        self, symbol: str,
+    ) -> tuple[bool, str | None, float | None, float | None] | None: ...
+
+
+class FilterInputsProvider(Protocol):
+    def get_filter_inputs(self, symbol: str) -> FilterInputs | None: ...
+
+
+# ---------------------------------------------------------------------------
+# Per-symbol regime stores
+# ---------------------------------------------------------------------------
+
+
+class PrevRegimeStore:
+    """Thread-safe per-symbol legacy ``MarketRegimeAI`` store.
+
+    Symbols are canonicalised to UPPERCASE on read + write so mixed
+    case anywhere in the call chain cannot produce a phantom shadow
+    record.
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._regimes: dict[str, MarketRegimeAI] = {}
+
+    @staticmethod
+    def _canon(symbol: str) -> str:
+        return str(symbol).upper()
+
+    def get(self, symbol: str) -> MarketRegimeAI | None:
+        with self._lock:
+            return self._regimes.get(self._canon(symbol))
+
+    def set(self, symbol: str, regime: MarketRegimeAI) -> None:
+        with self._lock:
+            self._regimes[self._canon(symbol)] = regime
+
+    def keys(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(sorted(self._regimes.keys()))
+
+
+class PrevRegimeV2Store:
+    """v2 counterpart of :class:`PrevRegimeStore` keyed on
+    ``RegimeV2``. Same UPPERCASE canonicalisation."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._regimes: dict[str, RegimeV2] = {}
+
+    @staticmethod
+    def _canon(symbol: str) -> str:
+        return str(symbol).upper()
+
+    def get(self, symbol: str) -> RegimeV2 | None:
+        with self._lock:
+            return self._regimes.get(self._canon(symbol))
+
+    def set(self, symbol: str, regime: RegimeV2) -> None:
+        with self._lock:
+            self._regimes[self._canon(symbol)] = regime
+
+    def keys(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(sorted(self._regimes.keys()))
+
+
+# ---------------------------------------------------------------------------
+# Strategy id + envelope construction
+# ---------------------------------------------------------------------------
+
+
+def build_strategy_id(
+    symbol: str, timeframe: str | Timeframe, regime: str | MarketRegimeAI,
+) -> str:
+    """Compose a stable lowercase strategy id from the trio."""
+    return f"{str(symbol).lower()}_{str(timeframe).lower()}_{str(regime).lower()}"
+
+
+_DEFAULT_GENERATED_AT = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+_FILTER_HALT_LOCK_SECONDS: int = 5 * 60
+
+
+def _run_rule_engine(
+    *,
+    symbol: str,
+    features: MarketFeatures,
+    news: NewsClassification | None,
+    ea_store: EAStateStore,
+    prev_envelope: SignalEnvelope | None,
+    now: datetime,
+):
+    """Run the production rule_engine path against the current
+    features + EA state.
+
+    Returns ``(dynamic_kwargs, regime_v2, confidence_v2, regime_v2)``
+    or ``None`` when rule_engine couldn't be invoked (e.g. classifier
+    raised). Imports are deferred so test environments that mock the
+    classifier don't pay the import cost up front.
+    """
+    try:
+        from smc.hedgerock.regime_classifier_v2 import classify_regime_v2
+        from smc.hedgerock.market_state import aggregate_from_stores
+        from smc.hedgerock.rule_engine import derive_envelope_params
+    except ImportError:  # pragma: no cover - production deps always present
+        return None
+
+    spread_pts = None
+    rec = ea_store.get_record(symbol.upper())
+    if rec is not None and rec.state.spread_pts is not None:
+        spread_pts = rec.state.spread_pts
+
+    news_intensity_for_classifier = news.event.intensity if news else None
+
+    try:
+        assessment = classify_regime_v2(
+            volatility_rank=features.volatility_rank,
+            h4_trend_bars=features.h4_trend_bars,
+            hh_count=features.hh_count,
+            ll_count=features.ll_count,
+            news_intensity=news_intensity_for_classifier,
+            spread_pts=spread_pts,
+        )
+    except Exception:
+        _LOG.exception("classify_regime_v2 crashed for %s", symbol)
+        return None
+
+    try:
+        market_state = aggregate_from_stores(
+            symbol=symbol,
+            now=now,
+            market_features=features,
+            regime_assessment=assessment,
+            ea_state_store=ea_store,
+        )
+    except Exception:
+        _LOG.exception("aggregate_from_stores crashed for %s", symbol)
+        return None
+
+    try:
+        params = derive_envelope_params(market_state, prev_envelope=prev_envelope)
+    except Exception:
+        _LOG.exception("derive_envelope_params crashed for %s", symbol)
+        return None
+
+    return params.to_kwargs(), assessment.regime, assessment.confidence, assessment.regime
+
+
+def build_envelope(
+    symbol: str,
+    features: MarketFeatures,
+    *,
+    prev_regime: MarketRegimeAI | None = None,
+    now: datetime | None = None,
+    news_classification: NewsClassification | None = None,
+    current_exposure_lots: float = 0.0,
+    liquidity_sweep: Any | None = None,
+    filter_result: FilterResult | None = None,
+    enable_debate: bool = False,
+    exit_decider_chat_fn: ChatFn | None = None,
+    cost_tracker: CostTracker | None = None,
+    # Regime / confidence overrides — when rule_engine fires the
+    # envelope reports the v2 assessment values rather than the legacy
+    # mapping / tf_router heuristics.
+    regime_override: RegimeV2 | None = None,
+    confidence_override: float | None = None,
+    prev_regime_v2: RegimeV2 | None = None,
+    # Tri-state transition_lock override:
+    #   override_provided=False → fall back to legacy compute_lock_until
+    #   override_provided=True  → use override verbatim (None == "no lock")
+    transition_lock_until_override: datetime | None = None,
+    transition_lock_override_provided: bool = False,
+    # Dynamic-params overrides (rule_engine.DynamicParams.to_kwargs()).
+    mode: Mode | None = None,
+    hedgerock_enabled: bool | None = None,
+    risk_tier: RiskTier | None = None,
+    cooldown_until: datetime | None = None,
+    lot_factor: float | None = None,
+    grid_multiplier: float | None = None,
+    max_next_lot: float | None = None,
+    takeprofit_points: int | None = None,
+    stoploss_points: int | None = None,
+    recovery_multiplier: float | None = None,
+    max_orders_buy: int | None = None,
+    max_orders_sell: int | None = None,
+    reason: str | None = None,
+) -> SignalEnvelope:
+    """Build a :class:`SignalEnvelope` from a market snapshot.
+
+    All non-``symbol`` / ``features`` arguments are keyword-only —
+    every one carries dimensional weight (timestamps, news context,
+    exposure, …) and positional args risked silent argument-mixing.
+    """
+    ts = now if now is not None else datetime.now(timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+
+    sym = symbol.upper()
+    regime_v2: RegimeV2 = (
+        regime_override
+        if regime_override is not None
+        else (regime_v1_to_v2(features.regime) or "unknown")
+    )
+    prev_v2: RegimeV2 | None = (
+        prev_regime_v2
+        if prev_regime_v2 is not None
+        else regime_v1_to_v2(prev_regime)
+    )
+
+    route: TimeframeRoute = route_timeframe(
+        volatility_rank=features.volatility_rank,
+        hh_count=features.hh_count,
+        ll_count=features.ll_count,
+        h4_trend_bars=features.h4_trend_bars,
+    )
+
+    if transition_lock_override_provided:
+        lock_until = transition_lock_until_override
+    else:
+        lock_until = compute_lock_until(prev_regime, features.regime, ts)
+
+    # Filter halt → push transition lock 5 minutes forward.
+    if filter_result is not None and getattr(filter_result, "halt", False):
+        filter_lock = ts + timedelta(seconds=_FILTER_HALT_LOCK_SECONDS)
+        if lock_until is None or filter_lock > lock_until:
+            lock_until = filter_lock
+
+    # News context with safe defaults.
+    news_intensity: NewsIntensity = "none"
+    news_direction: NewsDirection | None = None
+    news_event_name: str | None = None
+    if news_classification is not None:
+        news_intensity = news_classification.event.intensity
+        news_direction = news_classification.direction
+        news_event_name = news_classification.event.name
+
+    # Exit directive — hard-rule first, optional debate.
+    exit_decision: ExitDecision = decide_exit(
+        regime=features.regime,
+        prev_regime=prev_regime,
+        news_classification=news_classification,
+        current_exposure_lots=current_exposure_lots,
+        enable_debate=enable_debate,
+        chat_fn=exit_decider_chat_fn,
+        cost_tracker=cost_tracker,
+    )
+
+    # Liquidity-sweep is advisory. Accept either a 4-tuple
+    # ``(active, direction, distance_pts, confidence)`` or an object
+    # with the same fields exposed (the production
+    # ``liquidity_provider`` returns a payload object).
+    sweep_active: bool | None = None
+    sweep_direction: Literal["bullish_reversal", "bearish_reversal"] | None = None
+    sweep_distance: float | None = None
+    sweep_confidence: float | None = None
+    if liquidity_sweep is not None:
+        if isinstance(liquidity_sweep, tuple):
+            sa, sd_raw, dist, conf = liquidity_sweep
+        else:
+            sa = getattr(liquidity_sweep, "active", None)
+            sd_raw = getattr(liquidity_sweep, "direction", None)
+            dist = getattr(liquidity_sweep, "distance_pts", None)
+            conf = getattr(liquidity_sweep, "confidence", None)
+        if sa:
+            sweep_active = True
+            if sd_raw in ("bullish_reversal", "bearish_reversal"):
+                sweep_direction = sd_raw  # type: ignore[assignment]
+            sweep_distance = dist
+            sweep_confidence = conf
+
+    # Confidence — caller may override (rule_engine path uses the v2
+    # assessment confidence); else fall back to the tf_router readout.
+    if confidence_override is not None:
+        confidence = max(0.0, min(1.0, float(confidence_override)))
+    else:
+        confidence = max(0.0, min(1.0, float(route.confidence)))
+
+    return SignalEnvelope(
+        symbol=sym,
+        schema_version=SCHEMA_VERSION,
+        generated_at=ts,
+        active_timeframe=route.timeframe,
+        active_strategy_id=build_strategy_id(sym, route.timeframe, regime_v2),
+        regime=regime_v2,
+        prev_regime=prev_v2,
+        confidence=confidence,
+        mode=mode if mode is not None else "observe",
+        hedgerock_enabled=(
+            hedgerock_enabled if hedgerock_enabled is not None else False
+        ),
+        risk_tier=risk_tier if risk_tier is not None else "observe",
+        transition_lock_until_ts=lock_until,
+        cooldown_until=cooldown_until,
+        exit_directive=exit_decision.directive,
+        lot_factor=lot_factor if lot_factor is not None else 1.0,
+        grid_multiplier=(
+            grid_multiplier if grid_multiplier is not None else 1.0
+        ),
+        max_next_lot=max_next_lot if max_next_lot is not None else 0.05,
+        takeprofit_points=(
+            takeprofit_points if takeprofit_points is not None else 600
+        ),
+        stoploss_points=(
+            stoploss_points if stoploss_points is not None else 3900
+        ),
+        recovery_multiplier=(
+            recovery_multiplier if recovery_multiplier is not None else 1.2
+        ),
+        max_orders_buy=(
+            max_orders_buy if max_orders_buy is not None else 2
+        ),
+        max_orders_sell=(
+            max_orders_sell if max_orders_sell is not None else 2
+        ),
+        news_intensity=news_intensity,
+        news_direction=news_direction,
+        news_event_name=news_event_name,
+        liquidity_sweep_active=sweep_active,
+        liquidity_sweep_direction=sweep_direction,
+        liquidity_sweep_distance_pts=sweep_distance,
+        liquidity_sweep_confidence=sweep_confidence,
+        reason=reason if reason is not None else route.reason,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Safe-getter helpers — providers can be ``None`` or flaky; never crash.
+# ---------------------------------------------------------------------------
+
+
+def _safe_get_news_classification(
+    provider: NewsFeaturesProvider | None, symbol: str,
+) -> NewsClassification | None:
+    if provider is None:
+        return None
+    try:
+        return provider.get_news_classification(symbol)
+    except NewsUnavailable:
+        return None
+    except Exception:  # pragma: no cover - defensive
+        _LOG.exception("news provider crashed for %s; ignoring", symbol)
+        return None
+
+
+def _safe_get_liquidity_sweep(
+    provider: LiquiditySweepProvider | None, symbol: str,
+) -> tuple[bool, str | None, float | None, float | None] | None:
+    if provider is None:
+        return None
+    try:
+        return provider.get_liquidity_sweep(symbol)
+    except Exception:  # pragma: no cover
+        _LOG.exception("liquidity_sweep provider crashed for %s", symbol)
+        return None
+
+
+def _safe_get_exposure(
+    provider: ExposureProvider | None, symbol: str,
+) -> float:
+    if provider is None:
+        return 0.0
+    try:
+        return float(provider.get_exposure_lots(symbol))
+    except Exception:
+        _LOG.warning("exposure provider crashed for %s; assuming flat", symbol)
+        return 0.0
+
+
+def _safe_get_filter_inputs(
+    provider: FilterInputsProvider | None, symbol: str,
+) -> FilterInputs | None:
+    if provider is None:
+        return None
+    try:
+        return provider.get_filter_inputs(symbol)
+    except Exception:  # pragma: no cover
+        _LOG.exception("filter_inputs provider crashed for %s", symbol)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# FastAPI factory
+# ---------------------------------------------------------------------------
+
+
+def create_app(
+    market_features_provider: MarketFeaturesProvider,
+    prev_regime_store: PrevRegimeStore | None = None,
+    *,
+    store: PrevRegimeStore | None = None,
+    prev_regime_v2_store: PrevRegimeV2Store | None = None,
+    news_provider: NewsFeaturesProvider | None = None,
+    exposure_provider: ExposureProvider | None = None,
+    liquidity_sweep_provider: LiquiditySweepProvider | None = None,
+    liquidity_provider: Any | None = None,
+    filter_inputs_provider: FilterInputsProvider | None = None,
+    enable_debate: bool = True,
+    enable_rule_engine: bool = False,
+    ea_state_store: EAStateStore | None = None,
+    envelope_store: Any | None = None,
+    exit_decider_chat_fn: ChatFn | None = None,
+    cost_tracker: CostTracker | None = None,
+    symbol_whitelist: frozenset[str] | None = None,
+    market_provider_label: str = "unknown",
+    fusion_controller: Any | None = None,
+) -> FastAPI:
+    """Build the FastAPI app the EA polls.
+
+    The factory is dependency-injection friendly so tests can wire
+    fakes for every external seam (features / news / exposure /
+    liquidity / chat).
+    """
+    app = FastAPI(title="HedgeRock Decision Server", version=SCHEMA_VERSION)
+    legacy_store = prev_regime_store or store or PrevRegimeStore()
+    v2_store = prev_regime_v2_store or PrevRegimeV2Store()
+    ea_store = ea_state_store or EAStateStore()
+    if envelope_store is not None:
+        env_store: Any = envelope_store
+    else:
+        try:
+            from smc.hedgerock.envelope_store import EnvelopeStore
+            env_store = EnvelopeStore()
+        except ImportError:  # pragma: no cover
+            env_store = None
+    whitelist = symbol_whitelist or frozenset({"XAUUSD"})
+
+    @app.get("/healthz")
+    def _healthz() -> JSONResponse:
+        return JSONResponse(
+            {
+                "status": "ok",
+                "schema_version": SCHEMA_VERSION,
+            }
+        )
+
+    @app.get("/status")
+    def _status() -> JSONResponse:
+        symbols = sorted(whitelist)
+        tracked = {sym: legacy_store.get(sym) for sym in symbols}
+        tracked_v2 = {
+            sym: v2_store.get(sym)
+            for sym in symbols
+            if v2_store.get(sym) is not None
+        }
+        latest_ea: dict[str, dict] = {}
+        records = ea_store.snapshot_records()
+        now_ts = datetime.now(timezone.utc)
+        for sym, rec in records.items():
+            try:
+                state_dict = rec.state.to_dict()
+                latest_ea[sym] = {
+                    "state": state_dict,
+                    "recorded_at": rec.recorded_at.isoformat(),
+                    "age_seconds": max(
+                        0.0,
+                        (now_ts - rec.recorded_at).total_seconds(),
+                    ),
+                }
+            except Exception:  # pragma: no cover
+                continue
+        return JSONResponse(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "symbols": symbols,
+                "tracked_regimes": tracked,
+                "news_provider_attached": news_provider is not None,
+                "exposure_provider_attached": exposure_provider is not None,
+                "liquidity_sweep_provider_attached":
+                    liquidity_sweep_provider is not None,
+                "liquidity_provider_attached":
+                    liquidity_provider is not None,
+                "filter_inputs_provider_attached":
+                    filter_inputs_provider is not None,
+                "debate_enabled": bool(enable_debate),
+                "rule_engine_enabled": bool(enable_rule_engine),
+                "market_provider_label": market_provider_label,
+                "ea_state_store_attached": True,
+                "latest_ea_states": latest_ea,
+                "tracked_v2_regimes": tracked_v2,
+            }
+        )
+
+    @app.get("/signal")
+    def _signal(
+        request: Request,
+        symbol: str = Query(..., min_length=1),
+    ) -> JSONResponse:
+        sym = symbol.upper()
+        if sym not in whitelist:
+            raise HTTPException(status_code=404, detail=f"unknown symbol {sym}")
+
+        try:
+            features = market_features_provider.get_features(sym)
+        except FeaturesUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+
+        # Pull EA-state query params (extra params beyond ``symbol``).
+        ea_kwargs: dict[str, Any] = {}
+        for key in (
+            "equity", "balance", "dd_pct", "free_margin", "margin_level",
+            "open_lots", "open_positions", "floating_pnl", "spread_pts",
+            "consec_losses", "recent_closed_pnl", "recent_sample_count",
+        ):
+            raw = request.query_params.get(key)
+            if raw is None or raw == "":
+                continue
+            try:
+                if key in ("open_positions", "spread_pts", "consec_losses",
+                           "recent_sample_count"):
+                    ea_kwargs[key] = int(raw)
+                else:
+                    ea_kwargs[key] = float(raw)
+            except (TypeError, ValueError):
+                continue
+        if ea_kwargs:
+            ea_state = build_ea_state(**ea_kwargs)
+            if ea_state is not None:
+                ea_store.set(sym, ea_state)
+
+        prev = legacy_store.get(sym)
+        news = _safe_get_news_classification(news_provider, sym)
+        exposure_lots = _safe_get_exposure(exposure_provider, sym)
+        sweep_payload: Any | None = None
+        if liquidity_provider is not None:
+            try:
+                sweep_payload = liquidity_provider.get_active_sweep(sym)
+            except Exception:
+                _LOG.exception("liquidity_provider crashed for %s", sym)
+                sweep_payload = None
+        if sweep_payload is None:
+            sweep_payload = _safe_get_liquidity_sweep(
+                liquidity_sweep_provider, sym,
+            )
+
+        # Filter inputs → halt-style transition lock push.
+        filter_result: FilterResult | None = None
+        fi = _safe_get_filter_inputs(filter_inputs_provider, sym)
+        if fi is not None:
+            try:
+                filter_result = compute_filters(fi)
+            except Exception:
+                _LOG.exception("compute_filters crashed for %s", sym)
+                filter_result = None
+
+        ts_now = datetime.now(timezone.utc)
+
+        # ----- fusion_controller path (highest priority) -----
+        # 若注入了 FusionController，绕过 legacy rule_engine path，直接
+        # 调用 fusion 全链路。向后兼容：fusion_controller 缺省 → 走老路径。
+        if fusion_controller is not None:
+            prev_env_for_fusion = (
+                env_store.get(sym) if env_store is not None else None
+            )
+            try:
+                spread_for_fusion: int | None = None
+                rec_for_fusion = ea_store.get_record(sym)
+                if (
+                    rec_for_fusion is not None
+                    and rec_for_fusion.state.spread_pts is not None
+                ):
+                    spread_for_fusion = rec_for_fusion.state.spread_pts
+                outcome = fusion_controller.on_signal_request(
+                    symbol=sym,
+                    features=features,
+                    ea_state_store=ea_store,
+                    prev_envelope=prev_env_for_fusion,
+                    news_classification=news,
+                    spread_pts=spread_for_fusion,
+                    exposure_lots=exposure_lots,
+                    liquidity_sweep=sweep_payload,
+                    filter_result=filter_result,
+                    now=ts_now,
+                )
+            except Exception:  # pragma: no cover
+                _LOG.exception("fusion_controller crashed for %s", sym)
+                outcome = None
+            if outcome is not None:
+                env = outcome.envelope
+                # 持久化 regime + envelope，让下一次 poll 看到 prev
+                legacy_store.set(sym, features.regime)
+                v2_store.set(sym, outcome.post_v2_regime)
+                if env_store is not None:
+                    env_store.set(sym, env)
+                return JSONResponse(env.model_dump(mode="json"))
+            # outcome=None（fusion crash）→ fallthrough 到 legacy 路径
+
+        # ----- rule_engine wiring (enable_rule_engine=True) -----
+        rule_kwargs: dict[str, Any] = {}
+        regime_override: RegimeV2 | None = None
+        confidence_override: float | None = None
+        prev_v2_for_envelope: RegimeV2 | None = v2_store.get(sym)
+        v2_lock_override: datetime | None = None
+        v2_lock_provided = False
+        post_v2_regime: RegimeV2 | None = None
+        if enable_rule_engine:
+            prev_env = env_store.get(sym) if env_store is not None else None
+            rk = _run_rule_engine(
+                symbol=sym, features=features, news=news,
+                ea_store=ea_store, prev_envelope=prev_env, now=ts_now,
+            )
+            if rk is not None:
+                (rule_kwargs, regime_override, confidence_override,
+                 post_v2_regime) = rk
+                # Compute v2 transition lock (overrides legacy lock).
+                v2_lock_override = compute_lock_until_v2(
+                    prev_v2_for_envelope, regime_override, ts_now,
+                )
+                # Carryover: if the previous envelope still has a
+                # transition lock in the future, take max(fresh, prev).
+                if prev_env is not None and prev_env.transition_lock_until_ts:
+                    prev_lock = prev_env.transition_lock_until_ts
+                    if prev_lock > ts_now:
+                        if v2_lock_override is None or prev_lock > v2_lock_override:
+                            v2_lock_override = prev_lock
+                v2_lock_provided = True
+
+        env = build_envelope(
+            sym, features,
+            prev_regime=prev,
+            now=ts_now,
+            news_classification=news,
+            current_exposure_lots=exposure_lots,
+            liquidity_sweep=sweep_payload,
+            filter_result=filter_result,
+            enable_debate=enable_debate,
+            exit_decider_chat_fn=exit_decider_chat_fn,
+            cost_tracker=cost_tracker,
+            regime_override=regime_override,
+            confidence_override=confidence_override,
+            prev_regime_v2=prev_v2_for_envelope,
+            transition_lock_until_override=v2_lock_override,
+            transition_lock_override_provided=v2_lock_provided,
+            **rule_kwargs,
+        )
+
+        # Persist regimes for next poll's transition computation.
+        legacy_store.set(sym, features.regime)
+        if post_v2_regime is not None:
+            v2_store.set(sym, post_v2_regime)
+        elif enable_rule_engine and regime_override is not None:
+            v2_store.set(sym, regime_override)
+        if env_store is not None:
+            env_store.set(sym, env)
+
+        return JSONResponse(env.model_dump(mode="json"))
+
+    return app
+
+
+# ---------------------------------------------------------------------------
+# Tier-1 unseal — read-only live-parameter snapshot consumed by the
+# self-evolution sidecar (replay_validator + candidate_generator).
+# ---------------------------------------------------------------------------
+
+
+_CURRENT_LIVE_PARAMETERS: Mapping[str, float] = MappingProxyType(
+    {
+        "confidence_threshold_observe": 0.55,
+        "confidence_threshold_aggressive": 0.80,
+        "confidence_threshold_range_2": 0.65,
+        "halt_expiry_observe_hours": 4.0,
+    }
+)
+
+
+LIVE_PARAMETER_KEYS: frozenset[str] = frozenset(
+    _CURRENT_LIVE_PARAMETERS.keys()
+)
+
+
+def get_live_parameters() -> dict[str, float]:
+    """Return a fresh dict copy of the live parameter snapshot.
+
+    The returned object is safe to mutate locally; mutation does not
+    propagate back to the module-level constant.
+    """
+    return dict(_CURRENT_LIVE_PARAMETERS)

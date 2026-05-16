@@ -125,6 +125,25 @@ _RANGE_INVALIDATING_REGIMES: frozenset[str] = (
     _BLOCK_LONG_REGIMES | _BLOCK_SHORT_REGIMES
 )
 
+# R10 P2.2 — ai_direction entry-veto threshold. When the DirectionEngine
+# signals a direction with confidence at/above this floor AND the proposed
+# setup direction opposes it, _build_setup rejects the setup. Tagged
+# ``_PHASE2_CALIBRATION_PENDING`` until live-bake gate_funnel.json validates.
+_AI_DIRECTION_ENTRY_GATE_CONF_FLOOR: float = 0.55  # _PHASE2_CALIBRATION_PENDING
+
+
+def _ai_direction_opposes(ai_direction: str | None, setup_direction: str) -> bool:
+    """True iff the AI directional view directly contradicts the setup direction.
+
+    ``neutral`` and ``None`` never oppose (no veto). Strict mapping: bullish
+    opposes shorts, bearish opposes longs.
+    """
+    if ai_direction == "bullish" and setup_direction == "short":
+        return True
+    if ai_direction == "bearish" and setup_direction == "long":
+        return True
+    return False
+
 
 def _min_range_width_resolved(cfg: InstrumentConfig, current_price: float) -> float:
     """Resolve min range width: XAU uses absolute points, BTC uses pct of price.
@@ -556,6 +575,7 @@ class RangeTrader:
         trend_filter_enabled: bool = False,
         ai_regime_gate_enabled: bool = False,
         require_regime_valid: bool = False,
+        ai_direction_entry_gate_enabled: bool = False,
     ) -> None:
         from smc.instruments import get_instrument_config
         if cfg is None:
@@ -596,6 +616,8 @@ class RangeTrader:
         self._trend_filter_enabled: bool = trend_filter_enabled
         self._ai_regime_gate_enabled: bool = ai_regime_gate_enabled
         self._require_regime_valid: bool = require_regime_valid
+        # R10 P2.2: ai_direction entry-veto gate (default OFF for live safety).
+        self._ai_direction_entry_gate_enabled: bool = ai_direction_entry_gate_enabled
 
     # ------------------------------------------------------------------
     # Cooldown persistence helpers (Round 5 T0, P0-4)
@@ -759,6 +781,8 @@ class RangeTrader:
         m15_df: object = None,
         d1_df: object = None,
         ai_regime_assessment: "AIRegimeAssessment | None" = None,
+        ai_direction: str | None = None,
+        ai_direction_confidence: float = 0.0,
     ) -> tuple[RangeSetup, ...]:
         """Generate mean-reversion setups at range boundaries.
 
@@ -787,6 +811,13 @@ class RangeTrader:
         - TRANSITION leaves both untouched but ``_build_setup`` raises the
           minimum RR floor from 1.2 to 2.0 to demand higher payoff for the
           ambiguous regime.
+
+        R10 P2.2: ``ai_direction`` (raw "bullish"/"bearish"/"neutral" string
+        from the DirectionEngine) plus ``ai_direction_confidence`` route
+        through to ``_build_setup``. When the entry-gate flag is on AND the
+        AI direction confidently opposes a setup direction, that setup is
+        rejected with a ``{direction}_ai_direction_blocked`` diagnostic key.
+        Default behavior (gate off) is byte-identical to R9.
         """
         setups: list[RangeSetup] = []
         # Round 9 P0-A: clear stale trend-filter diagnostic keys from prior
@@ -838,6 +869,8 @@ class RangeTrader:
                 m15_df=m15_df,
                 d1_df=d1_df,
                 ai_regime_assessment=ai_regime_assessment,
+                ai_direction=ai_direction,
+                ai_direction_confidence=ai_direction_confidence,
             )
             if long_setup is not None:
                 setups.append(long_setup)
@@ -855,6 +888,8 @@ class RangeTrader:
                 m15_df=m15_df,
                 d1_df=d1_df,
                 ai_regime_assessment=ai_regime_assessment,
+                ai_direction=ai_direction,
+                ai_direction_confidence=ai_direction_confidence,
             )
             if short_setup is not None:
                 setups.append(short_setup)
@@ -886,13 +921,14 @@ class RangeTrader:
             else:
                 reason_if_zero = "no_m15_choch_any_boundary"
 
-        # Preserve any P0-A trend-filter keys that _build_setup may have
-        # written during this call (it writes before returning None, then
-        # we'd otherwise overwrite below).
+        # Preserve any P0-A trend-filter and R10 P2.2 ai-direction keys that
+        # _build_setup may have written during this call (it writes before
+        # returning None, then we'd otherwise overwrite below).
         prior_trend_filter_keys = {
             k: v
             for k, v in self._last_setups_diagnostic.items()
             if k.endswith("_trend_filter_blocked")
+            or k.endswith("_ai_direction_blocked")
         }
         self._last_setups_diagnostic = {
             "current_price": current_price,
@@ -1088,6 +1124,8 @@ class RangeTrader:
         m15_df: object = None,
         d1_df: object = None,
         ai_regime_assessment: "AIRegimeAssessment | None" = None,
+        ai_direction: str | None = None,
+        ai_direction_confidence: float = 0.0,
     ) -> RangeSetup | None:
         """Build a single mean-reversion setup with M15 CHoCH confirmation.
 
@@ -1106,6 +1144,14 @@ class RangeTrader:
         Round 9 P0-B: ``ai_regime_assessment`` adjusts the minimum RR
         threshold. TRANSITION + confidence >= 0.6 raises the floor from
         1.2 to 2.0; all other regimes keep the legacy floor.
+
+        R10 P2.2: ``ai_direction`` + ``ai_direction_confidence`` carry the
+        DirectionEngine's primary read.  When the entry-gate flag is on AND
+        the AI direction confidently opposes ``direction`` (per
+        ``_ai_direction_opposes``), the build is rejected and a
+        ``{direction}_ai_direction_blocked`` diagnostic key records the AI
+        view.  Independent signal source from R9 P0-B (regime classifier);
+        a setup may pass the regime gate but still fail this veto.
         """
         bp = boundary_pct if boundary_pct is not None else self._boundary_pct
 
@@ -1117,6 +1163,23 @@ class RangeTrader:
             elapsed = (datetime.now(tz=timezone.utc) - last_ts).total_seconds()
             if elapsed < 1800:  # 30 minutes
                 return None
+
+        # R10 P2.2: ai_direction entry-veto — runs before the D1 trend filter
+        # because the DirectionEngine signal is computed cheaply upstream and
+        # we want to short-circuit obvious contradictions first. Default-OFF;
+        # when ON requires conf >= 0.55 AND a direct opposition.
+        if (
+            self._ai_direction_entry_gate_enabled
+            and ai_direction is not None
+            and ai_direction_confidence >= _AI_DIRECTION_ENTRY_GATE_CONF_FLOOR
+            and _ai_direction_opposes(ai_direction, direction)
+        ):
+            self._last_setups_diagnostic[
+                f"{direction}_ai_direction_blocked"
+            ] = (
+                f"ai_dir={ai_direction} conf={ai_direction_confidence:.2f}"
+            )
+            return None
 
         # Round 9 P0-A: D1 SMA50 trend filter — block obvious counter-trend
         # range entries. Only fires when the gate is enabled AND we have

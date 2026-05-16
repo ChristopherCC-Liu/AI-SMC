@@ -103,6 +103,9 @@ class DrawdownGuard:
         available_risk_pct = max(self._max_daily_loss_pct - daily_loss_pct, 0.0)
         used_risk_pct = min(daily_loss_pct, self._max_daily_loss_pct)
 
+        # R10 P1.1: every halt tier in this guard blocks new opens but
+        # leaves existing positions to their own SL/TP/trail. force_close
+        # is reserved for a future emergency tier (ratio<=0.80).
         return RiskBudget(
             can_trade=can_trade,
             available_risk_pct=round(available_risk_pct, 4),
@@ -110,4 +113,6 @@ class DrawdownGuard:
             daily_loss_pct=round(daily_loss_pct, 4),
             total_drawdown_pct=round(total_drawdown_pct, 4),
             rejection_reason=rejection_reason,
+            block_opens=not can_trade,
+            force_close=False,
         )

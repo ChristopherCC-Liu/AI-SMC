@@ -1,0 +1,23 @@
+{
+  "incident": {
+    "slug": "apr_21_2026_range_break",
+    "occurred_at_utc": "2026-04-21T09:47:00+00:00",
+    "summary": "RangeTrader emitted a long support_bounce BUY at $4779 while the D1 SMA50 slope was -0.057 %/bar (bearish) and close was 2.1% below SMA50. The R9 P0-A long-trend filter (range_trader._trend_filter_should_block) was added to block longs when D1 trend is materially down.",
+    "evidence": "Production journal entry showed `RANGE BUY direction=long entry=4779.x` with the broken-range D1 context; trade SL'd within an hour."
+  },
+  "candidate_setup": {
+    "direction": "long",
+    "entry_price": 4779.0,
+    "trigger": "support_bounce"
+  },
+  "trend_signals": {
+    "slope_pct_per_bar": -0.057,
+    "close_vs_sma50_pct": -2.1,
+    "comment": "Both magnitudes exceed the R9 P0-A thresholds (|slope|>=0.05 AND |close_distance|>=1.0). _trend_filter_should_block must return True for direction=long."
+  },
+  "thresholds": {
+    "slope_threshold_pct_per_bar": 0.05,
+    "close_threshold_pct": 1.0,
+    "comment": "Documented here so the fixture is self-contained — actual constants live in smc.strategy.range_trader._TREND_FILTER_*"
+  }
+}

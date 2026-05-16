@@ -42,6 +42,7 @@ class RiskBudget(BaseModel):
     """Immutable snapshot of the account's risk budget state.
 
     Returned by :class:`~smc.risk.drawdown_guard.DrawdownGuard.check_budget`
+    and :class:`~smc.risk.persistent_drawdown_guard.PersistentDrawdownGuard.check_budget`
     to indicate whether the account is cleared to trade.
 
     Attributes:
@@ -51,6 +52,14 @@ class RiskBudget(BaseModel):
         daily_loss_pct: Today's realised loss as a percentage of balance.
         total_drawdown_pct: Current drawdown from peak equity.
         rejection_reason: Human-readable reason when can_trade is False.
+        block_opens: True when new positions must be blocked. Existing
+            positions continue to be managed by their own SL/TP/trail.
+            Set by every halt tier (R10 P1.1+).
+        force_close: True only at the emergency tier (reserved for a
+            future ratio<=0.80 trip). When True the operator's executor
+            should market-close all positions immediately. None of the
+            tiers shipped in R10 set this flag — it exists so callers can
+            structure their handling now and avoid a breaking change later.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -61,3 +70,5 @@ class RiskBudget(BaseModel):
     daily_loss_pct: float
     total_drawdown_pct: float
     rejection_reason: str | None = None
+    block_opens: bool = False
+    force_close: bool = False
