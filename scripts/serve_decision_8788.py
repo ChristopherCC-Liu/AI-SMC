@@ -180,11 +180,98 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--disable-news", action="store_true")
     parser.add_argument("--disable-filters", action="store_true")
     parser.add_argument(
+        "--enable-fusion",
+        action="store_true",
+        help=(
+            "enable FusionController — wires SMC + AI direction + macro + "
+            "anomaly shield + promotion gates on top of rule_engine. Adds "
+            "fusion-aware lot_factor overlay and evidence chain. Backward "
+            "compatible: when disabled, legacy rule_engine path is used."
+        ),
+    )
+    parser.add_argument(
+        "--fusion-evidence-dir",
+        default=None,
+        help=(
+            "directory for fusion evidence chain JSONL (audit trail). "
+            "Defaults to <repo>/logs/fusion/ when --enable-fusion set."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default="info",
         choices=["debug", "info", "warning", "error"],
     )
     return parser.parse_args(argv)
+
+
+# ---------------------------------------------------------------------------
+# Fusion controller builder
+# ---------------------------------------------------------------------------
+
+
+def _build_fusion_controller(
+    *,
+    evidence_dir: str | None,
+) -> object:
+    """Build a FusionController with safe-default providers.
+
+    第一阶段部署：不接入 bars_provider / AI direction engine —— 让
+    SMC/AI 子组件优雅降级到 None；fusion 主要表现为
+    1) regime_v2 + macro bias 加权融合（macro 失败也会 graceful）；
+    2) anomaly shield + gate snapshot 验证;
+    3) fusion-aware lot_factor / risk_tier overlay;
+    4) 完整 audit JSONL.
+
+    第二阶段可以注入 ForexDataLake 的 bars_provider 和 DirectionEngine。
+    """
+    # Lazy import — only when fusion is enabled
+    from smc.fusion import FusionConfig, FusionController
+    from smc.fusion.decision import DecisionLayer
+    from smc.fusion.execution import ExecutionLayer
+    from smc.fusion.perception import PerceptionLayer
+    from smc.fusion.validation import ValidationLayer
+
+    if evidence_dir is None:
+        evidence_dir = str(Path(__file__).resolve().parent.parent / "logs" / "fusion")
+    Path(evidence_dir).mkdir(parents=True, exist_ok=True)
+
+    config = FusionConfig(
+        evidence_dir=evidence_dir,
+        # 一期保守阈值 —— 比 FusionConfig 默认略宽，避免拦截过多
+        confidence_floor=0.25,
+        # 一期没接入 AI / SMC / Macro provider，给 SMC 留位但权重置 0
+        weight_ai=0.0,         # 无 direction engine → 关掉权重避免噪音
+        weight_macro=0.0,      # 无 macro layer → 关掉
+        weight_smc=0.0,        # 无 bars provider → 关掉
+        weight_news=0.10,
+    )
+
+    # Try to attach a MacroLayer if FRED key available (graceful skip otherwise)
+    macro_layer = None
+    fred_key = os.environ.get("FRED_API_KEY")
+    if fred_key:
+        try:
+            from smc.ai.macro_layer import MacroLayer
+            macro_layer = MacroLayer(fred_api_key=fred_key)
+            config = FusionConfig(
+                evidence_dir=config.evidence_dir,
+                confidence_floor=config.confidence_floor,
+                weight_ai=0.0,
+                weight_macro=0.25,   # macro 已接入 → 启用权重
+                weight_smc=0.0,
+                weight_news=0.10,
+            )
+        except Exception:
+            logger.warning("MacroLayer init failed; fusion will run without macro")
+
+    return FusionController(
+        perception=PerceptionLayer(config=config),
+        decision=DecisionLayer(config=config, macro_layer=macro_layer),
+        validation=ValidationLayer(config=config),
+        execution=ExecutionLayer(config=config),
+        config=config,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -219,6 +306,18 @@ def main(argv: list[str] | None = None) -> int:
         CostTracker(daily_budget_usd=args.daily_budget_usd) if args.enable_debate else None
     )
 
+    fusion_controller = None
+    if args.enable_fusion:
+        try:
+            fusion_controller = _build_fusion_controller(
+                evidence_dir=args.fusion_evidence_dir,
+            )
+        except Exception:
+            logger.exception(
+                "fusion_controller init failed; falling back to legacy path"
+            )
+            fusion_controller = None
+
     app = create_app(
         market_provider,
         news_provider=news_provider,
@@ -228,6 +327,7 @@ def main(argv: list[str] | None = None) -> int:
         enable_rule_engine=True,  # Phase C — production wiring
         cost_tracker=cost_tracker,
         enable_debate=args.enable_debate,
+        fusion_controller=fusion_controller,
     )
 
     print(  # noqa: T201
@@ -238,6 +338,7 @@ def main(argv: list[str] | None = None) -> int:
         f"  exposure_provider:      {'MT5BrokerExposureProvider' if exposure_provider else 'None (flat)'}\n"
         f"  filter_inputs_provider: {'StaticFilterInputsProvider' if filter_inputs_provider else 'None'}\n"
         f"  debate_enabled:         {args.enable_debate}\n"
+        f"  fusion_controller:      {'enabled' if fusion_controller else 'disabled (legacy)'}\n"
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
     return 0
