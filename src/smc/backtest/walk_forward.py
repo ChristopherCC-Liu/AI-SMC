@@ -8,7 +8,7 @@ overfitting by ensuring the strategy is always evaluated on unseen data.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
 import polars as pl
@@ -71,14 +71,21 @@ def walk_forward_oos(
     train_months: int = 12,
     test_months: int = 3,
     step_months: int = 3,
+    embargo_days: int = 0,
 ) -> list[BacktestResult]:
     """Run walk-forward OOS validation with rolling windows.
 
-    Window layout::
+    Window layout (with an optional embargo gap to prevent leakage)::
 
-        |--- train (12mo) ---|--- test (3mo) ---|
-                         |--- train (12mo) ---|--- test (3mo) ---|
+        |--- train (12mo) ---|<embargo>|--- test (3mo) ---|
+                         |--- train (12mo) ---|<embargo>|--- test (3mo) ---|
                                           (slide by step_months)
+
+    The embargo is critical once an ML entry model is trained here: features
+    near the train/test boundary overlap in time (e.g. an M1 feature window or
+    a forward-looking label horizon), so the test set must start a gap after
+    train ends to avoid information bleed.  ``embargo_days=0`` reproduces the
+    legacy behaviour exactly.
 
     Args:
         engine: Configured backtest engine.
@@ -87,10 +94,14 @@ def walk_forward_oos(
         train_months: Length of training window in months.
         test_months: Length of test window in months.
         step_months: Slide step in months.
+        embargo_days: Gap (days) inserted between train end and test start.
+            Recommended >= 1 for any model trained inside the fold.
 
     Returns:
         List of BacktestResult, one per OOS window.
     """
+    if embargo_days < 0:
+        raise ValueError(f"embargo_days must be >= 0, got {embargo_days}")
     instrument = engine.config.instrument
     timeframe = Timeframe.M15
 
@@ -104,15 +115,18 @@ def walk_forward_oos(
     window_start = data_start
     while True:
         train_end = _add_months(window_start, train_months)
-        test_end = _add_months(train_end, test_months)
+        # Embargo gap: test starts a fixed number of days AFTER train ends so
+        # boundary-overlapping features/labels cannot leak into the OOS set.
+        test_start = train_end + timedelta(days=embargo_days)
+        test_end = _add_months(test_start, test_months)
 
         # Stop if the test window extends beyond available data
         if test_end > data_end:
             break
 
-        # Query train and test bars
+        # Query train and test bars (test excludes the embargoed gap)
         train_bars = lake.query(instrument, timeframe, window_start, train_end)
-        test_bars = lake.query(instrument, timeframe, train_end, test_end)
+        test_bars = lake.query(instrument, timeframe, test_start, test_end)
 
         if train_bars.is_empty() or test_bars.is_empty():
             window_start = _add_months(window_start, step_months)
