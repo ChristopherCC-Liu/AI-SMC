@@ -56,6 +56,45 @@ class TradeRecord(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Basket (bounded-averaging) trade records
+# ---------------------------------------------------------------------------
+
+
+class BasketLayerRecord(BaseModel):
+    """Immutable record of one layer inside a basket trade."""
+
+    model_config = ConfigDict(frozen=True)
+
+    open_ts: datetime
+    entry_price: float
+    lots: float
+
+
+class BasketTradeRecord(BaseModel):
+    """Immutable record of a completed basket (one or more averaged layers).
+
+    Carries the cost breakdown and the worst floating loss the basket reached,
+    so the tail-risk invariant (max_basket_loss <= basket_stop) and the
+    cost-drag gate can be audited per trade.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    open_ts: datetime
+    close_ts: datetime
+    direction: Literal["long", "short"]
+    layers: tuple[BasketLayerRecord, ...]
+    avg_entry: float
+    close_price: float
+    gross_pnl_usd: float
+    cost_usd: float
+    net_pnl_usd: float
+    close_reason: Literal["basket_tp", "basket_stop", "trail", "manual", "eod"]
+    max_floating_loss_usd: float
+    layer_count: int
+
+
+# ---------------------------------------------------------------------------
 # Equity Curve
 # ---------------------------------------------------------------------------
 
@@ -115,6 +154,8 @@ class WalkForwardSummary(BaseModel):
 __all__ = [
     "BacktestConfig",
     "TradeRecord",
+    "BasketLayerRecord",
+    "BasketTradeRecord",
     "EquityCurve",
     "BacktestResult",
     "WalkForwardSummary",
